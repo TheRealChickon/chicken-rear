@@ -39,10 +39,20 @@ The first release of Chicken Rear, a fork of Magic Rear 1.2.1 for the Xiaomi 17 
   while the phone lies face down.
 - A new settings page with a live preview of the back and settings filtered by the selected page.
 - Release builds keep the guard service's classes, and can be signed from a `keystore.properties`.
+- The APK carries its licence notices in `assets/licenses/`: `LICENSE`, `THIRD_PARTY_NOTICES.md`
+  and the SIL Open Font License texts of Departure Mono and Outfit.
+- The first-run privacy note and the texts shown before each permission describe what this fork
+  does (the Claude token exchange, the ChatGPT sign-in, the weather position, notes tied to a
+  place, the message text on the back, the sound level, the pin's one screenshot), and the note is
+  shown again after the update.
 
 ### Removed
 
 - Upstream's demo video, its Chinese README, and artwork that the fork does not draw.
+- The photograph of a record and the ACRNM mark that upstream's dashboard drew: neither came with
+  a licence to pass it on. The dashboard's record is a plain disc, and its corner mark shows only
+  an image of your own.
+- The project's Gradle name is `chicken-rear` (it was upstream's `claude-status`).
 
 ### Not included
 

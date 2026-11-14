@@ -27,11 +27,11 @@ NOT COVERED BY THIS LICENCE
 
 The Claude mascot artwork (the pixel figures in
 app/src/main/java/dev/kb896/aiusage/rear/MascotFrames.kt and what draws them)
-is Anthropic's, derived from https://ayotomcs.me/claude-mascot. The ACRNM
-maker's mark drawable (app/src/main/res/drawable/acrnm_ray.xml) is ACRNM's.
-Departure Mono is (c) Helena Zhang, under the SIL Open Font License. None of
-these are licensed by the copyright holders above, and none are covered by the
-MIT grant.
+is Anthropic's, derived from https://ayotomcs.me/claude-mascot. Departure
+Mono is Copyright 2022–2024 Helena Zhang and Outfit is Copyright 2021 The
+Outfit Project Authors, both under the SIL Open Font License 1.1, whose text is
+in app/src/main/assets/licenses/. None of these are licensed by the copyright
+holders above, and none are covered by the MIT grant.
 
 Code taken from other projects keeps its own licence; see
 THIRD_PARTY_NOTICES.md.

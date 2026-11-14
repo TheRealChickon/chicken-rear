@@ -8,8 +8,8 @@ running underneath and is covered, never replaced or removed.
 It is a fork of [Magic Rear](https://gitlab.com/896kb/ai-usage-companion) by 896kb (MIT), started
 from its release 1.2.1. Not affiliated with Xiaomi, Anthropic, OpenAI or the upstream project.
 
-**Status:** a personal project, built for and run on one phone model. The debug build is what has
-been used day to day; see [Known limits](#known-limits) for what has not been tried.
+**Status:** a personal project, built for and run on one phone model. See
+[Known limits](#known-limits) for what has not been tried.
 
 ## Contents
 
@@ -36,7 +36,7 @@ text is centred in the part you can see.
 | **Calls** | Ringing: decline and answer. In the call: speaker and end. Works with the phone's own dialer; other apps' calls use their notification buttons. |
 | **Timers** | The Xiaomi Clock's timer with the time left, water that sinks as it runs, pause / continue, and an X that cancels it. |
 | **Charging** | The battery level as a fluid that fills the panel, coloured by level, with the percent. Stays while the charger is in; at 100% it shows one short moment and leaves. |
-| **Notifications** | A new message takes the whole back for five seconds: the app's real icon, the sender and the text, in the app's colour. Pull down from the top edge for the waiting ones as a pile of pages; throw a page sideways to dismiss it on the phone too. |
+| **Notifications** | A new message takes the whole back for five seconds: the app's real icon, the sender and the text, in the app's colour. Pull down from the right half of the top edge for the waiting ones as a pile of pages; throw a page sideways to dismiss it on the phone too. |
 | **Pinned notes** | "Pin to back" from any text selection or share sheet. Swipe up on the face for the notes, sideways between them, the bin removes one. A note can be tied to a place and come back when you arrive there. The pin animation is Xiaomi's own or the app's. |
 | **Claude usage** | The five-hour and weekly limits of up to two accounts as vessels that fill, each with its reset time and an animated mascot. ChatGPT's Codex limits can be added as an account. |
 | **Always-on rules** | The back is lit while the phone is in use or lies face down, and off in a pocket, lying on its back, or after you switch it off by hand. At night (22:00 to 07:00 or Do Not Disturb) with the front off it goes dark after two minutes so the phone can sleep. Optional home detection by Wi-Fi. |
@@ -46,10 +46,12 @@ text is centred in the part you can see.
 
 ## What it needs
 
-- **Xiaomi 17 Pro Max**, model `2509FPN0BC`, China ROM, HyperOS 4 (Android 16). This is the only
+- **Xiaomi 17 Pro Max**, model `2509FPN0BC`, China ROM, HyperOS 4 (Android 17). This is the only
   phone the fork has run on. The pages are laid out for this panel and are untested elsewhere.
 - **[Shizuku](https://shizuku.rikka.app/)**, running, with Chicken Rear allowed in it. Everything
   on the back is drawn by a shell process that Shizuku starts; without it nothing of the app shows.
+  The development phone runs a fork of Shizuku; the original RikkaApps build has not been tried on
+  HyperOS 4.
 - **Xiaomi's rear-screen app** (`com.xiaomi.subscreencenter`, part of the ROM) installed and
   running, as it is out of the box. Chicken Rear covers it. The call, timer and music pages, the
   timer's water and Xiaomi's pin animation use pictures that are read from that app on your phone.
@@ -62,14 +64,17 @@ text is centred in the part you can see.
 
 No computer is needed for steps 1 to 7. Step 8 (the face clip) needs one.
 
+The HyperOS menu names below are approximate: on your HyperOS version or language a menu may be
+worded or placed a little differently. Chicken Rear's own buttons and rows are quoted as the app shows them.
+
 1. **Turn on developer options.** Settings, About phone: tap "OS version" seven times until it
    says you are a developer.
 2. **Turn on debugging.** Settings, Additional settings, Developer options: switch on
    "USB debugging", "USB debugging (Security settings)" and "Wireless debugging". The phone must be
    on Wi-Fi for wireless debugging. HyperOS asks you to confirm each of these, and the security
    setting asks for a Mi account.
-3. **Install Shizuku** from its [releases page](https://github.com/RikkaApps/Shizuku/releases) or
-   from Google Play, and open it.
+3. **Install Shizuku** from its [GitHub releases page](https://github.com/RikkaApps/Shizuku/releases)
+   (a China ROM has no Google Play), and open it.
 4. **Start Shizuku.** In Shizuku choose "Start via Wireless debugging", then "Pairing". Shizuku
    shows a notification. Go to Developer options, Wireless debugging, "Pair device with pairing
    code", and type the six digits into Shizuku's notification. Back in Shizuku, press "Start".
@@ -77,20 +82,28 @@ No computer is needed for steps 1 to 7. Step 8 (the face clip) needs one.
 5. **Install Chicken Rear.** Download `chicken-rear-<version>.apk` from this repository's
    [Releases](../../releases) on the phone and open it. Allow your browser or file manager to
    install apps when asked.
-6. **Open Chicken Rear** and allow it in Shizuku when the question appears ("Allow all the time").
-   The strip under the preview names anything that is still missing; "Fix" takes you there.
+6. **Open Chicken Rear** and press OK on the privacy note. The strip under the preview names what
+   is missing: press "Fix ›", then "Continue", and choose "Allow all the time" in Shizuku's dialog.
+   Do the same for each line the strip shows until it is gone.
 7. **Work through the switches.** The row of pages under the preview (Idle, Charging, Message,
    Music, Timer, Call, Usage, Notes) chooses which settings are shown. In this order:
-   1. *Message, Notifications*: switch it on and allow notification access for Chicken Rear in the
-      system page that opens. Notifications, music, calls and timers all come through this access.
-   2. *Idle, Advanced, Keep it running*: set "Battery: no restrictions" and turn "Autostart" on.
-      Without them HyperOS freezes the app in the background and the back stops updating.
+   1. *Message, Notifications*: the switch is on. If the strip says "Notifications need access",
+      press "Fix ›", then "Continue". With Shizuku running it is granted at once; otherwise allow
+      Chicken Rear on the system page that opens. Notifications, music, calls and timers all come
+      through this access.
+   2. *Idle*, then the "Advanced" row at the bottom, "Keep it running": set "Battery: no
+      restrictions", turn "Autostart" on, and lock Chicken Rear in the recent apps (long-press its
+      card, then the padlock). Without them HyperOS freezes or clears the app in the background and
+      the back stops updating.
    3. *Usage*: press "Sign in". Your browser opens Claude's approval page; approve it and come
       back. The usage page is then one swipe away on the back.
-   4. Optional, each asked for only when you switch its feature on: location (weather for the
-      lightning effect, notes for a place), the microphone permission ("Follows the music";
-      nothing is recorded), and the accessibility service "Pin to back: glass" (lets the pin
-      animation play above other overlays).
+   4. Optional, each asked for only when you switch its feature on: location (approximate for the
+      lightning effect; precise and "Allow all the time" for notes tied to a place), the
+      microphone permission ("Follows the music"; nothing is recorded), and the accessibility
+      service "Pin to back: glass" (lets the pin animation play above other overlays). The glass
+      service matters only with *Notes*, "Pin animation: Ours". If its switch is greyed out in
+      Accessibility, open Chicken Rear's App info, the menu at the top right, "Allow restricted
+      settings", then switch it on.
 8. **Add a face.** No clip ships with the app. Prepare a clip (see below) and copy it to the phone
    with a computer:
    1. Install Google's [platform-tools](https://developer.android.com/tools/releases/platform-tools)
@@ -141,10 +154,11 @@ On the face:
 | Tap | Full brightness for 15 seconds |
 | Double tap | Dim; again, bright |
 | Double tap, holding the second | Back off until you wake it |
+| Double tap a dark back | Lights it again (Xiaomi's own wake gesture) |
 | Swipe right to left | The live page (call, timer, music or charging) if there is one, then Claude usage |
 | Swipe left to right | Xiaomi's Camera on the back |
 | Swipe up | Pinned notes |
-| Pull down from the top edge | Notifications |
+| Pull down from the right half of the top edge | Notifications |
 | Press and hold | Next face, if you have more than one |
 
 On a page, the opposite swipe goes back the way it came. A live page you swipe away stays away
@@ -168,9 +182,8 @@ until something new happens; it is one swipe right of the face meanwhile.
   but does not update.
 - A lit rear display keeps the whole phone awake. The night rule exists for that reason; leave
   "Sleep at night" on unless you want the battery cost.
-- The release build (`dev.chicken.rear`) is built from the same source as the debug build
-  (`dev.chicken.rear.dev`) that has been used daily, but has itself had little use. Do not install
-  both: each would draw on the back.
+- Do not install the release build (`dev.chicken.rear`) and a debug build
+  (`dev.chicken.rear.dev`) at the same time: each would draw on the back.
 - Not tried against the real thing: the ChatGPT sign-in and its Codex limits, notes tied to a
   place, "Follows the music" on HyperOS, and the accessibility "glass" service on HyperOS.
 - The call page has been used on real calls with the phone's own dialer only.
@@ -184,22 +197,32 @@ until something new happens; it is one swipe right of the face meanwhile.
 There is no analytics, no account with this project and no server of its own. What leaves the
 phone:
 
-- **Claude usage**: requests to Anthropic (`api.anthropic.com`, sign-in in your browser at
-  `claude.ai`) with your own account. The tokens are kept on the phone, encrypted with an Android
-  Keystore key, and sent nowhere else.
-- **ChatGPT (optional)**: sign-in at `auth.openai.com` and a usage request to `chatgpt.com`, with
-  your own account, kept the same way.
-- **Weather (optional)**: your position rounded to a tenth of a degree, to
-  [Open-Meteo](https://open-meteo.com/), for the lightning effect.
+- **Claude usage**: requests to Anthropic with your own account: the sign-in in your browser at
+  `claude.ai`, the token exchange at `platform.claude.com`, usage and profile from
+  `api.anthropic.com`. The tokens are kept on the phone, encrypted with an Android Keystore key,
+  and sent nowhere else.
+- **ChatGPT (optional)**: sign-in and token exchange at `auth.openai.com` and a usage request to
+  `chatgpt.com`, with your own account, kept the same way.
+- **Weather (optional)**: with "Lightning when it storms" on, the phone's approximate position,
+  rounded to two decimals (about a kilometre), to [Open-Meteo](https://open-meteo.com/) every five
+  minutes while the back is lit.
 
-The code inherited from upstream can also fetch lyrics from [LRCLIB](https://lrclib.net/); this
-fork's settings have no switch for it and it is off.
+The code inherited from upstream can also fetch lyrics from [LRCLIB](https://lrclib.net/) and look
+up a typed place name with Open-Meteo's geocoder (`geocoding-api.open-meteo.com`); this fork's
+settings have no switch or field for either, and neither is used.
 
-What stays on the phone: notification contents (shown on the back, not stored beyond the list),
-pinned notes, the places of notes (given to Android's own proximity alert), the home Wi-Fi's
-identity (its gateway and name servers, not its name), and the one screenshot the optional "glass"
-service takes as you pin, which is held in memory for the two seconds of the animation and never
-saved. "Follows the music" measures the level of the sound being played; nothing is recorded.
+What stays on the phone: notification contents (shown on the back with their message by default,
+where people facing you can read them; "Show the message" turns that off; not stored beyond the
+list), pinned notes, the places of notes (for which the app asks for the precise position, all the
+time, and gives it to Android's own proximity alert), the last rough position for the weather (to a
+tenth of a degree), the home Wi-Fi's identity (its gateway and name servers, not its name), and the
+one screenshot the optional "glass" service takes as you pin, which is held in memory for the two
+seconds of the animation and never saved. "Follows the music" measures the level of the sound being
+played; nothing is recorded.
+
+The app shows the same in its privacy note on first start, and its "Privacy policy" row (under
+Advanced) links to this section. While this repository is private, that link opens only for people
+who have access to it.
 
 ## Building from source
 
@@ -242,8 +265,9 @@ later phones. What this fork changes:
 - It targets the 17 Pro Max only.
 
 The code is under the MIT licence, see [LICENSE](LICENSE), with the exceptions listed there and in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) (third-party code, fonts and artwork). Upstream's
-Chinese README was removed because it describes upstream's app, not this fork.
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) (third-party code, fonts and artwork). The APK
+carries both files and the fonts' licence texts in `assets/licenses/`. Upstream's Chinese README
+was removed because it describes upstream's app, not this fork.
 
 "Claude" and the Claude mascot belong to Anthropic; "ChatGPT" and "Codex" to OpenAI; "Xiaomi" and
 "HyperOS" to Xiaomi. They are named only to say what the app works with. This project is not

@@ -12,6 +12,12 @@
 - Fixes for a release that is already out go on `fix/<name>`, the same way.
 - Changes from upstream (Magic Rear) come in on `feature/upstream-<version>`: merge the upstream
   tag there, resolve, test, and open a pull request like any other.
+- Code changes are made in the maintainer's working copy and arrive here as `feature/sync-*`
+  branches. A pull request from anyone else is ported there first and comes back through a sync,
+  never merged on its own: the next sync replaces the whole tree, so code merged here directly
+  would be undone by it. Changes to this repository's own documents (`README.md`,
+  `CONTRIBUTING.md`, `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md`) are the exception and
+  are merged here as usual.
 
 ## Commits
 

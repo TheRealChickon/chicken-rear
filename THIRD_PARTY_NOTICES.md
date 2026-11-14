@@ -20,7 +20,10 @@ Resolved from `:app:releaseRuntimeClasspath` (157 artifacts). All are Apache-2.0
 | Backdrop and Shapes (Kyant0) | 1.0.6, 1.2.0 | Apache-2.0 |
 | AndroidHiddenApiBypass (LSPosed) | 6.1 | Apache-2.0 |
 | Shizuku API (RikkaApps): api, provider, aidl, shared | 13.1.5 | MIT, Copyright (c) 2021 RikkaW |
-| Checker Framework qualifiers | 3.43.0 | MIT |
+| Checker Framework qualifiers | 3.43.0 | MIT, Copyright 2004-present by the Checker Framework developers |
+
+The MIT licence's text, which both MIT entries above are under with their own copyright lines, is
+the one in [LICENSE](LICENSE). The Apache License 2.0 is in `assets/licenses/Apache-2.0-MaterialSymbols.txt`.
 
 ## Code taken into the source
 
@@ -39,22 +42,27 @@ Resolved from `:app:releaseRuntimeClasspath` (157 artifacts). All are Apache-2.0
 
 ## Fonts
 
-- **Departure Mono**, Copyright 2022-2024 Helena Zhang, SIL Open Font License 1.1.
-- **Outfit**, Copyright 2021 The Outfit Project Authors, SIL Open Font License 1.1.
+- **Departure Mono**, Copyright 2022–2024 Helena Zhang, SIL Open Font License 1.1
+  (`app/src/main/assets/licenses/OFL-DepartureMono.txt`).
+- **Outfit**, Copyright 2021 The Outfit Project Authors, SIL Open Font License 1.1
+  (`app/src/main/assets/licenses/OFL-Outfit.txt`).
 
 ## Not covered by this repository's licence
 
 - **The Claude mascot** is Anthropic's. The pixel figures here were rebuilt by upstream from
   <https://ayotomcs.me/claude-mascot>. "Claude" is a trademark of Anthropic.
-- The **ACRNM** maker's mark (`res/drawable/acrnm_ray.xml`) is ACRNM's.
-- The photograph of a record (`res/drawable-nodpi/vinyl_record.webp`) came with upstream; its
-  source is not known to this fork.
 
-If you own one of these and want it removed, open an issue.
+If you own it and want it removed, open an issue.
+
+## In the APK
+
+These notices travel with the app: `assets/licenses/` in the APK holds this file, `LICENSE`, the
+Apache License 2.0 and the two fonts' SIL Open Font License texts.
 
 ## Data
 
-- Weather by [Open-Meteo](https://open-meteo.com/), CC BY 4.0. Lyrics from [LRCLIB](https://lrclib.net/).
+- Weather by [Open-Meteo](https://open-meteo.com/), CC BY 4.0. Lyrics from [LRCLIB](https://lrclib.net/), in code inherited from upstream that this
+  fork's settings do not switch on.
 
 ## Not in this repository
 
