@@ -1,6 +1,7 @@
 MIT License
 
 Copyright (c) 2026 896kb
+Copyright (c) 2026 TheRealChickon (Chicken Rear: the changes made in this fork)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -24,8 +25,13 @@ SOFTWARE.
 
 NOT COVERED BY THIS LICENCE
 
-The Claude mascot artwork in app/src/main/res and docs/media/states is
-Anthropic's, derived from https://ayotomcs.me/claude-mascot. The ACRNM
-maker's mark drawable is ACRNM's. Departure Mono is (c) Helena Zhang, under
-the SIL Open Font License. None of these are licensed by the copyright holder
-above, and none are covered by the MIT grant.
+The Claude mascot artwork (the pixel figures in
+app/src/main/java/dev/kb896/aiusage/rear/MascotFrames.kt and what draws them)
+is Anthropic's, derived from https://ayotomcs.me/claude-mascot. The ACRNM
+maker's mark drawable (app/src/main/res/drawable/acrnm_ray.xml) is ACRNM's.
+Departure Mono is (c) Helena Zhang, under the SIL Open Font License. None of
+these are licensed by the copyright holders above, and none are covered by the
+MIT grant.
+
+Code taken from other projects keeps its own licence; see
+THIRD_PARTY_NOTICES.md.
