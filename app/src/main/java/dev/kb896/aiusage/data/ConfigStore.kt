@@ -19,7 +19,8 @@ class ConfigStore(private val context: Context) {
 
     private val prefs get() = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    fun load(): PanelConfig = PanelConfig.decode(prefs.getString(KEY, null))
+    /** Nothing stored yet: a fresh install, which starts in companion mode (PanelConfig.FRESH). */
+    fun load(): PanelConfig = prefs.getString(KEY, null)?.let(PanelConfig::decode) ?: PanelConfig.FRESH
 
     /** The stored blob itself, undecoded — what UiTheme compares to know it may skip one. */
     fun raw(): String? = prefs.getString(KEY, null)

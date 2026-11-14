@@ -8,7 +8,7 @@
 // Changed only where the two apps differ: what the thumb bends is this app's silk background
 // (SilkContent, from Backdrop) rather than the store's, it is redrawn with the silk's frames
 // as a Glassy view rather than through the store's registry, the shaders are this app's own
-// (rear/Glass, the same sources) and the accent is the app's (Ink.ACCENT). The helpers are
+// (rear/Glass, the same sources) and the on colour is the app's (Ink.ON). The helpers are
 // file-private so they sit beside the app's own glass helpers without clashing.
 package dev.kb896.aiusage.ui.liquid
 
@@ -465,8 +465,9 @@ class LiquidToggle(context: Context) : View(context), Checkable, dev.kb896.aiusa
         canvas.save()
         canvas.scale(sx, sy, thumb.centerX(), thumb.centerY())
 
-        // Shadow: 4 dp, offset a sixth of that down, black at 0.05.
-        paint.color = 0x0D000000
+        // Shadow: 4 dp, offset a sixth of that down, black at 0.05 — at 0.16 on the light
+        // screen, where the white thumb on a pale track needs it to have an edge at all.
+        paint.color = if (dev.kb896.aiusage.ui.glass.Ink.dark) 0x0D000000 else 0x29000000
         paint.maskFilter = BlurMaskFilter(4 * density, BlurMaskFilter.Blur.NORMAL)
         canvas.drawRoundRect(thumb.left, thumb.top + 4 * density / 6f, thumb.right, thumb.bottom + 4 * density / 6f, r, r, paint)
         paint.maskFilter = null
@@ -560,8 +561,8 @@ class LiquidToggle(context: Context) : View(context), Checkable, dev.kb896.aiusa
         /** Room around the track for the pressed (1.5x) thumb. */
         const val PAD_X = 12f
         const val PAD_Y = 8f
-        /** The catalog's dark-theme track colour, 0x787880 at 0.36; the accent is the app's (Ink.ACCENT). */
-        const val TRACK = 0x5C787880
-        val ACCENT = dev.kb896.aiusage.ui.glass.Ink.ACCENT
+        /** The inactive track and the on colour, for the theme the screen is in (Ink.track, Ink.on). */
+        val TRACK get() = dev.kb896.aiusage.ui.glass.Ink.track(0f)
+        val ACCENT get() = dev.kb896.aiusage.ui.glass.Ink.on(0f)
     }
 }

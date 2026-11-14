@@ -53,12 +53,11 @@ object PortalAppSheet {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(activity, 20), dp(activity, 4), dp(activity, 20), 0)
         }
-        SettingsRows.note(column, "Density of the back while ${label.trim()} is open there. Other times it keeps its own.")
         SettingsRows.slider(
             column,
             max = (RearDensity.MAX - BASE) / RearDensity.STEP,
             progress = progressOf(currentDpi),
-            text = { if (touched) "${dpiOf(it)} dpi" else "Default" },
+            text = { "Density  " + if (touched) "${dpiOf(it)} dpi" else "Default" },
             onMove = { touched = true },
             onDone = {
                 // A tap on the thumb without moving it must not save the guess as a choice.
@@ -73,18 +72,17 @@ object PortalAppSheet {
         val steps = (GuestWidth.full(rear) - lo + GuestWidth.STEP - 1) / GuestWidth.STEP
         fun widthOf(p: Int): Int? = GuestWidth.clamp(rear, lo + p * GuestWidth.STEP)
         val widthNow = GuestWidth.clamp(rear, currentWidth)
-        SettingsRows.note(column, "Width of ${label.trim()} right of the cameras. Narrower suits apps that grow with the screen.")
         SettingsRows.slider(
             column,
             max = steps,
             progress = widthNow?.let { (it - lo) / GuestWidth.STEP } ?: steps,
-            text = { GuestWidth.label(rear, widthOf(it)) },
+            text = { "Width  " + GuestWidth.label(rear, widthOf(it)) },
             onDone = { if (widthOf(it) != widthNow) onWidth(widthOf(it)) },
         )
         // Off, as every app starts: the whole back. Experimental for what it cannot do yet: its
         // keyboard opens on the front.
         SettingsRows.toggle(column, "Keep right of the cameras (experimental)", confined) { on -> onConfined(on) }
-        SettingsRows.note(column, "On, ${label.trim()} runs on a screen of its own beside the cameras. Its keyboard opens on the front.")
+        SettingsRows.note(column, "Its keyboard opens on the front.")
         Modal.show(
             Modal.builder(activity).setTitle(label.trim())
                 .setView(column)

@@ -12,4 +12,9 @@ class NoticeMatchTest {
     @Test fun `cards from before keys were kept stay`() {
         assertEquals(listOf(true, false), NoticeMatch.keep(listOf("", "b"), emptySet()))
     }
+
+    @Test fun `a card put up from outside was never on the front, and stays`() {
+        assertEquals(listOf(true, false, true), NoticeMatch.keep(listOf("remote:door", "b", "remote:x"), setOf("z")))
+        assertEquals(listOf(false), NoticeMatch.keep(listOf("notremote:door"), emptySet()))
+    }
 }

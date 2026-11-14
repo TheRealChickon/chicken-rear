@@ -170,4 +170,31 @@ class ChargeOverlayTest {
         val (_, gy) = ChargeOverlay.gravity(0f, -9.8f)
         assertTrue("did not pull upward when inverted: $gy", gy < -8f)
     }
+
+    // -- unplugged while it is up: the liquid drains (ChargeOverlay.drain) ----------------
+
+    @Test fun `unplugged, the liquid drains from where it stood to empty`() {
+        assertEquals("moved at the unplug itself", 0.7f, ChargeOverlay.drain(0.7f, 0f), 0.0001f)
+        assertEquals("not empty once drained", 0f, ChargeOverlay.drain(0.7f, ChargeOverlay.DRAIN_MS), 0.0001f)
+        assertEquals("came back after draining", 0f, ChargeOverlay.drain(0.7f, ChargeOverlay.DRAIN_MS * 3), 0.0001f)
+        val mid = ChargeOverlay.drain(0.7f, ChargeOverlay.DRAIN_MS / 2)
+        assertTrue("half way it should be part drained, was $mid", mid > 0f && mid < 0.7f)
+    }
+
+    @Test fun `the drain only ever goes down, and takes 400 ms`() {
+        assertEquals(400f, ChargeOverlay.DRAIN_MS, 0.0001f)
+        var last = Float.MAX_VALUE
+        var t = 0f
+        while (t <= ChargeOverlay.DRAIN_MS) {
+            val f = ChargeOverlay.drain(0.9f, t)
+            assertTrue("the drain rose at $t", f <= last + 0.0001f)
+            last = f
+            t += 10f
+        }
+    }
+
+    @Test fun `a drain never fills past the glass`() {
+        assertEquals(1f, ChargeOverlay.drain(1.4f, 0f), 0.0001f)
+        assertEquals(0f, ChargeOverlay.drain(-0.2f, 100f), 0.0001f)
+    }
 }

@@ -40,7 +40,11 @@ import android.content.Intent
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
-        if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
-        UsagePollService.start(context)
+        // After a reboot, and after an update of this app: an update stops the service, and
+        // until now only opening the settings brought it back, with the back black meanwhile. Both
+        // broadcasts are among the few from which a foreground service may be started from the background.
+        if (intent?.action != Intent.ACTION_BOOT_COMPLETED && intent?.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
+        android.util.Log.i("AiUsageBoot", "starting the service after ${intent.action?.substringAfterLast('.')}")
+        runCatching { UsagePollService.start(context) }.onFailure { android.util.Log.w("AiUsageBoot", "not started: ${it.message}") }
     }
 }

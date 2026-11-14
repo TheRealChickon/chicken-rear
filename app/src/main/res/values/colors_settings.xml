@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The settings screen's colours in the LIGHT theme; values-night/colors_settings.xml
+      holds the dark ones. Repeated from Ink and Backdrop because a style cannot read a
+      Kotlin object: Ink.ACCENT_LIGHT, Ink.PRIMARY_LIGHT, Ink.dim() and Backdrop.PAPER.
+      The back never reads these.
+    -->
+    <color name="settings_ground">#FFF2F2F4</color>
+    <color name="settings_accent">#FF1C1C1E</color>
+    <color name="settings_text">#FF1C1C1E</color>
+    <color name="settings_text_dim">#FF7C7C80</color>
+    <color name="settings_control">#FF7C7C80</color>
+    <color name="settings_dialog">#FFF7F7F9</color>
+    <color name="settings_dialog_rule">#FFDCDCE0</color>
+</resources>

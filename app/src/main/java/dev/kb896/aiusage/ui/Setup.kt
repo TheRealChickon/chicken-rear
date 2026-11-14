@@ -60,7 +60,7 @@ object Setup {
     }
 
     /** Shizuku's own app when it is installed; its site, where it is downloaded from, when not. */
-    private fun shizukuIntent(context: Context): Intent =
+    fun shizukuIntent(context: Context): Intent =
         context.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
             ?: Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://shizuku.rikka.app/"))
     private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
@@ -177,9 +177,7 @@ object Setup {
             ),
             Step(
                 title = "Lock the app in recents",
-                why = "Lock this app in recents — open recents, long-press it, tap the " +
-                    "padlock. Otherwise \"close all\" kills the poll service and takes " +
-                    "the panel down with it.",
+                why = "Lock this app in recents (long-press, padlock) so \"close all\" spares it.",
                 // Xiaomi does not expose whether an app is locked in recents, so this is
                 // advice with no answer rather than a box that can never be ticked.
                 satisfied = null,

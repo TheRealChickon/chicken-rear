@@ -43,6 +43,8 @@ internal object ShellLayer {
      * sheet, frame and cover occlude nothing.
      */
     const val Z_FRAME = Int.MAX_VALUE
+    /** The dim by hand (RearDim): over everything of ours. With the frame's height: the two are never both up. */
+    const val Z_DIM = Int.MAX_VALUE
     const val Z_SHEET = Int.MAX_VALUE - 1
     /**
      * The control centre and the notifications' list over a guest (ShellOverlay): under the sheet, so
@@ -51,15 +53,52 @@ internal object ShellLayer {
      */
     const val Z_PANES = Int.MAX_VALUE - 2
     const val Z_BANNER = Int.MAX_VALUE - 3
-    const val Z_BLOCKER = Int.MAX_VALUE - 4
+    /**
+     * The charging animation over Xiaomi's screen or a guest (ShellCharge): under a banner, which
+     * cuts it short (RearShow), over every app and the blocker. Trusted, so it takes no touch.
+     */
+    const val Z_CHARGE = Int.MAX_VALUE - 4
+    /**
+     * The wake animation over Xiaomi's screen (ShellWake): under the charge and the banner, which
+     * cut it short (RearShow). Trusted, so it takes no touch.
+     */
+    const val Z_WAKE = Int.MAX_VALUE - 5
+    /**
+     * The scene over Xiaomi's screen (ShellScene): the clip and its clock, one opaque layer. Under
+     * the wake, the charge and the banner, which show over it. Trusted: no touch.
+     */
+    /**
+     * A card over the scene (ShellCard: what is playing). It shares the pages' place: the shell takes a
+     * card away before a page comes up, so the two are never there together.
+     */
+    const val Z_CARD = Int.MAX_VALUE - 6
+    /** The usage page (ShellUsage): the back's second page, over the scene it is swiped in from, under banners and lists. */
+    const val Z_USAGE = Int.MAX_VALUE - 6
+    /** What is playing, as the whole back (MusicFace): over the scene it stands in for, under the cards and the pages. */
+    /** A call as the whole back (CallFace): over what is playing, under the cards and the pages. */
+    const val Z_LIVE = Int.MAX_VALUE - 7
+    const val Z_MUSIC = Int.MAX_VALUE - 8
+    /**
+     * The charging page (ShellCharge), which stays for as long as the charger is in: over the scene it stands in
+     * for, under what is playing, a call, a timer and the pages, which all show over it.
+     */
+    const val Z_CHARGE_PAGE = Int.MAX_VALUE - 9
+    const val Z_SCENE = Int.MAX_VALUE - 10
+    const val Z_BLOCKER = Int.MAX_VALUE - 11
+    /**
+     * The cover (RearCover): black over Xiaomi's rear screen whenever a face of ours is what the back
+     * is for. Under the scene, the pages, banners and lists; over every app's window. It shares the
+     * blocker's place: the blocker is a clear picture, and whichever of the two is on top shows the same.
+     */
+    const val Z_BASE = Int.MAX_VALUE - 11
     /** A guest's arrival (GuestCover): over every app, under the sheet, so a pull meanwhile still opens over it. */
-    const val Z_COVER = Int.MAX_VALUE - 5
+    const val Z_COVER = Int.MAX_VALUE - 12
     /** The Back chevron over a guest on a private display (BackChevron): over its picture, under the cover. */
-    const val Z_CHEVRON = Int.MAX_VALUE - 6
+    const val Z_CHEVRON = Int.MAX_VALUE - 13
     /** The camera strip beside a guest kept right of the cameras (CameraStrip): over its picture, under the chevron. */
-    const val Z_STRIP = Int.MAX_VALUE - 7
+    const val Z_STRIP = Int.MAX_VALUE - 14
     /** The picture of a guest on a private display (PrivateDisplay): over every app, under the strip beside it. */
-    const val Z_APP = Int.MAX_VALUE - 8
+    const val Z_APP = Int.MAX_VALUE - 15
 
     /** How long [removeAll] waits for a capture holding layers ([lease]) before it lets them go anyway. */
     private const val LEASE_WAIT_MS = 200L
@@ -108,6 +147,12 @@ internal object ShellLayer {
      * Builder.setContainerLayer; a layer with no buffer where there is none) at the top of the
      * stack, shown, not trusted.
      */
+    /**
+     * Where this process's layers stand among everything on the display: on top. The guard's process
+     * (RearGuardService) sets one less before it makes a layer, so its cover is under all of the shell's.
+     */
+    @Volatile var rootZ = Int.MAX_VALUE
+
     fun container(layerStack: Int): SurfaceControl = synchronized(containers) {
         containers[layerStack]?.let { return it }
         val b = SurfaceControl.Builder().setName("ai-usage-shell")
@@ -118,7 +163,7 @@ internal object ShellLayer {
                 SurfaceControl.Transaction::class.java
                     .getMethod("setLayerStack", SurfaceControl::class.java, Int::class.javaPrimitiveType)
                     .invoke(t, c, layerStack)
-                t.setLayer(c, Int.MAX_VALUE).setVisibility(c, true).apply()
+                t.setLayer(c, rootZ).setVisibility(c, true).apply()
             }
         } catch (e: Throwable) {
             runCatching { c.release() }
@@ -169,6 +214,22 @@ internal object ShellLayer {
      * [format], [opaque]: what a private display's picture needs (PrivateDisplay); the rest draw
      * themselves, translucent.
      */
+    @Volatile private var cornerSaid = false
+
+    /** The corner every page of the back is cut to: the rear display's own radius, in its pixels. */
+    fun pageCorner(rear: RearGeometry): Float = rear.cornerPx.toFloat()
+
+    /**
+     * EVERY PAGE THAT IS NOT IN ITS PLACE HAS ALL FOUR OF THE DISPLAY'S CORNERS, whichever edge it comes from or leaves
+     * by, under a finger too: put into the transaction that places it. In its place its corners are the display's
+     * own, and the radius is taken off (a rounded layer cannot be handed to the display's own composer, which costs
+     * power for as long as it shows).
+     */
+    fun round(t: SurfaceControl.Transaction, layer: SurfaceControl, rear: RearGeometry, moving: Boolean) {
+        t.setCrop(layer, android.graphics.Rect(0, 0, rear.widthPx, rear.heightPx))
+        ShellOverlay.roundCorners(t, layer, if (moving) pageCorner(rear) else 0f)
+    }
+
     fun create(
         name: String, layerStack: Int, z: Int,
         // No default: the 17 Pro's 904x572 was one, and on a bigger rear it left a strip
@@ -176,6 +237,9 @@ internal object ShellLayer {
         width: Int, height: Int,
         trusted: Boolean, visible: Boolean = true, alpha: Float = 1f,
         format: Int = PixelFormat.TRANSLUCENT, opaque: Boolean = false,
+        // A PAGE OF THE BACK HAS THE DISPLAY'S OWN CORNERS ([pageCorner]): in its place they are the display's, and
+        // while it moves its leading edge is round. Set here, on the layer, so no page draws them itself.
+        corner: Float = 0f,
     ): SurfaceControl {
         check(!closed) { "the shell's layers are closed: the process is ending" }
         // A child of this process's container, never a root of its own (see the class comment).
@@ -185,6 +249,12 @@ internal object ShellLayer {
             SurfaceControl.Transaction().use { t ->
                 if (trusted) trust(t, layer)?.let { throw Untrusted(it) }
                 if (alpha < 1f) t.setAlpha(layer, alpha)
+                if (corner > 0f) {
+                    // THE RADIUS ACTS ON THE LAYER'S CROP: the picture is in a child of this layer (its buffer queue), so
+                    // with no crop there was nothing to round, and the pages kept square corners (seen on the phone).
+                    t.setCrop(layer, android.graphics.Rect(0, 0, width, height))
+                    if (!ShellOverlay.roundCorners(t, layer, corner) && !cornerSaid) { cornerSaid = true; android.util.Log.w("AiUsageRear", "layers: this system rounds no layer's corners — pages keep square ones") }
+                }
                 t.setLayer(layer, z).setVisibility(layer, visible).apply()
             }
             live.add(layer)

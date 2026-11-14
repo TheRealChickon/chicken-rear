@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The settings screen (MainActivity) follows the phone: this file is the light theme,
+      values-night/themes_settings.xml the dark one. Only the parents and the bars differ;
+      the colours come from colors_settings.xml, which has a night twin of its own.
+      forceDarkAllowed is off so HyperOS never inverts the light screen by itself.
+    -->
+    <style name="SettingsThemeBase" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+
+    <style name="SettingsTheme" parent="SettingsThemeBase">
+        <item name="android:windowBackground">@color/settings_ground</item>
+        <item name="android:colorAccent">@color/settings_accent</item>
+        <item name="android:colorControlActivated">@color/settings_accent</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+
+    <!-- The dialogs' framework parent, light here and dark in values-night. -->
+    <style name="PanelDialogBase" parent="@android:style/Theme.Material.Light.Dialog.Alert" />
+</resources>

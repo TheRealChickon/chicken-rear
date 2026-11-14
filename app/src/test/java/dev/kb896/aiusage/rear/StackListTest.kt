@@ -7,12 +7,12 @@ import org.junit.Test
 
 class StackListTest {
 
-    private val release = "dev.kb896.aiusage"
-    private val dev = "dev.kb896.aiusage.dev"
+    private val release = "dev.chicken.rear"
+    private val dev = "dev.chicken.rear.dev"
 
     private val real = """
         Stack id=0 bounds=[0,0][1220,2656]
-          taskId=62161: dev.kb896.aiusage/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][1220,2656] userId=0 visible=true topActivity=ComponentInfo{dev.kb896.aiusage/dev.kb896.aiusage.rear.RearActivity}
+          taskId=62161: dev.chicken.rear/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][1220,2656] userId=0 visible=true topActivity=ComponentInfo{dev.chicken.rear/dev.kb896.aiusage.rear.RearActivity}
           taskId=101: com.android.settings/.Settings bounds=[0,0][1220,2656] userId=0 visible=false
     """.trimIndent()
 
@@ -42,7 +42,7 @@ class StackListTest {
     private val camera = """
           taskId=75378: com.android.camera/com.android.camera.Camera bounds=[0,0][904,572] userId=0 visible=true topActivity=ComponentInfo{com.android.camera/com.android.camera.Camera}
           taskId=75379: com.android.camera/com.android.camera.fragment.presentation.MainScreenSelfieActivity bounds=[0,0][1220,2656] userId=0 visible=true topActivity=ComponentInfo{com.android.camera/com.android.camera.fragment.presentation.MainScreenSelfieActivity}
-          taskId=62161: dev.kb896.aiusage/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][904,572] userId=0 visible=false
+          taskId=62161: dev.chicken.rear/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][904,572] userId=0 visible=false
           taskId=75328: com.android.camera/com.android.camera.Camera bounds=[0,0][1220,2656] userId=0 visible=false topActivity=ComponentInfo{com.android.camera/com.android.camera.Camera}
           taskId=101: com.android.cameraextras/.Main bounds=[0,0][1220,2656] userId=0 visible=false
     """.trimIndent()
@@ -62,9 +62,9 @@ class StackListTest {
 
     private val both = """
          configuration={0.9 226mcc5mnc [en_US] winConfig={ mBounds=Rect(0, 0 - 904, 572) } as.4 display=1 extraData = Bundle[{}] screenType=0/o}
-          taskId=80011: dev.kb896.aiusage.dev/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][904,572] userId=0 visible=true topActivity=ComponentInfo{dev.kb896.aiusage.dev/dev.kb896.aiusage.rear.RearActivity}
+          taskId=80011: dev.chicken.rear.dev/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][904,572] userId=0 visible=true topActivity=ComponentInfo{dev.chicken.rear.dev/dev.kb896.aiusage.rear.RearActivity}
          configuration={0.9 226mcc5mnc [en_US] winConfig={ mBounds=Rect(0, 0 - 904, 572) } as.4 display=1 extraData = Bundle[{}] screenType=0/o}
-          taskId=62161: dev.kb896.aiusage/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][904,572] userId=0 visible=false topActivity=ComponentInfo{dev.kb896.aiusage/dev.kb896.aiusage.rear.RearActivity}
+          taskId=62161: dev.chicken.rear/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][904,572] userId=0 visible=false topActivity=ComponentInfo{dev.chicken.rear/dev.kb896.aiusage.rear.RearActivity}
          configuration={0.9 226mcc5mnc [en_US] winConfig={ mBounds=Rect(0, 0 - 1220, 2656) } as.4 display=0 extraData = Bundle[{}] screenType=0/o}
           taskId=101: com.android.settings/.Settings bounds=[0,0][1220,2656] userId=0 visible=false
     """.trimIndent()
@@ -75,9 +75,9 @@ class StackListTest {
     }
 
     @Test fun `the other build's panel alone is no panel of ours`() {
-        val devOnly = "  taskId=80011: dev.kb896.aiusage.dev/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][904,572]"
+        val devOnly = "  taskId=80011: dev.chicken.rear.dev/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][904,572]"
         assertEquals(-1, StackList.parseTaskId(devOnly, release, "RearActivity"))
-        val releaseOnly = "  taskId=62161: dev.kb896.aiusage/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][904,572]"
+        val releaseOnly = "  taskId=62161: dev.chicken.rear/dev.kb896.aiusage.rear.RearActivity bounds=[0,0][904,572]"
         assertEquals(-1, StackList.parseTaskId(releaseOnly, dev, "RearActivity"))
     }
 

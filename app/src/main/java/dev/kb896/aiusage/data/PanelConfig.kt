@@ -133,6 +133,18 @@ data class RingLayout(
 }
 
 /**
+ * A note pinned to the back: its words, and when (wall clock, ms), which is also what names it.
+ * With a place ([lat], [lng]) it is a reminder for there: coming back within PlaceNotes.RADIUS_M of
+ * it puts the note on the back again and says so on the phone ([shownAt]: when it last did).
+ */
+@kotlinx.serialization.Serializable
+data class Pin(val text: String, val at: Long, val lat: Double? = null, val lng: Double? = null, val shownAt: Long = 0L) {
+    val placed: Boolean get() = lat != null && lng != null
+    /** When it last became news: pinned, or arrived at. */
+    val freshAt: Long get() = maxOf(at, shownAt)
+}
+
+/**
  * One account's appearance. Identity — which credential, which slug — is not here.
  *
  * Every field is nullable and null means "use the built-in", NOT "blank". That is what
@@ -215,6 +227,38 @@ enum class PortalGrid(val rows: Int, val columns: Int) {
     /** As the front's choice says it: rows × columns. */
     val label: String get() = "$rows × $columns"
 }
+
+/**
+ * Who owns the rear screen. [COMPANION], the default: Xiaomi's own rear
+ * screen (com.xiaomi.subscreencenter's SubScreenLauncher) stays the base, untouched, and this
+ * app only adds to it — more apps, the charging animation, notification banners, wake
+ * animations — as shell layers over it. Nothing is placed, suspended or re-placed.
+ * [REPLACE]: the old full panel, which took the back over from Xiaomi's app. GONE: no
+ * screen sets it, and a stored one is read as COMPANION (PanelConfig.decode). The name stays so that
+ * such a stored config still decodes.
+ */
+@Serializable
+enum class RearMode { COMPANION, REPLACE }
+
+/** How the clock over the scene is set. */
+@Serializable
+enum class SceneClockStyle { THIN, BOLD, STACKED }
+
+/** Which apps' notifications reach the back: every app but [PanelConfig.noticeApps], or only those. */
+@Serializable
+enum class NoticeAppsMode { ALL_EXCEPT, ONLY }
+
+/** The charging animation's look on the back (drawn in a later step: rear/ChargeStyle). */
+@Serializable
+enum class ChargeAnimStyle { LIQUID, RING, EDGE_GLOW, MINIMAL }
+
+/** The animation played as the back wakes (drawn in a later step: rear/WakeStyle). */
+@Serializable
+enum class WakeAnimStyle { EDGE_GLOW, LIQUID_SWEEP, BLUR_REVEAL, RIPPLE, NONE }
+
+/** Where on the back a pull opens the pinned apps in companion mode (PortalPull). */
+@Serializable
+enum class PortalPullEdge { TOP, BOTTOM_RIGHT }
 
 /** What the panel's background is. See PanelConfig.effectiveBackdrop. */
 @Serializable
@@ -301,7 +345,20 @@ data class VideoConfig(
     val easeOutMs: Int? = null,
     /** The clip's middle frame's brightness, GlassLuminance.SIDE squared cells, row by row. */
     val luminance: List<Float> = emptyList(),
+    /**
+     * How many times a Linear run plays before it rests on its last frame: once, as it always
+     * did, up to [MAX_PASSES]. The still the panel rests on is the clip's last frame, so a clip
+     * is cut to END on the picture it should hold.
+     */
+    val passes: Int = 1,
+    /** A Linear run plays again when the phone is laid on its face (the table), not only on a wake. */
+    val playOnTable: Boolean = false,
+    /** And when a notification arrives on a lit back. */
+    val playOnNotice: Boolean = false,
 ) {
+    /** [passes] as it can be played. */
+    val playPasses: Int get() = passes.coerceIn(1, MAX_PASSES)
+
     val easeInWallMs: Int get() = easeInMs ?: if (easeIn) DEFAULT_EASE_MS else 0
     val easeOutWallMs: Int get() = easeOutMs ?: if (easeOut) DEFAULT_EASE_MS else 0
 
@@ -313,6 +370,7 @@ data class VideoConfig(
         /** What an ease that was simply on lasted: a second of clip, about two on screen. */
         const val DEFAULT_EASE_MS = 2000
         const val MAX_EASE_MS = 2500
+        const val MAX_PASSES = 20
     }
 
     /** How it can play: going backwards needs the reversed copy, and without it the nearest forward way. */
@@ -396,13 +454,19 @@ data class PanelConfig(
     /** Default window order, for accounts that have not chosen their own. */
     val barOrder: List<String> = listOf("session", "weekly_all", "weekly_scoped"),
     /**
-     * A camera button in the bottom-right, which puts the system camera on this display.
+     * A camera button in the usage page's bottom-right corner. It opens the system camera ON
+     * THIS DISPLAY, so the camera's live viewfinder goes onto the back.
      *
-     * Off by default. It is the only control on a surface that is otherwise a readout —
-     * everything else here is something to look at, and a panel that reacts to being
-     * touched is a surprise unless it was asked for.
+     * OFF BY DEFAULT, for two reasons. The page is a readout and nothing else on it reacts to
+     * a touch. And one stray tap there puts a live preview on the back, which camera mode
+     * (cameraLight) is careful never to do on its own.
+     *
+     * STORED UNDER A NEW NAME (showCameraButton): this used to default to on, and every stored
+     * config has that on written out (encodeDefaults). The new name lets the new default reach
+     * phones that never touched the switch.
      */
-    val showCamera: Boolean = true,
+    @SerialName("showCameraButton")
+    val showCamera: Boolean = false,
 
     /**
      * A close button on the left, which ripples the readout away and leaves the mascot
@@ -507,7 +571,10 @@ data class PanelConfig(
      * on it raises the unlock slider; the swipe brings the full panel back.
      */
     val alwaysOn: Boolean = false,
-    /** In always-on, the battery level above the clock. */
+    /**
+     * In always-on, the battery level above the clock. On a charger it shows anyway, with its
+     * charging glyph, in always-on and the table's dim alike (RearDialView.dimBattery).
+     */
     val aodBattery: Boolean = false,
     /**
      * Pocket mode: the rear proximity sensor covered while the back is lit — a pocket, a
@@ -521,6 +588,54 @@ data class PanelConfig(
      */
     @SerialName("aodPocket")
     val pocketMode: Boolean = true,
+    /**
+     * How much of the background stays in always-on, 0 to 1. 0 is what always-on always did:
+     * the background fades to black and only the clock is lit, which costs an OLED nearly
+     * nothing. Above it, the picture — or a video's still frame — stays, dimmed by always-on's
+     * veil like everything else there. A still costs no drawing (the page is frozen either
+     * way); what it costs is the light of the pixels it leaves on.
+     */
+    val aodBackdrop: Float = 0f,
+    /**
+     * "Dim when face down" (table mode): laid on its face, the rear facing up, the back is lit
+     * DIM — under RearPosture.DIM_VEIL_ALPHA's veil, the page animated as ever — for as long as it lies there,
+     * charger or not. A touch gives normal brightness for thirty seconds, and so do a card (for
+     * its time) and a call (while it rings or lasts); a camera in use gives full brightness.
+     * Seen while the back is dark too: the poll service watches (TableWatch) and wakes the back.
+     * See RearPosture and RearActivity.
+     *
+     * [tableChargingOnly], "Only while charging", off by default: face down with no charger in,
+     * the back is off instead.
+     *
+     * STORED UNDER A NEW NAME (tableDim): this switch used to be "Stay bright face down", off by
+     * default, and that value is written out in every stored config (encodeDefaults). The minutes
+     * limit it once had on the battery (tableDimMinutes) is gone; a stored one is ignored.
+     */
+    @SerialName("tableDim")
+    val tableMode: Boolean = true,
+    val tableChargingOnly: Boolean = false,
+    /**
+     * "Off when lying on its back": the phone at rest on its back — the rear display against the
+     * table, the front up, settled and still (LyingOnBack) — switches the back off, and picking
+     * it up lights it again by itself. ON BY DEFAULT. Watched by the poll service (TableWatch).
+     */
+    val offOnBack: Boolean = true,
+    /**
+     * "Stay on in the hand": everywhere no other rule applies (not face down, not on its back,
+     * not in a pocket, not switched off by the double tap) the back stays lit at its normal
+     * brightness with no idle sleep. ON BY DEFAULT — the back is on unless something says off.
+     * Off, the old idle timer (thirty seconds, then always-on or dark) runs. See RearPosture.
+     */
+    val stayOnInHand: Boolean = true,
+    /**
+     * Camera mode, "Light up while the camera is open": while any camera is in use on the
+     * phone, the back is lit at FULL brightness with its ordinary animated clock page, never a
+     * viewfinder. No dim, always-on, table dim or idle sleep while it lasts; afterwards the back
+     * goes back to what it was doing. The camera app's own rear preview is left alone: the panel
+     * stands aside and the keep-alive does not cover it. A double tap on the lit back switches
+     * it off until the camera closes. ON BY DEFAULT. See CameraWatch and CameraMode.
+     */
+    val cameraLight: Boolean = true,
     /**
      * "Match the front notifications": a notification that leaves the front leaves the
      * back's list too, the list is brought in line with the front whenever the relay
@@ -546,13 +661,24 @@ data class PanelConfig(
     /**
      * Mirror other apps' notifications onto the panel.
      *
-     * Off by default, and [showNotificationText] is a SEPARATE opt-in, because this
-     * display faces away from its owner: everything on it is shown to whoever is behind
-     * them rather than to them. Choosing to see that a message arrived is a different
-     * decision from choosing to broadcast what it said.
+     * [showNotificationText] is a SEPARATE choice, because this display faces away from its
+     * user: everything on it is shown to whoever is behind them rather than to them. Choosing
+     * to see that a message arrived is a different decision from choosing to broadcast what it
+     * said — and while the phone is locked, a third ([noticeTextWhenLocked]).
+     *
+     * ON by default since companion mode: the banner over Xiaomi's rear is one of
+     * the four things the app is for, and off by default it never showed for anyone. A fresh
+     * install also has the text on while unlocked (PanelConfig.FRESH); a stored config keeps
+     * what it had.
      */
-    val showNotifications: Boolean = false,
-    val showNotificationText: Boolean = false,
+    val showNotifications: Boolean = true,
+    /**
+     * ON, and on while locked too ([noticeTextWhenLocked]): a notification can be read on the back without unlocking
+     * the phone. Both stored under new names, so a phone that had the old defaults gets these. Only a notification
+     * its app marked secret is kept off the back while locked.
+     */
+    @kotlinx.serialization.SerialName("showNotificationText2")
+    val showNotificationText: Boolean = true,
     val notificationColor: Int? = null,
 
     /**
@@ -578,7 +704,8 @@ data class PanelConfig(
      * (see Setup's step and MediaWatcher's note). Turning on a media player as a side
      * effect of agreeing to mirror notifications is not something the user asked for.
      */
-    val showMedia: Boolean = false,
+    @kotlinx.serialization.SerialName("showMedia2")
+    val showMedia: Boolean = true,
     /** The media page's one colour, from before each part had its own: what they all start in. */
     val mediaColor: Int? = null,
     /**
@@ -759,7 +886,179 @@ data class PanelConfig(
     val portalSheetSeen: Boolean = false,
     /** App Portal: the Portal tab's guide card is down for good — finished, or dismissed early. */
     val portalGuideDone: Boolean = false,
+    /**
+     * Remote control is on, so cards put up from outside have the back's banner and list even
+     * with [showNotifications] off: mirroring every notification and showing the one a home
+     * automation sends are different things to want. Only this bit of remote control lives
+     * here — the shell draws the banner and reads the config, nothing else. Tokens and rules
+     * stay out of a config that crosses to the panel and the shell with every payload.
+     */
+    val remoteCards: Boolean = false,
+
+    // -- companion mode -------------------------------------------------------
+    //
+    // A stored config written before these existed has no rearMode key, and decode() then
+    // moves it to companion mode once (see [companionStart]); a config that has the key is
+    // read as it is.
+
+    /** Who owns the rear screen: see [RearMode]. Companion unless Replace is chosen in Advanced. */
+    val rearMode: RearMode = RearMode.COMPANION,
+    /**
+     * Picked up off its back, the back is woken. Off by default: on Xiaomi's base it lit
+     * Xiaomi's rear on every pick-up. "Off when lying on its back"
+     * ([offOnBack]) now only declines this app's own wakes while it lies there.
+     */
+    val wakeOnLift: Boolean = false,
+    /** The apps [noticeAppsMode] names: left out (ALL_EXCEPT) or the only ones (ONLY). Packages. */
+    val noticeApps: Set<String> = emptySet(),
+    val noticeAppsMode: NoticeAppsMode = NoticeAppsMode.ALL_EXCEPT,
+    /** A banner keeps its words while the phone is locked; unlocked, [showNotificationText] decides. */
+    @kotlinx.serialization.SerialName("noticeTextWhenLocked2")
+    val noticeTextWhenLocked: Boolean = true,
+    /** The charging animation on the back when the charger goes in. */
+    val chargeAnim: Boolean = true,
+    val chargeStyle: ChargeAnimStyle = ChargeAnimStyle.LIQUID,
+    /** Also when the back is dark: it is woken for the animation (declines respected). */
+    val chargeWhenDark: Boolean = true,
+    /** An animation as the back wakes. */
+    val wakeAnim: Boolean = true,
+    val wakeStyle: WakeAnimStyle = WakeAnimStyle.EDGE_GLOW,
+    /** More apps on the back (the Portal) over Xiaomi's rear screen: the tile, the pull, the sheet. */
+    val moreApps: Boolean = true,
+    /** Where the pull that opens the pinned apps starts in companion mode. */
+    val portalPullEdge: PortalPullEdge = PortalPullEdge.TOP,
+    /** The charging animation says the battery's percent. */
+    val chargePercent: Boolean = true,
+    /** A notification wakes a dark back for its banner (declines respected); off, it shows only on a lit back. */
+    val noticeWake: Boolean = true,
+    /**
+     * No banner of ours while the phone is locked: Xiaomi's own rear list fills only then, and
+     * with this on the two do not both show. Off by default.
+     */
+    val noticeSkipLocked: Boolean = false,
+
+    /**
+     * The notes pinned to the back ("Pin to back" from any app's text: ui.PinActivity), newest
+     * first. Shown on the back's notes page (rear/PinFace), one swipe up from the scene.
+     */
+    val pins: List<Pin> = emptyList(),
+
+    // -- the scene: clips and a clock over Xiaomi's rear screen --------------------
+    //
+    // A clip is a file in the app's clips folder (ClipStore), named here by its file name; ""
+    // is none. As the back wakes [sceneWake] plays once; then [sceneLoop] repeats under the
+    // clock. It takes every touch (SceneTouch): only a swipe on purpose shows Xiaomi's screen.
+
+    /** Clips on the back at all. */
+    val sceneOn: Boolean = true,
+    /**
+     * Played once as the back wakes; "" for none. NONE by default, under a new stored name so an older stored choice
+     * is not read back: the back shows one face and nothing else, and a wake clip before it is a cut to another shot.
+     */
+    @kotlinx.serialization.SerialName("sceneWake2")
+    val sceneWake: String = "",
+    /**
+     * The FACE: one clip that repeats after the wake clip; "" for none. ONE SHOT or one picture,
+     * never shots cut together: a loop of several shots is restless to look at. It is changed with a press and hold
+     * on the back (SceneTouch), which writes this. The default names one clip; no clip ships with the app (the README
+     * says how to add one). Under a new stored name each time the default changed, so a stored choice of a face that
+     * is gone does not come back.
+     */
+    @kotlinx.serialization.SerialName("sceneLoop5")
+    val sceneLoop: String = "david-moon.loop.mp4",
+    /**
+     * The clock over the scene. OFF, under a new stored name so an older stored "on" is not read back. The switch
+     * stays in the settings.
+     */
+    @kotlinx.serialization.SerialName("sceneClock2")
+    val sceneClock: Boolean = false,
+    /** The moon face's glitch: a twitch of the picture now and then (rear/SceneEffects). */
+    /**
+     * The back's brightness follows the light around it (rear/RearLight), and [rearLightBias] moves all of it:
+     * -1 dimmer to 1 brighter.
+     */
+    val rearAdaptive: Boolean = true,
+    val rearLightBias: Float = 0f,
+    val sceneGlitch: Boolean = true,
+    /**
+     * The moon face's clouds stirred by the weather where the phone is (rear/SceneEffects). On, the weather is
+     * fetched for the phone's own rough position (WeatherPoll), whatever the older weather settings say.
+     */
+    val sceneWeather: Boolean = true,
+    val sceneClockStyle: SceneClockStyle = SceneClockStyle.STACKED,
+    /** The day and date under the clock. */
+    val sceneDate: Boolean = true,
+    /** The clock behind the clip's subject (a depth effect), where the clip carries a matte. */
+    val sceneDepth: Boolean = true,
+    /**
+     * The battery's percent on the face, small. Off by default. Under a
+     * new stored name, so the "true" an earlier build may have saved is not read back.
+     */
+    @kotlinx.serialization.SerialName("sceneBatteryOnFace")
+    val sceneBattery: Boolean = false,
+    /**
+     * With the camera open on the front, Xiaomi's Camera puts a blank standby page of its own on
+     * the back (MainScreenSelfieActivity). On: that page is sent away so Xiaomi's rear screen is
+     * back; the swipe from the left still brings the camera's preview.
+     */
+    val cameraKeepRear: Boolean = true,
+    /**
+     * The back stays lit with the scene on it whenever the phone is in use in the hand or lies
+     * face down, and is off in a pocket, lying on its back, and after a double tap on the back
+     * until it is lit again by hand (service/StayOn). On by default.
+     */
+    val stayOn: Boolean = true,
+    /**
+     * Home detection (service/HomeNet, StayOn): at home, on the Wi-Fi marked as home ([homeNet]), the back stays
+     * on for less time while the phone is in use, and off at night; lying face down is as everywhere. Off until
+     * he switches it on.
+     */
+    val homeDetect: Boolean = false,
+    /**
+     * "Sleep at night" (service/NightRule): between 22:00 and 07:00, or while Do Not Disturb is on, with the
+     * front off the back goes dark two minutes after the front did (or after a finger on it), is not lit again
+     * by the phone being moved, and is not woken for a notification or the charger. A lit back keeps the whole
+     * phone awake, and with it Xiaomi's own night mode out. On by default.
+     */
+    val sleepAtNight: Boolean = true,
+    /**
+     * "Pin animation" (the settings' Notes section): true = a pin goes through Xiaomi's own pin (rear/PinVia: its
+     * animation, island and sound on the front, our notes page on the back at its end); false = our own animation
+     * (rear/PinBeam). Read as a pin begins, so a change holds from the next pin. Xiaomi's by default.
+     */
+    val pinByXiaomi: Boolean = true,
+    /**
+     * "Follows the music" (service/MusicLevel): the music page's glows rise and fall with the sound. It needs the
+     * permission to hear what is playing (RECORD_AUDIO: Android's only way), which is the user's to give, so OFF
+     * until it is switched on; off, or without the permission, the glows breathe by themselves.
+     */
+    val musicFollows: Boolean = false,
+    /** The home Wi-Fi as HomeNet knows a network; "" when none is marked. */
+    val homeNet: String = "",
+    /** Lying face down and not touched for a while, the scene is dimmed. */
+    val stayDimFaceDown: Boolean = true,
 ) {
+
+    /**
+     * This config as companion mode starts it: the rules that act on the rear screen by
+     * themselves switched off, since on Xiaomi's base they light or dim Xiaomi's screen
+     * rather than a panel of ours — always-on's relight after the lock and "stay on in the
+     * hand" (they fight Xiaomi's own AOD off), "dim when face down", camera mode's full
+     * brightness, the pocket's active sleep, and the wake on lift. "Off when lying on its back"
+     * stays, as it only declines this app's wakes now. Everything else is kept as it was.
+     */
+    fun companionStart(): PanelConfig = copy(
+        rearMode = RearMode.COMPANION,
+        alwaysOn = false,
+        stayOnInHand = false,
+        tableMode = false,
+        cameraLight = false,
+        pocketMode = false,
+        wakeOnLift = false,
+    )
+
+    /** Companion mode: Xiaomi's rear screen is the base, and nothing of ours is placed over it. */
+    val companion: Boolean get() = rearMode == RearMode.COMPANION
 
     /** This account's appearance, or an all-defaults one if it has no entry. */
     /** [clockColor] or the shared extras colour. Same for the two below. */
@@ -903,10 +1202,40 @@ data class PanelConfig(
 
         fun encode(config: PanelConfig): String = json.encodeToString(serializer(), config)
 
-        /** Never throws. A config that cannot be read is a config that was not set. */
-        fun decode(raw: String?): PanelConfig =
-            if (raw.isNullOrBlank()) DEFAULT
-            else try { json.decodeFromString(serializer(), repurpled(raw)) } catch (e: Exception) { DEFAULT }
+        /**
+         * What a phone with no stored config starts on: companion mode, with the rules that
+         * act on the rear screen by themselves off ([companionStart]). [DEFAULT] keeps every
+         * field's own default (the Replace mode's posture rules on), which is what a stored
+         * config's missing field reads as. The message text is on, locked or not.
+         */
+        val FRESH: PanelConfig = DEFAULT.companionStart().copy(showNotificationText = true)
+
+        /** Whether [raw], a stored config, still says Replace mode: read as companion, but Xiaomi's rear app may be away. */
+        fun storedReplace(raw: String?): Boolean = raw != null && Regex("\"$REAR_MODE_KEY\"\\s*:\\s*\"REPLACE\"").containsMatchIn(raw)
+
+        /** The key whose absence marks a config written before companion mode. */
+        const val REAR_MODE_KEY = "rearMode"
+
+        /**
+         * Never throws. A config that cannot be read is a config that was not set.
+         *
+         * A stored config with no [REAR_MODE_KEY] was written before companion mode existed:
+         * it is moved to companion mode once ([companionStart]) — its posture rules were
+         * defaults nobody chose (alwaysOn, tableDim and cameraLight among them). The next save writes rearMode out
+         * (encodeDefaults), so this runs once, and a rule turned back on afterwards stays on.
+         */
+        fun decode(raw: String?): PanelConfig {
+            if (raw.isNullOrBlank()) return DEFAULT
+            return try {
+                val element = json.parseToJsonElement(repurpled(raw))
+                val config = json.decodeFromJsonElement(serializer(), element)
+                val stamped = (element as? kotlinx.serialization.json.JsonObject)?.containsKey(REAR_MODE_KEY) == true
+                // And one that says Replace: that mode and its screen are gone. It is read as
+                // companion mode, always, so nothing in the app can be in Replace mode again; the service
+                // puts Xiaomi's rear app back where Replace had moved it away (UsagePollService).
+                if (stamped && config.rearMode == RearMode.COMPANION) config else config.companionStart()
+            } catch (e: Exception) { DEFAULT }
+        }
 
         /**
          * The app's old colours become the purple wherever a stored config has them, in any field

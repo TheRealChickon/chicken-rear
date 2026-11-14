@@ -43,7 +43,7 @@ object ColorPickerDialog {
             filters = arrayOf(android.text.InputFilter.LengthFilter(7))
             textSize = 17f
             gravity = Gravity.CENTER_VERTICAL
-            setTextColor(Panel.Palette.FG)
+            setTextColor(dev.kb896.aiusage.ui.glass.Ink.fg())
             background = null
             UiType.dress(this)
         }
@@ -113,7 +113,7 @@ object ColorPickerDialog {
         // THE PANEL'S OWN COLOURS, not a fixed set: every colour something on the panel is
         // drawn in, once each — "make this match that" is most of what this is for. A row
         // of glass dots that scrolls sideways when there are more than fit.
-        root.addView(text(context, "On the panel", Panel.Palette.DIM, 11f), params(context, 14))
+        root.addView(text(context, "On the panel", dev.kb896.aiusage.ui.glass.Ink.dim(), 11f), params(context, 14))
         val strip = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(context, 2), 0, dp(context, 2))

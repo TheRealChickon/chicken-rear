@@ -7,14 +7,12 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
-import dev.kb896.aiusage.rear.Glass
 
 /**
  * A section of the settings screen.
  *
- * Under GLASS: a pane behind its rows, the catalog's card recipe
- * (destinations/ScrollContainerContent.kt, Apache 2.0) — a 28dp corner with the panel's
- * card tint. Under ORIGINAL: an inert LinearLayout, so declaring it in the XML changes
+ * Under GLASS: plain glass behind its rows (Pane.card) — the screen's one corner radius,
+ * a translucent body and a hairline edge, 16dp in and 12dp apart. Under ORIGINAL: an inert LinearLayout, so declaring it in the XML changes
  * nothing about the layout ORIGINAL has today.
  */
 class GlassCard @JvmOverloads constructor(
@@ -50,13 +48,9 @@ class GlassCard @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         if (!glass) { super.onDraw(canvas); return }
-        // interior = false: a card is the largest pane on the screen and nearly all of it
-        // is middle, where the lens hands the backdrop straight through — the same
-        // wallpaper the root has already painted behind it. Drawing the refraction only
-        // in the rim band is the same picture for a fraction of the shader's work, which
-        // is what a 18ms scroll frame under GLASS was mostly made of.
-        luminance = Pane.draw(canvas, this, 0f, 0f, width.toFloat(), height.toFloat(),
-            28 * density, Glass.CARD_TINT, interior = false)
+        // Plain glass: a translucent body and a hairline edge (Pane.card), no lens.
+        luminance = Pane.card(canvas, this, 0f, 0f, width.toFloat(), height.toFloat(),
+            Pane.CARD_RADIUS_DP * density)
         // A card sliding from a dark region of the picture into a light one flips its
         // ink; only when the side changes, or every frame would restyle every row.
         if (inkedLight != Ink.isLight(luminance)) ink()
@@ -71,7 +65,11 @@ class GlassCard @JvmOverloads constructor(
         fun walk(v: View) {
             if (v is Glassy && v !== this) return
             if (v is TextView) v.setTextColor(
-                if (v.tag == CardTitle.TAG || v.textSize <= 11.5f * density) Ink.secondary(luminance) else Ink.primary(luminance),
+                when {
+                    v.tag == CardTitle.NOTE_TAG -> Ink.tertiary(luminance)
+                    v.tag == CardTitle.TAG || v.textSize <= 11.5f * density -> Ink.secondary(luminance)
+                    else -> Ink.primary(luminance)
+                },
             )
             if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i))
         }

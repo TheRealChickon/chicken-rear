@@ -112,14 +112,14 @@ object Modal {
         // back off the theme would lose the danger case.
         dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
             typeface = mono
-            setTextColor(tint(if (danger) Panel.Palette.CRIT else Panel.Palette.WORK))
+            setTextColor(tint(if (danger) Panel.Palette.CRIT else dev.kb896.aiusage.ui.glass.Ink.accent(0f)))
         }
         for (which in intArrayOf(AlertDialog.BUTTON_NEGATIVE, AlertDialog.BUTTON_NEUTRAL)) {
             dialog.getButton(which)?.apply {
                 typeface = mono
                 // Dim, so the way out of a dialog is legible without competing with the
                 // thing the dialog is asking.
-                setTextColor(tint(Panel.Palette.DIM))
+                setTextColor(tint(dev.kb896.aiusage.ui.glass.Ink.dim()))
             }
         }
     }
@@ -133,6 +133,6 @@ object Modal {
      */
     private fun tint(colour: Int) = android.content.res.ColorStateList(
         arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
-        intArrayOf(Panel.Palette.DIM, colour),
+        intArrayOf(dev.kb896.aiusage.ui.glass.Ink.dim(), colour),
     )
 }

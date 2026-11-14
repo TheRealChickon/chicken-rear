@@ -13,7 +13,8 @@
 # permits. Verified working on 2026-08-14 immediately after `adb install -r`
 # failed on the same device, same session, same APK.
 set -e
-ADB=/opt/homebrew/bin/adb
+# adb from PATH (this is a Linux box now; it was macOS homebrew's), or ADB=... to override.
+ADB=${ADB:-adb}
 # Device selection. Was a hardcoded USB serial, which breaks the moment the phone is
 # on wireless adb (the serial becomes an ip:port). Resolution order:
 #   ANDROID_SERIAL if the caller set it, else the only attached device.
@@ -38,14 +39,18 @@ if [ -z "$DEVICE" ]; then
   "$ADB" devices | awk 'NR>1 && NF' >&2
   exit 1
 fi
-PKG=dev.kb896.aiusage.dev
+# The dev build's application id (app/build.gradle.kts: dev.chicken.rear + ".dev").
+PKG=dev.chicken.rear.dev
 STAGE=/data/local/tmp/claude-status.apk
 
 # This machine has no system Java — `java -version` fails outright. Android
 # Studio's bundled JBR (21) is the only JDK present, so point Gradle at it here
 # rather than making every caller remember to export it.
-: "${JAVA_HOME:=/Applications/Android Studio.app/Contents/jbr/Contents/Home}"
-export JAVA_HOME
+# On Linux a system JDK is on PATH, and Gradle finds it without JAVA_HOME.
+if [ -z "${JAVA_HOME:-}" ] && [ -d "/Applications/Android Studio.app/Contents/jbr/Contents/Home" ]; then
+  JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+  export JAVA_HOME
+fi
 
 # Refuse anything that is not the phone.
 #
@@ -54,7 +59,8 @@ export JAVA_HOME
 # the glasses plugged in, this script will cheerfully install the rear-panel app onto
 # the glasses. That happened. The model check is the backstop; ANDROID_SERIAL still
 # overrides for the rare case of deliberately targeting something else.
-EXPECT_MODEL=25098PN5AC
+# The 17 Pro Max (China ROM). The 17 Pro was 25098PN5AC.
+EXPECT_MODEL=${EXPECT_MODEL:-2509FPN0BC}
 if [ -z "${ANDROID_SERIAL:-}" ]; then
   GOT=$("$ADB" -s "$DEVICE" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
   if [ "$GOT" != "$EXPECT_MODEL" ]; then

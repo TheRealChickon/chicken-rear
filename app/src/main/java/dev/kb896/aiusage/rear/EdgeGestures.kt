@@ -50,7 +50,27 @@ import kotlin.math.abs
 class EdgeGestures(
     /** Where the usable area starts, in panel units: the pull bands' left edge (RearGeometry.cutoutUnits). */
     private val usableLeft: Float,
+    /** Panel units to the rear's pixels across (RearGeometry.fitX), for the top pull's band. */
+    private val fitX: Float = 1f,
 ) {
+
+    /**
+     * COMPANION MODE'S TOP PULL, asked as each finger lands (any thread): true while Xiaomi's
+     * rear screen is the base with More apps on and no guest of ours on top. Then a finger
+     * landing in the top band ([PortalPull.startsTopPull]) is the pinned apps' pull, reported as
+     * [Action.PullStart] / [Action.PullMove] / [Action.PullEnd] once it commits
+     * ([PortalPull.topCommits]), its y mirrored ([PortalPull.mirrored]) so the sheet rises as it
+     * would from the bottom; and the bottom band is no pull at all, being Xiaomi's home strip.
+     */
+    @Volatile var topPortal: () -> Boolean = { false }
+
+    /**
+     * COMPANION MODE'S NOTIFICATIONS, asked as each finger lands (any thread): true while Xiaomi's
+     * rear screen is the base with notifications on and no guest of ours on top. Then the same
+     * top band ([PortalPull.startsTopPull]: between the lenses and Xiaomi's back strip) is the
+     * notifications' pull, reported as [Action.NoticePullStart] and on; it wins over [topPortal].
+     */
+    @Volatile var topNotices: () -> Boolean = { false }
 
     sealed interface Action {
         /** A pull begins, the finger at [y]: from the bottom band, or ([onSheet]) a drag on the sheet. */
@@ -85,7 +105,7 @@ class EdgeGestures(
         data object Cancel : Action
     }
 
-    private enum class Kind { NONE, PULL, TOP, NOTICES, BACK, SHEET }
+    private enum class Kind { NONE, PULL, TOP, NOTICES, BACK, SHEET, PORTAL_TOP }
 
     /** Whether the sheet is up, for fingers that land from now on. Set by the caller. */
     var sheet = false
@@ -94,6 +114,9 @@ class EdgeGestures(
 
     /** The gesture going is on the Back band (its landing there, not the sheet's, a pull's or a top edge's): BackChevron's to show. */
     val onBackBand: Boolean get() = kind == Kind.BACK
+
+    /** The gesture going is companion mode's top pull: the caller grabs the sheet at the bottom edge for it. */
+    val onPortalTop: Boolean get() = kind == Kind.PORTAL_TOP
     private var committed = false
     private var downX = 0f
     private var downY = 0f
@@ -112,6 +135,7 @@ class EdgeGestures(
         is RearTouches.Down -> {
             val stale = when {
                 kind == Kind.PULL && committed -> listOf(Action.PullEnd(lastY))
+                kind == Kind.PORTAL_TOP && committed -> listOf(Action.PullEnd(PortalPull.mirrored(lastY, downY)))
                 kind == Kind.TOP && committed -> listOf(Action.TopPullEnd(lastY))
                 kind == Kind.NOTICES && committed -> listOf(Action.NoticePullEnd(lastY))
                 kind == Kind.SHEET && committed -> listOf(if (roaming) Action.RoamEnd(lastX, lastY) else if (sideways) Action.SlideEnd(lastX) else Action.PullEnd(lastY))
@@ -120,8 +144,16 @@ class EdgeGestures(
             }
             downX = e.x; downY = e.y; lastX = e.x; lastY = e.y; downAt = e.atMs
             committed = false; sideways = false; roaming = false
+            val portalTop = !sheet && topPortal()
+            val noticesTop = !sheet && topNotices()
             kind = when {
                 sheet -> Kind.SHEET
+                noticesTop && PortalPull.startsTopPull(e.x, e.y, fitX) -> Kind.NOTICES
+                // The rest of the top edge and Xiaomi's home strip, over Xiaomi's screen: not ours.
+                noticesTop && (e.y <= PortalPull.EDGE || PortalPull.startsPull(e.x, e.y, usableLeft)) -> Kind.NONE
+                portalTop && PortalPull.startsTopPull(e.x, e.y, fitX) -> Kind.PORTAL_TOP
+                // Xiaomi's home strip, in companion mode: not ours.
+                portalTop && PortalPull.startsPull(e.x, e.y, usableLeft) -> Kind.NONE
                 PortalPull.startsPull(e.x, e.y, usableLeft) -> Kind.PULL
                 ControlCenter.startsPull(e.x, e.y, usableLeft) -> Kind.TOP
                 NoticeShade.startsPull(e.x, e.y, usableLeft) -> Kind.NOTICES
@@ -152,12 +184,19 @@ class EdgeGestures(
                 abs(e.x - downX) >= SLOP || downY - e.y >= SLOP -> { kind = Kind.NONE; emptyList() }
                 else -> emptyList()
             }
+            Kind.PORTAL_TOP -> when {
+                committed -> listOf(Action.PullMove(PortalPull.mirrored(e.y, downY)))
+                PortalPull.topCommits(downX, downY, e.x, e.y) -> { committed = true; listOf(Action.PullStart(PortalPull.mirrored(e.y, downY))) }
+                PortalPull.topAbandoned(downX, downY, e.x, e.y, SLOP) -> { kind = Kind.NONE; emptyList() }
+                else -> emptyList()
+            }
             Kind.SHEET -> sheetMove(e)
             else -> emptyList()
         } }
         is RearTouches.Up -> {
             val out = when (kind) {
                 Kind.PULL -> if (committed) listOf(Action.PullEnd(e.y)) else emptyList()
+                Kind.PORTAL_TOP -> if (committed) listOf(Action.PullEnd(PortalPull.mirrored(e.y, downY))) else emptyList()
                 Kind.TOP -> if (committed) listOf(Action.TopPullEnd(e.y)) else emptyList()
                 Kind.NOTICES -> if (committed) listOf(Action.NoticePullEnd(e.y)) else emptyList()
                 Kind.BACK -> if ((downX - e.x) - abs(e.y - downY) >= BACK_TRAVEL) listOf(Action.Back) else emptyList()

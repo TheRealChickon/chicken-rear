@@ -74,6 +74,172 @@ object AppPicker {
         return first + shown.filter { it !in firstSet }
     }
 
+    /**
+     * The notification app set's rows (PanelConfig.noticeApps) for [query]: the [chosen] ones
+     * first, by name, then the rest of [apps] as they came. Taken once as the sheet opens and
+     * on each search, not on every switch, so a row does not jump away from the finger.
+     * A chosen app no longer installed is not listed (it stays in the set, harmless).
+     */
+    fun chosenFirst(apps: List<App>, chosen: Set<String>, query: String): List<App> {
+        val q = query.trim()
+        val shown = if (q.isEmpty()) apps else apps.filter { it.label.contains(q, ignoreCase = true) }
+        val (picked, rest) = shown.partition { it.pkg in chosen }
+        return picked.sortedBy { it.label.lowercase() } + rest
+    }
+
+    /** [set] with [pkg] in it ([on]) or out of it. */
+    fun toggled(set: Set<String>, pkg: String, on: Boolean): Set<String> = if (on) set + pkg else set - pkg
+
+    private var choosing = false
+
+    /**
+     * A sheet of every launchable app with a switch each, for a set of packages ([chosen] now;
+     * [set] saves one change at once). [note] says what a switch on means. The rows come in a
+     * page at a time with their icons (LazyRows), as the portal's list does. [onDone] when it goes.
+     */
+    fun showSet(
+        activity: androidx.activity.ComponentActivity,
+        title: String,
+        note: String,
+        chosen: () -> Set<String>,
+        set: (pkg: String, on: Boolean) -> Unit,
+        onDone: () -> Unit,
+    ) {
+        if (choosing) return
+        choosing = true
+        val top = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(activity, 20), dp(activity, 4), dp(activity, 20), 0)
+        }
+        SettingsRows.note(top, note)
+        val search = GlassField(activity).apply {
+            hint = "Search apps"
+            setHintTextColor(Ink.secondary(0f))
+            setSingleLine()
+            textSize = 15f
+            typeface = UiType.of(activity)
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+        }
+        top.addView(search, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(activity, 8)
+            bottomMargin = dp(activity, 4)
+        })
+        val column = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(activity, 20), 0, dp(activity, 12), 0)
+        }
+        val looking = GlassSpinner(activity).also { column.addView(it) }
+        val rows = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        column.addView(rows)
+        val filler = View(activity)
+        column.addView(filler, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0))
+        val scroll = object : SoftEdgeScrollView(activity) {
+            override fun onMeasure(w: Int, h: Int) {
+                val cap = (resources.displayMetrics.heightPixels * 0.45f).toInt()
+                super.onMeasure(w, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.EXACTLY))
+            }
+        }.apply { addView(column) }
+        val sheet = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(top)
+            addView(scroll)
+        }
+        val dialog = Modal.builder(activity).setTitle(title).setView(sheet).setPositiveButton("Done", null).create()
+        dialog.setOnDismissListener {
+            choosing = false
+            onDone()
+        }
+        Modal.show(dialog)
+
+        val icons = HashMap<String, Drawable?>()
+        var generation = 0
+
+        fun row(app: App): View {
+            val line = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = dp(activity, 56)
+            }
+            line.addView(ImageView(activity).apply { setImageDrawable(icons[app.pkg]) },
+                LinearLayout.LayoutParams(dp(activity, 40), dp(activity, 40)).apply { marginEnd = dp(activity, 12) })
+            line.addView(TextView(activity).apply {
+                text = app.label
+                textSize = 15f
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setTextColor(Ink.primary(0f))
+                UiType.dress(this)
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            line.addView(dev.kb896.aiusage.ui.liquid.LiquidToggle(activity).apply {
+                setCheckedSilently(app.pkg in chosen())
+                contentDescription = app.label
+                onCheckedChange = { on -> set(app.pkg, on) }
+            })
+            return line
+        }
+
+        fun fill(apps: List<App>) {
+            val mine = ++generation
+            val list = chosenFirst(apps, chosen(), search.text?.toString().orEmpty())
+            rows.removeAllViews()
+            filler.layoutParams = filler.layoutParams.apply { height = 0 }
+            scroll.scrollTo(0, 0)
+            if (list.isEmpty()) {
+                rows.addView(TextView(activity).apply {
+                    text = "No apps found."
+                    textSize = 14f
+                    setTextColor(Ink.secondary(0f))
+                    UiType.dress(this)
+                    setPadding(0, dp(activity, 16), 0, 0)
+                })
+                return
+            }
+            val pages = Paged(list.size)
+            filler.doOnNextLayout {
+                filler.post {
+                    if (mine != generation) return@post
+                    LazyRows.attach(scroll, filler, pages, list.size) load@{ page, done ->
+                        if (mine != generation) return@load
+                        val wanted = page.mapNotNull { list.getOrNull(it) }.filter { it.pkg !in icons }
+                        activity.lifecycleScope.launch {
+                            val read = withContext(Dispatchers.IO) {
+                                val pm = activity.packageManager
+                                wanted.associate { it.pkg to runCatching { pm.getApplicationIcon(it.pkg) }.getOrNull() }
+                            }
+                            icons.putAll(read)
+                            if (!dialog.isShowing || mine != generation) return@launch
+                            page.forEachIndexed { n, i ->
+                                val app = list.getOrNull(i) ?: return@forEachIndexed
+                                val v = row(app)
+                                rows.addView(v)
+                                LazyRows.arrive(v, n)
+                            }
+                            done()
+                        }
+                    }
+                }
+            }
+            filler.requestLayout()
+        }
+
+        activity.lifecycleScope.launch {
+            val apps = runCatching { withContext(Dispatchers.IO) { launchable(activity) } }.getOrElse {
+                android.util.Log.w("AppPicker", "launcher query failed: ${it.message}")
+                emptyList()
+            }
+            if (!dialog.isShowing) return@launch
+            looking.animate().alpha(0f).setDuration(SPINNER_OUT_MS).withEndAction {
+                column.removeView(looking)
+                fill(apps)
+                search.addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                    override fun afterTextChanged(s: Editable?) = fill(apps)
+                })
+            }
+        }
+    }
+
     private var opening = false
 
     /**

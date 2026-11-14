@@ -125,6 +125,12 @@ class GlassSegmented(
         canvas.save()
         canvas.scale(drag.scaleX, drag.scaleY, sel.centerX(), sel.centerY())
         Pane.draw(canvas, this, sel.left, sel.top, sel.right, sel.bottom, sel.height() / 2f, tint = 0, clear = true)
+        // On the light screen clear glass darkens, which would make the chosen option the
+        // greyest; there it is a white pill on the grey track instead.
+        if (!Ink.dark) {
+            paint.color = 0xFFFFFFFF.toInt()
+            canvas.drawRoundRect(sel, sel.height() / 2f, sel.height() / 2f, paint)
+        }
         canvas.restore()
 
         val ink = Ink.primary(lum)

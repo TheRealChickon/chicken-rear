@@ -1,6 +1,7 @@
 package dev.kb896.aiusage.ui.glass
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class InkTest {
@@ -19,11 +20,28 @@ class InkTest {
     /** Nothing on the front reacts to the cell behind it: light or dark, the dark background's tokens. */
     @Test fun `the catalog tokens are the dark background's, whatever the cell`() {
         for (cell in floatArrayOf(0.7f, 0.3f)) {
-            assertEquals(0xFFC26BFF.toInt(), Ink.on(cell))
-            assertEquals(0xFFC26BFF.toInt(), Ink.accent(cell))
+            assertEquals(0xFF9A9AA0.toInt(), Ink.on(cell))
+            assertEquals(0xFFECECEF.toInt(), Ink.accent(cell))
+            assertEquals(0x73FFFFFF, Ink.tertiary(cell))
             assertEquals(0x5C787880, Ink.track(cell))
             assertEquals(0.56f, Ink.scrimAlpha(cell), 0.001f)
         }
+    }
+
+    /** The front is neutral: no hue in the accent or the switch's on colour (W4). */
+    @Test fun `the accent and the on colour are grey, not a hue`() {
+        for (c in intArrayOf(Ink.ACCENT, Ink.ON)) {
+            val r = (c shr 16) and 0xFF; val g = (c shr 8) and 0xFF; val b = c and 0xFF
+            assertTrue("channels within 8 of each other: ${Integer.toHexString(c)}",
+                maxOf(r, g, b) - minOf(r, g, b) <= 8)
+        }
+        // The white thumb must stand out on a switch that is on.
+        assertTrue(((Ink.ON shr 16) and 0xFF) < 0xC0)
+    }
+
+    /** A note is quieter than a title, which is quieter than a value. */
+    @Test fun `tertiary is dimmer than secondary`() {
+        assertTrue((Ink.tertiary(0f) ushr 24) < (Ink.secondary(0f) ushr 24))
     }
 
     @Test fun `mix moves each channel toward the target by t`() {

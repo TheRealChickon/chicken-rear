@@ -23,4 +23,16 @@ object CardTitle {
         view.fontVariationSettings = "'wght' 500"
         view.setTextColor(Ink.secondary(0f))
     }
+
+    /** A note under a control: smaller and dimmer than a title, so it never reads as one. */
+    const val NOTE_TAG = "card_note"
+    const val NOTE_SP = 12f
+
+    fun note(view: TextView) {
+        view.tag = NOTE_TAG
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, NOTE_SP)
+        UiType.dress(view)
+        view.fontVariationSettings = "'wght' 400"
+        view.setTextColor(Ink.tertiary(0f))
+    }
 }

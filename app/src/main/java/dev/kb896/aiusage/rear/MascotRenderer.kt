@@ -29,6 +29,16 @@ object MascotRenderer {
     /** The second account's accent, swapped in for the first's. */
     const val ACCENT_WORK = 0xFF006EFF.toInt()
 
+    /** The body's shadow in the dumbbell cycle, and the confetti's pink pieces, as upstream drew them (see [draw]). */
+    const val BODY_SHADE = 0xFF7E3BBF.toInt()
+    const val CONFETTI_PINK = 0xFFC87392.toInt()
+    const val CONFETTI_PINK_2 = 0xFFCB708F.toInt()
+    const val CONFETTI_YELLOW = 0xFFF2C14E.toInt()
+
+    /** [color] three quarters as bright: a body's shadow. */
+    fun shade(color: Int): Int =
+        (color and 0xFF000000.toInt()) or ((((color shr 16) and 0xFF) * 3 / 4) shl 16) or ((((color shr 8) and 0xFF) * 3 / 4) shl 8) or ((color and 0xFF) * 3 / 4)
+
     /**
      * The ghost's own colours, fixed rather than following the account.
      *
@@ -175,6 +185,10 @@ object MascotRenderer {
             body.color = when (r.color) {
                 ACCENT_ORANGE -> accent
                 BODY_PURPLE -> bodyColor
+                // In another body colour nothing of the drawing stays purple or pink: the body's own shadow
+                // (the dumbbell cycle's) is that colour darkened, and the confetti's pink pieces are yellow.
+                BODY_SHADE -> if (bodyColor == BODY_PURPLE) r.color else shade(bodyColor)
+                CONFETTI_PINK, CONFETTI_PINK_2 -> if (bodyColor == BODY_PURPLE) r.color else CONFETTI_YELLOW
                 else -> r.color
             }
             canvas.drawRect(

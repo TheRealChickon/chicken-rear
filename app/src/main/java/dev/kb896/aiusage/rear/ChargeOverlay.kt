@@ -99,6 +99,21 @@ object ChargeOverlay {
         }
     }
 
+    /**
+     * The charger came out while the cell was up: the liquid DRAINS rather than the cell
+     * finishing its five seconds over a phone that is no longer charging. From [fillAtUnplug]
+     * to empty over [DRAIN_MS], eased, and the whole thing fades with it (ChargeStyle.drainAlpha).
+     */
+    fun drain(fillAtUnplug: Float, sinceUnplugMs: Float): Float {
+        val from = fillAtUnplug.coerceIn(0f, 1f)
+        if (sinceUnplugMs <= 0f) return from
+        val p = (sinceUnplugMs / DRAIN_MS).coerceIn(0f, 1f)
+        return from * (1f - Tween.easeInOut(p))
+    }
+
+    /** How long an unplug takes to drain the cell. */
+    const val DRAIN_MS = 400f
+
     /** Whether the whole appearance is over and nothing need be drawn. */
     fun done(elapsedMs: Float): Boolean = elapsedMs >= TOTAL_MS
 

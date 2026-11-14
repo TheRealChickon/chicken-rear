@@ -67,7 +67,7 @@ class GlassChip @JvmOverloads constructor(
         canvas.drawCircle(cx, cy, r, sheen)
         Pane.draw(canvas, this, l, t, rr, b, r, tint = 0, clear = false, rim = true, lens = false)
         if (ringed) {
-            ring.color = 0xF2FFFFFF.toInt()
+            ring.color = if (Ink.dark) 0xF2FFFFFF.toInt() else 0xD91C1C1E.toInt()
             ring.strokeWidth = r * 0.09f
             canvas.drawCircle(cx, cy, r * DOT + ring.strokeWidth * 1.4f, ring)
         }

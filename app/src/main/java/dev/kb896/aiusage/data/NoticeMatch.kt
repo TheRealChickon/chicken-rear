@@ -7,5 +7,13 @@ package dev.kb896.aiusage.data
  */
 object NoticeMatch {
     fun keep(keys: List<String>, active: Set<String>): List<Boolean> =
-        keys.map { it.isEmpty() || it in active }
+        keys.map { it.isEmpty() || it in active || remote(it) }
+
+    /**
+     * A card put up from outside (remote control), by its key. It was never on the front, so
+     * "only what the front still has" would take it away the moment it was compared; it goes
+     * when whoever put it up takes it down, or when it is swiped away on the back.
+     */
+    const val REMOTE = "remote:"
+    fun remote(key: String): Boolean = key.startsWith(REMOTE)
 }

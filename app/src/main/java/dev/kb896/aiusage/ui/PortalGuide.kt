@@ -5,7 +5,7 @@ import dev.kb896.aiusage.data.PanelConfig
 /**
  * The Portal tab's guide: three steps, each ticked by what the app can see for itself —
  * never by a button saying "done" — and a card at the top of the tab until they are
- * (PortalGuideCard). Pure: the steps come from the config's own fields.
+ * (a card in the settings). Pure: the steps come from the config's own fields.
  *
  * - [Step.PIN]: an app pinned (portalApps).
  * - [Step.TILE]: the "Send to back" tile in Quick Settings (portalTileAdded: the add-tile

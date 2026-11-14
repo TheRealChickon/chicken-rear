@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The dark theme's: Ink.ACCENT, Panel.Palette.FG and DIM, Backdrop.GRAPHITE. -->
+    <color name="settings_ground">#FF0E0E10</color>
+    <color name="settings_accent">#FFECECEF</color>
+    <color name="settings_text">#FFC5C8C6</color>
+    <color name="settings_text_dim">#FF555555</color>
+    <color name="settings_control">#FF555555</color>
+    <color name="settings_dialog">#FF1D1F21</color>
+    <color name="settings_dialog_rule">#FF2F3234</color>
+</resources>

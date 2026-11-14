@@ -70,10 +70,13 @@ class WeatherPoll(
 
     suspend fun tick() {
         val config = configNow()
-        val target = target(config, if (config.weatherUseDevice) fix() else null) ?: return
+        val target = target(config, if (config.weatherUseDevice || config.sceneWeather) fix() else null)
+            ?: run { Log.i(TAG, "no reading: no position from the phone and no place set"); return }
         // A failed fetch keeps the last reading: a stale fact beats a blank line, and the
         // panel drops it on its own after two hours.
-        val reading = fetch(target) ?: return
+        val reading = fetch(target)
+            ?: run { Log.i(TAG, "no reading: the weather service did not answer"); return }
+        if (reading.condition != latest?.condition) Log.i(TAG, "a reading: ${reading.condition}")
         latest = reading
         onReading(reading)
     }
@@ -99,7 +102,8 @@ class WeatherPoll(
          * not silence.
          */
         fun target(config: PanelConfig, fix: Pair<Double, Double>?): Target? {
-            if (config.weatherUseDevice && fix != null) {
+            // The moon face's clouds follow the weather where the phone is: the device's own fix, as the switch asks.
+            if ((config.weatherUseDevice || config.sceneWeather) && fix != null) {
                 return Target(fix.first, fix.second, if (config.weatherLat == null) "Here" else "")
             }
             val lat = config.weatherLat ?: return null
@@ -128,11 +132,42 @@ fun deviceFix(context: Context): suspend () -> Pair<Double, Double>? = {
                 }
             }
         }
-        val loc = current ?: lm.getLastKnownLocation(LocationManager.FUSED_PROVIDER)
-        loc?.let { it.latitude to it.longitude }
+        val last = if (current == null) lm.getLastKnownLocation(LocationManager.FUSED_PROVIDER) else null
+        val loc = current ?: last
+        if (loc != null) LastPlace.keep(context, loc.latitude, loc.longitude)
+        val kept = if (loc == null) LastPlace.read(context) else null
+        Log.i("AiUsageWeather", "position: now ${current != null}, last known ${last != null}, remembered ${kept != null}")
+        loc?.let { it.latitude to it.longitude } ?: kept
     } catch (e: SecurityException) {
         null
     } catch (e: IllegalArgumentException) {
         null   // the fused provider is missing on this device
+    }
+}
+
+/**
+ * The last rough position the phone gave, kept for when it gives none.
+ *
+ * FOUND ON THE PHONE: the service runs in the background, and there the system hands
+ * an app with "while in use" location no position at all (the request is dropped at once, the
+ * last known one is null), so the moon's clouds never had any weather. With the app's own page in
+ * front it does get one; that one is kept here, to a tenth of a degree (some 10 km: the right
+ * weather, nobody's address), in the app's own preferences, and used until the next.
+ */
+object LastPlace {
+    private const val PREFS = "last_place"
+
+    fun round(v: Double): Double = Math.round(v * 10.0) / 10.0
+
+    fun keep(context: Context, latitude: Double, longitude: Double) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putFloat("lat", round(latitude).toFloat()).putFloat("lng", round(longitude).toFloat())
+            .putBoolean("known", true).apply()
+    }
+
+    fun read(context: Context): Pair<Double, Double>? {
+        val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (!p.getBoolean("known", false)) return null
+        return round(p.getFloat("lat", 0f).toDouble()) to round(p.getFloat("lng", 0f).toDouble())
     }
 }

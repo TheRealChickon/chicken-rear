@@ -21,6 +21,7 @@ import dev.kb896.aiusage.R
 import dev.kb896.aiusage.data.ConfigStore
 import dev.kb896.aiusage.data.DashboardState
 import dev.kb896.aiusage.data.StatePayload
+import dev.kb896.aiusage.rear.ChargeStyle
 import dev.kb896.aiusage.rear.RearActivity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -148,12 +149,23 @@ class UsagePollService : Service() {
          * own schedule.
          */
         override fun onDisplayChanged(displayId: Int) {
+            // The table watch follows the front's own power, not only SCREEN_OFF/ON: with the
+            // back lit the phone stays interactive as the front times out, and that broadcast
+            // need not come. Its sync is cheap and does nothing when nothing changed.
+            if (displayId == android.view.Display.DEFAULT_DISPLAY) { table?.sync(); stayOn?.sync(); return }
             if (displayId != Panel.DISPLAY_ID) return
+            stayOn?.sync()
             // Pocket mode hears every change, and keeps only the power (PocketMode.lit).
             pocket?.sync()
             val change = panelPower.see(panelOn())
             if (change == PanelPower.Change.WENT_DARK) rearWentOffAt = android.os.SystemClock.elapsedRealtime()
             if (change != PanelPower.Change.WOKE) return
+            // The back lit while the double tap's latch is set: every automatic wake is declined
+            // then (ShizukuBridge.wake), so this is the user — the double tap to wake, the power
+            // button. The latch is his to end (ManualOff); the panel clears it on its edge too.
+            Graph.of(this@UsagePollService).bridge.clearManualOff("the back lit while switched off by hand")
+            // And whenever our own rule had it off: lit by his hand (StayOn.rearWoke), which looks again.
+            stayOn?.rearWoke()
             // THE BACKSTOP for the dozing flag. Everything else that clears it depends on
             // the panel still being alive to say so, and the one case the supervisors
             // exist for is the panel not being alive. A lit display is proof the sleep is
@@ -161,7 +173,8 @@ class UsagePollService : Service() {
             // runs — otherwise a panel that died while dozing would be left unrecovered,
             // and the user would double-tap the rear screen and find nothing there.
             Graph.of(this@UsagePollService).bridge.setDozing(false)
-            scope.launch { safeSupervise() }
+            // Companion mode: nothing of ours to recover on a rear Xiaomi just lit.
+            if (!config().companion) scope.launch { safeSupervise() }
         }
     }
 
@@ -169,11 +182,39 @@ class UsagePollService : Service() {
 
     /** Pocket mode's sensor and calls — see PocketWatch for why they live in this process. */
     private var pocket: PocketWatch? = null
+    /** Table mode's face-down watch while the back is dark — see TableWatch, same reason. */
+    private var table: TableWatch? = null
+    /** Camera mode's watch for a camera in use — see CameraWatch, same reason. */
+    private var camera: CameraWatch? = null
+    /** Whether the back is to stay lit with the scene on it, from how the phone is held (StayOn). */
+    private var stayOn: StayOn? = null
     private var stopConfigWatch: (() -> Unit)? = null
 
     /** Installs, updates, removals and a language change all alter the pinned apps' icons or names. */
     private val portalAppsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) { portalApps?.refresh() }
+    }
+
+    /**
+     * Replace mode is gone (one UI, and Xiaomi's rear screen always the base). A config that still
+     * says Replace is written back as companion, once; the old panel is taken off the back, and Xiaomi's rear
+     * app, which Replace mode had moved out of the way, is put back as soon as the shell can be asked.
+     */
+    private fun leaveReplaceIfStored(app: Graph) {
+        val store = ConfigStore(this)
+        if (!dev.kb896.aiusage.data.PanelConfig.storedReplace(store.raw())) return
+        Log.i(TAG, "replace mode was stored: back to companion, and Xiaomi's rear app restored")
+        store.save(store.load())                      // read as companion (PanelConfig.decode), and stored so
+        runCatching { app.bridge.hide() }
+        Thread({
+            // The shell may not be bound yet: asked until it answers, for a minute.
+            repeat(30) {
+                val restored = runCatching { if (app.bridge.status().ready) app.bridge.setXiaomiRearApp(installed = true) else null }.getOrNull()
+                if (restored != null) { Log.i(TAG, "Xiaomi's rear app restored: $restored"); return@Thread }
+                try { Thread.sleep(2_000L) } catch (_: InterruptedException) { return@Thread }
+            }
+            Log.w(TAG, "Xiaomi's rear app not restored: the shell did not answer")
+        }, "leave-replace").apply { isDaemon = true; start() }
     }
 
     override fun onCreate() {
@@ -189,9 +230,10 @@ class UsagePollService : Service() {
             android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
         val app = Graph.of(this)
+        leaveReplaceIfStored(app)
         // The pinned apps' icons and names go to the shell: now, and on every config write.
         val loader = PortalAppsLoader(this) { app.bridge.setPortalApps(it) }.also { portalApps = it }
-        stopConfigWatch = ConfigStore(this).listen { loader.refresh(); pocket?.setSwitch(config().pocketMode) }
+        stopConfigWatch = ConfigStore(this).listen { loader.refresh(); pocket?.setSwitch(config().pocketMode); config().let { table?.setConfig(it.tableMode, it.tableChargingOnly, it.offOnBack, liftWakes(it)); camera?.setSwitch(it.cameraLight) }; stayOn?.sync() }
         ContextCompat.registerReceiver(this, portalAppsReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
             addAction(Intent.ACTION_PACKAGE_REMOVED)
@@ -234,7 +276,14 @@ class UsagePollService : Service() {
         // As the back is NOW: a back lit when this service starts is not a back waking up at
         // its first refresh-rate change (PanelPower).
         panelPower = PanelPower(on = panelOn())
-        pocket = PocketWatch(this, app.bridge).also { it.setSwitch(config().pocketMode); it.sync() }
+        pocket = PocketWatch(this, app.bridge, onPocketChanged = { table?.sync() }).also { it.setSwitch(config().pocketMode); it.sync() }
+        table = TableWatch(this, app.bridge).also { w ->
+            config().let { w.setConfig(it.tableMode, it.tableChargingOnly, it.offOnBack, liftWakes(it)) }
+            // A panel that outlived the last process may hold its "on its back": put right.
+            w.restateAfterStart()
+        }
+        camera = CameraWatch(this, app.bridge).also { it.setSwitch(config().cameraLight); it.start() }
+        stayOn = StayOn(this, app.bridge, { config() }, cameraInUse = { camera?.inUse == true || app.bridge.cameraOpen }).also { it.start() }
         displays.registerDisplayListener(displayListener, null)
         // RECEIVER_NOT_EXPORTED is required, not optional: on API 34+ a receiver whose
         // filter contains a NON-system action must declare its export state or
@@ -253,8 +302,18 @@ class UsagePollService : Service() {
                 contentResolver.registerContentObserver(android.provider.Settings.Global.getUriFor(key), false, quickWatch)
             }
         }
+        // The battery for the scene's percent on the back: sticky, so the first reading comes at once.
+        ContextCompat.registerReceiver(this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+        // The system's own (Xiaomi's battery service sends them to whoever listens): exported, as a system broadcast needs.
+        runCatching {
+            ContextCompat.registerReceiver(this, chargeNews, IntentFilter().apply {
+                addAction(ChargePrecise.ACTION_QUICK_CHARGE_TYPE); addAction(ChargePrecise.ACTION_SOC_DECIMAL)
+            }, ContextCompat.RECEIVER_EXPORTED)
+        }
         ContextCompat.registerReceiver(this, screenReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_POWER_CONNECTED)
+            // Only for the table watch's "only while charging" (handled and returned from below).
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
@@ -267,6 +326,8 @@ class UsagePollService : Service() {
             // it comes here: the Shizuku binding lives in this process and the panel's
             // does not.
             addAction(RearActivity.ACTION_OPEN_CAMERA)
+            // Camera mode's double tap on the back: switched off until the camera closes.
+            addAction(RearActivity.ACTION_CAMERA_SLEEP)
             // And its transport buttons, for the same reason again.
             addAction(RearActivity.ACTION_MEDIA_COMMAND)
             // The panel telling us it has let its display go, or taken it back.
@@ -316,8 +377,35 @@ class UsagePollService : Service() {
         // In a new process the bridge is not bound yet and this first pass can only start
         // the bind (the panel's state is unknown, not dead); the real look is taken the
         // moment the service connects.
-        app.bridge.onConnected = { scope.launch { safeSupervise() } }
-        scope.launch { safeSupervise() }
+        // Companion mode places nothing: the shell is bound, given the config, and that is all
+        // (companionSync) — Xiaomi's rear screen stays as it is.
+        app.bridge.onConnected = { scope.launch { if (config().companion) companionSync() else safeSupervise() } }
+        // The shell's process and its guard, asked every few seconds whether they are still there: a shell
+        // that died is bound again within that, not at the next poll. A binder ping each, nothing more.
+        // Not while there is nothing to see (the front off and the back off, PanelAwake as StayOn feeds it in
+        // companion mode): parked then, and asked at once when there is.
+        scope.launch {
+            while (isActive) {
+                delay(SHELL_ALIVE_MS)
+                if (config().companion) PanelAwake.awaitAwake()
+                runCatching { app.bridge.ensureAlive() }
+            }
+        }
+        // A finger on a back that is not held lit: the stay-on rule looks again (it has stopped looking by then).
+        app.bridge.onRearTouch = { stayOn?.sync() }
+        // The watches for notes with a place, again in every new process (the system forgets them with the old one).
+        runCatching { PlaceNotes.sync(this) }
+        // The playing card's buttons on the back: the same commands the panel's media page gave.
+        app.bridge.onMediaCommand = { action -> runCatching { media?.command(action) } }
+        // The usage page was opened on the back: the figures fetched again (the repository's own floor
+        // keeps this from being more than one fetch in a minute and a half) and pushed.
+        app.bridge.onUsageShown = {
+            scope.launch {
+                runCatching { app.repository.refresh() }
+                app.bridge.update(StatePayload.encode(app.repository.state.value, config(), WeatherPoll.latest))
+            }
+        }
+        scope.launch { if (config().companion) companionSync() else safeSupervise() }
 
         scope.launch {
             val initial = initialDelayMs()
@@ -341,8 +429,6 @@ class UsagePollService : Service() {
                 // delay is long finished and this is where the loop has been waiting.
                 PanelAwake.awaitAwake()
                 safeTick()
-                // once a day, whether a newer release exists — the poll is already on the network
-                runCatching { UpdateCheck.maybe(this@UsagePollService) }
                 delay(Cadence.FAST_MS)
             }
         }
@@ -372,7 +458,9 @@ class UsagePollService : Service() {
         scope.launch {
             while (isActive) {
                 delay(WATCHDOG_INTERVAL_MS)
-                safeSupervise()
+                // No watchdog in companion mode: there is no panel to keep placed. And the relay is looked at
+                // only while there is something to see: parked with the front off and the back off.
+                if (!config().companion) safeSupervise() else PanelAwake.awaitAwake()
                 RelayWatch.check(this@UsagePollService)
             }
         }
@@ -421,14 +509,89 @@ class UsagePollService : Service() {
      * than waiting out the watchdog interval, which would leave the lock screen
      * covered for up to 20 seconds. Makes no network call.
      */
+    private val batteryReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: Intent?) {
+            intent ?: return
+            val level = intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
+            val scale = intent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
+            if (level < 0) return
+            val status = intent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+            val charging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING || status == android.os.BatteryManager.BATTERY_STATUS_FULL
+            Graph.of(this@UsagePollService).bridge.setBattery(level * 100 / scale, charging)
+            // What the charger is doing, decided in one place (ChargeState): filling, holding (a limit), full, or out.
+            val percent = level * 100 / scale
+            val now = android.os.SystemClock.uptimeMillis()
+            val state = ChargeState.of(intent.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) != 0, status, percent)
+            // And for the charging page, while the charger is in: the level as it is, and what is known past it.
+            if (charging) {
+                // Really filling only while the phone says "charging": full, or held by a charge limit, it stands.
+                chargePrecise.filling(state == ChargeState.Is.FILLING, now)
+                sendChargeDetail(chargePrecise.level(percent, now))
+            } else chargePrecise.reset()
+            // FULL: the page leaves the back; under 100% again with the charger in: it is back.
+            if (config().companion && config().chargeAnim) when (chargePage.next(state, percent, now)) {
+                ChargeState.Page.Does.REST -> { Log.i("AiUsageCharge", "charge: full ($percent%, status $status) — the page leaves the back"); chargeRest() }
+                ChargeState.Page.Does.SHOW -> { Log.i("AiUsageCharge", "charge: under 100% again on the charger ($percent%) — the page is back"); chargeIn() }
+                ChargeState.Page.Does.NOTHING -> Unit
+            }
+        }
+    }
+
+    // -- the charging page's exact level and charger (ChargePrecise) ------------------------------
+
+    private val chargePrecise = ChargePrecise()
+    /** Whether the charging page has its place on the back: not at full (ChargeState). */
+    private val chargePage = ChargeState.Page()
+    @Volatile private var chargeKind = ""
+
+    private fun sendChargeDetail(d: ChargePrecise.Detail) {
+        val b = android.os.Bundle()
+        b.putInt("level", d.level); b.putFloat("fraction", d.fraction); b.putLong("at", d.at); b.putFloat("rate", d.ratePerSec); b.putString("kind", chargeKind)
+        b.putBoolean("holding", d.holding)
+        Graph.of(this).bridge.chargeDetail(b)
+        // Said at each whole percent and at most every half minute between: what the page's hundredths are made of.
+        val now = android.os.SystemClock.uptimeMillis()
+        if (d.level >= 0 && (d.level != chargeSaidLevel || d.holding != chargeSaidHolding || now - chargeSaidAt >= 30_000L)) {
+            chargeSaidLevel = d.level; chargeSaidAt = now; chargeSaidHolding = d.holding
+            Log.i("AiUsageCharge", "charge: ${d.level}%, " + (if (d.holding) "HOLDING (on the charger, not filling): the figure stands and the fluid rests" else if (d.fraction < 0f) "nothing known past it yet (no hundredths shown)"
+                else "hundredths .%02d and %.2f a second (%s)".format((d.fraction * 100).toInt().coerceIn(0, 99), d.ratePerSec * 100f, if (d.xiaomi) "Xiaomi's own figure" else "from the moment the percent stepped")) +
+                if (chargeKind.isEmpty()) "" else ", $chargeKind")
+        }
+    }
+    private var chargeSaidHolding = false
+    private var chargeSaidLevel = -1
+    private var chargeSaidAt = 0L
+
+    /** Xiaomi's own word on the charger and, on a super fast one, on the hundredths: taken as the system sends it. */
+    private val chargeNews = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val now = android.os.SystemClock.uptimeMillis()
+            when (intent?.action) {
+                ChargePrecise.ACTION_QUICK_CHARGE_TYPE -> {
+                    chargeKind = ChargePrecise.kind(intent.getIntExtra(ChargePrecise.EXTRA_QUICK_CHARGE_TYPE, 0), intent.getIntExtra(ChargePrecise.EXTRA_POWER_MAX, 0))
+                    sendChargeDetail(chargePrecise.detail(now))
+                }
+                ChargePrecise.ACTION_SOC_DECIMAL -> sendChargeDetail(
+                    chargePrecise.xiaomi(intent.getIntExtra(ChargePrecise.EXTRA_SOC_DECIMAL, -1), intent.getIntExtra(ChargePrecise.EXTRA_SOC_DECIMAL_RATE, 0), now),
+                )
+            }
+        }
+    }
+
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            // The front going on or off, the lock opening: the stay-on rule looks again.
+            when (intent?.action) { Intent.ACTION_SCREEN_ON, Intent.ACTION_SCREEN_OFF, Intent.ACTION_USER_PRESENT -> stayOn?.sync() }
             // The camera is not a placement problem, so it does not go through the
             // supervisor: that path exists to get the panel back where it belongs, and
             // running it here would have a camera tap second-guessing the panel's
             // position at the exact moment something else is about to cover it.
             if (intent?.action == RearActivity.ACTION_OPEN_CAMERA) {
                 Graph.of(this@UsagePollService).bridge.openCamera()
+                return
+            }
+            if (intent?.action == RearActivity.ACTION_CAMERA_SLEEP) {
+                camera?.darkForSession()
                 return
             }
             // THE CHARGER GOING IN LIGHTS THE PANEL.
@@ -527,6 +690,9 @@ class UsagePollService : Service() {
                 // And anything in this process that only matters when somebody can see
                 // the panel. See PanelAwake — it releases whatever was put off.
                 PanelAwake.setDozing(dozing)
+                // A new panel says its hold first thing: it is told whether the phone lies on
+                // its back, which it hears otherwise only as an edge (TableWatch.restate).
+                table?.restate()
                 return
             }
             // LOCKING THE FRONT PUTS THE BACK INTO ALWAYS-ON, not out. HyperOS sends the rear
@@ -541,7 +707,11 @@ class UsagePollService : Service() {
             // stays asleep — both read NOW, at the lock, before the sleep can change them
             // (LockRelight). And never over the other build's panel (ShizukuBridge.wake).
             // Not returned from — the lock's own supervision below still runs.
-            if (intent?.action == Intent.ACTION_SCREEN_OFF && config().alwaysOn) {
+            // "Stay on in the hand" the same: the back is on unless a posture rule says off, and the
+            // bridge declines this wake where one does (the double tap's latch, on its back, a pocket).
+            // Not in companion mode: relit after the lock is Xiaomi's rear relit against its own
+            // AOD off (subscreen_aod_auto_off_enable). Xiaomi owns the back's sleep there.
+            if (intent?.action == Intent.ACTION_SCREEN_OFF && !config().companion && (config().alwaysOn || config().stayOnInHand)) {
                 val lockedAt = android.os.SystemClock.elapsedRealtime()
                 val bridge = Graph.of(this@UsagePollService).bridge
                 val dozingAtLock = bridge.dozingOrNull()
@@ -550,14 +720,33 @@ class UsagePollService : Service() {
                     delay(RELIGHT_AFTER_LOCK_MS)
                     val together = kotlin.math.abs(rearWentOffAt - lockedAt) <= WENT_DARK_TOGETHER_MS
                     if (LockRelight.relight(together, dozingAtLock, guestAtLock)) {
-                        Log.i(TAG, "the front locked and took the back with it — always-on instead")
-                        bridge.wake("always-on after the lock")
+                        Log.i(TAG, "the front locked and took the back with it — lit again")
+                        // Without always-on's own slider, lit on a locked phone it is guarded as any
+                        // wake from the dark is: the slider up (RearActivity.lockPanel).
+                        if (bridge.wake("the back after the lock") && !config().alwaysOn) {
+                            bridge.tellPanel(RearActivity.ACTION_LOCK)
+                        }
                     } else if (together) {
                         Log.i(TAG, "the front locked and took the back with it — left dark " +
                             "(asleep on purpose: $dozingAtLock, a guest on top: $guestAtLock)")
                     }
                 }
             }
+            // The front on or off, a charger in or out: what the table watch watches for, and refuses.
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF, Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT,
+                Intent.ACTION_POWER_CONNECTED, Intent.ACTION_POWER_DISCONNECTED -> table?.sync()
+            }
+            // Companion mode: the charging animation over Xiaomi's rear (ShellCharge).
+            if (config().companion && intent?.action == Intent.ACTION_POWER_CONNECTED) {
+                chargeIn()
+                return
+            }
+            if (config().companion && intent?.action == Intent.ACTION_POWER_DISCONNECTED) {
+                chargeOut()
+                return
+            }
+            if (intent?.action == Intent.ACTION_POWER_DISCONNECTED) return
             if (intent?.action == Intent.ACTION_POWER_CONNECTED) {
                 // Same reasoning as the notification path: only a panel that was dark
                 // gets locked. Plugging in a phone you are holding and watching the cell
@@ -577,6 +766,8 @@ class UsagePollService : Service() {
                 )
                 return
             }
+            // Lock, unlock, a stranded panel: placement work, which companion mode has none of.
+            if (config().companion) return
             safeSupervise()
         }
     }
@@ -602,16 +793,150 @@ class UsagePollService : Service() {
         if (app.bridge.ensureOnRear()) Log.w(TAG, "post-placement: was on the main display, moved back")
     }
 
-    /** Watchdog-only pass: no fetch, just make sure the panel is still up. */
+    /** Watchdog-only pass: no fetch, just make sure the panel is still up. Replace mode only. */
     private fun safeSupervise() {
         try {
             val app = Graph.of(this)
+            // The backstop: no placement, moving back or stranded handling in companion mode.
+            if (config().companion) return
             if (app.bridge.ensureOnRear()) Log.w(TAG, "panel was on the main display — moved back")
             ensurePlaced(app, StatePayload.encode(app.repository.state.value, config(), WeatherPoll.latest))
         } catch (e: Exception) {
             Log.e(TAG, "supervise failed", e)
         }
     }
+
+    /**
+     * Companion mode's whole supervision, at the start and on every (re)connect: the shell bound
+     * and given the config (IRearService.update applies it, and places nothing), and Xiaomi's
+     * rear app let out of a suspension once if Replace mode left it suspended.
+     */
+    private fun companionSync() {
+        try {
+            val app = Graph.of(this)
+            app.bridge.update(StatePayload.encode(app.repository.state.value, config(), WeatherPoll.latest))
+            app.bridge.connect()
+            restoreXiaomiOnce(app)
+        } catch (e: Exception) {
+            Log.e(TAG, "companion sync failed", e)
+        }
+    }
+
+    /** Whether Xiaomi's rear app has been looked at (and let out, if it had to be) in this process. */
+    @Volatile private var xiaomiLooked = false
+
+    /**
+     * Companion mode keeps Xiaomi's rear screen as the base, so one suspended by Replace mode
+     * (RearUserService.removeXiaomiRearApp) is unsuspended, once, with one line to say so. Blocks
+     * on the shell (awaitService): off the main thread. Not bound yet: tried again on connect.
+     */
+    private fun restoreXiaomiOnce(app: Graph) {
+        if (xiaomiLooked) return
+        when (dev.kb896.aiusage.ui.Setup.xiaomiRearAppInstalled(this)) {
+            // There and free to run, or no such app on this phone: nothing to do.
+            true, null -> { xiaomiLooked = true; return }
+            false -> Unit
+        }
+        val done = app.bridge.setXiaomiRearApp(installed = true) ?: return
+        xiaomiLooked = true
+        val back = dev.kb896.aiusage.ui.Setup.xiaomiRearAppInstalled(this) == true
+        Log.i(TAG, "companion mode: Xiaomi's rear app was suspended — restore said $done, running now: $back")
+        if (back) android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(this, "Xiaomi's rear screen is back", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // -- the charging animation, companion mode ---------------------------------------------
+
+    /**
+     * The charger went in: the back woken if it is dark and "Also when the back is dark" is on
+     * (the bridge's declines still hold: switched off by hand, on its back, in a pocket), then the
+     * animation asked for at the battery's level, and the gravity sensor streamed to its liquid for
+     * its five seconds. The shell waits for the back to light, and drops it if it does not.
+     */
+    private fun chargeIn() {
+        val c = config()
+        if (!c.chargeAnim) return
+        val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = ChargeLevel.percent(
+            battery?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1,
+            battery?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) ?: -1,
+        ) ?: return
+        val fast = ChargeLevel.fast(
+            battery?.getIntExtra(ChargeLevel.EXTRA_MAX_CURRENT, 0) ?: 0,
+            battery?.getIntExtra(ChargeLevel.EXTRA_MAX_VOLTAGE, 0) ?: 0,
+        )
+        // AT FULL THERE IS NO CHARGING PAGE (ChargeState): the charger going in at 100% shows nothing.
+        val state = ChargeState.of(true, battery?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) ?: -1, level)
+        val plug = chargePage.pluggedIn(state)
+        if (plug == ChargeState.Page.Plug.NOTHING) return
+        // FULL: its one short moment, and only on a back that is lit already (nothing of ours lights a dark back for it).
+        val moment = plug == ChargeState.Page.Plug.MOMENT
+        if (moment) Log.i("AiUsageCharge", "charge: the charger is in at $level%, full — the page's short moment, if the back is lit")
+        val bridge = Graph.of(this).bridge
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            // Bound first (a new app process, a charger as the phone starts): a wake with no
+            // shell to do it lights nothing.
+            bridge.awaitService(CHARGE_BIND_MS)
+            if (c.chargeWhenDark && !moment) bridge.wake("the charger")
+            if (bridge.showCharge(if (moment) 100 else level, fast)) {
+                tiltFor(ChargeStyle.FULL.totalMs.toLong())
+                // What is known past the whole percent, and the charger's kind, once the page is up.
+                sendChargeDetail(chargePrecise.level(level, android.os.SystemClock.uptimeMillis()))
+            }
+        }
+    }
+
+    /** Full with the charger in: the page leaves the back (it is not drained: nothing came out). */
+    private fun chargeRest() {
+        stopTilt()
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) { Graph.of(this@UsagePollService).bridge.chargeFull() }
+    }
+
+    /** The charger came out: the animation, if it is up, drains away. */
+    private fun chargeOut() {
+        chargePage.out()
+        stopTilt()
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) { Graph.of(this@UsagePollService).bridge.endCharge() }
+    }
+
+    private var tiltListener: android.hardware.SensorEventListener? = null
+    private var tiltLastAt = 0L
+    private val tiltStop = Runnable { stopTilt() }
+    private val mainHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
+
+    /** The gravity sensor to the shell's liquid (IRearService.chargeTilt), about 30 a second, for [ms]. */
+    private fun tiltFor(ms: Long) = mainHandler.post {
+        stopTilt()
+        val sensors = getSystemService(android.hardware.SensorManager::class.java) ?: return@post
+        val gravity = sensors.getDefaultSensor(android.hardware.Sensor.TYPE_GRAVITY) ?: return@post
+        val bridge = Graph.of(this).bridge
+        val l = object : android.hardware.SensorEventListener {
+            override fun onSensorChanged(e: android.hardware.SensorEvent) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - tiltLastAt < TILT_EVERY_MS) return
+                tiltLastAt = now
+                // The sensor's own x and y: the panel's axes are the sensor's with both in-plane
+                // axes flipped twice over (RearDialView.gravityPanelX), which cancels.
+                bridge.chargeTilt(e.values[0], e.values[1])
+            }
+            override fun onAccuracyChanged(s: android.hardware.Sensor?, a: Int) = Unit
+        }
+        if (sensors.registerListener(l, gravity, android.hardware.SensorManager.SENSOR_DELAY_GAME)) {
+            tiltListener = l
+            mainHandler.postDelayed(tiltStop, ms)
+        }
+    }
+
+    private fun stopTilt() {
+        mainHandler.removeCallbacks(tiltStop)
+        val l = tiltListener ?: return
+        tiltListener = null
+        runCatching { getSystemService(android.hardware.SensorManager::class.java)?.unregisterListener(l) }
+    }
+
+    /** A lift off its back wakes the back: in Replace mode always, as before; in companion mode only if asked. */
+    private fun liftWakes(c: dev.kb896.aiusage.data.PanelConfig): Boolean = !c.companion || c.wakeOnLift
 
     private suspend fun safeTick() {
         try {
@@ -698,6 +1023,11 @@ class UsagePollService : Service() {
             ?.notify(NOTIFICATION_ID, notification())
 
         val payload = StatePayload.encode(app.repository.state.value, config(), WeatherPoll.latest)
+        // Companion mode: the config to the shell, nothing placed (and no watchdog reading).
+        if (config().companion) {
+            app.bridge.update(payload)
+            return
+        }
         val decision = ensurePlaced(app, payload)
         // A fresh respawn already delivered `payload` via the launch intent extra
         // (RearUserService.show()'s `am start --es state ...`), and calibrate mode
@@ -744,6 +1074,8 @@ class UsagePollService : Service() {
             // Re-placing calls show(), and show() lights the display — so this watchdog,
             // doing exactly its job, undid every deliberate sleep. See Watchdog.decide.
             app.bridge.isDozing(),
+            // Companion mode: nothing to watch (NOTHING); ensurePlaced is not even called then.
+            companion = config().companion,
         )
         watchdogState = decision.state
         if (decision.isNewState) {
@@ -753,6 +1085,7 @@ class UsagePollService : Service() {
                 Watchdog.State.DOZING -> "panel asleep on purpose — watchdog standing down"
                 Watchdog.State.ALIVE -> "rear panel confirmed alive"
                 Watchdog.State.UNKNOWN -> "not bound to the shell yet — asking again once it connects"
+                Watchdog.State.NOTHING -> "companion mode — no panel to watch"
             })
         }
         if (decision.shouldRespawn) {
@@ -821,7 +1154,7 @@ class UsagePollService : Service() {
             // Ours, not a stock system glyph — this one is permanently in the
             // status bar, so it is the app's face more than any other icon.
             .setSmallIcon(R.drawable.ic_notification)
-            .setColor(Panel.Palette.WORK)
+            .setColor(NOTIFICATION_TINT)
             .setContentIntent(tap)
             .setOngoing(true)
             // Once the numbers exist, this notification carries them — into the shade
@@ -855,6 +1188,7 @@ class UsagePollService : Service() {
 
     override fun onDestroy() {
         Graph.of(this).bridge.onConnected = {}
+        stopTilt()
         stopConfigWatch?.invoke()
         stopConfigWatch = null
         runCatching { unregisterReceiver(portalAppsReceiver) }
@@ -862,9 +1196,16 @@ class UsagePollService : Service() {
         displays.unregisterDisplayListener(displayListener)
         pocket?.stop()
         pocket = null
+        table?.stop()
+        table = null
+        camera?.stop()
+        stayOn?.stop()
+        camera = null
         media?.stop()
         media = null
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(chargeNews) } catch (_: Exception) {}
         runCatching { contentResolver.unregisterContentObserver(brightnessWatch) }
         runCatching { contentResolver.unregisterContentObserver(quickWatch) }
         scope.cancel()
@@ -885,7 +1226,10 @@ class UsagePollService : Service() {
      * same rule the rest of the app follows.
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_SHOW_PANEL) {
+        // A debug build's level probe (MusicLevel.probe) has nothing else to start it.
+        if (dev.kb896.aiusage.BuildConfig.DEBUG) MusicLevel.sync(this)
+        // The tap re-places the panel, which companion mode has none of: the tap does nothing more.
+        if (intent?.action == ACTION_SHOW_PANEL && !config().companion) {
             val app = Graph.of(this)
             // Asked for by a tap, so lit (light defaults to true): unlike the watchdog's.
             app.bridge.show(StatePayload.encode(app.repository.state.value, config(), WeatherPoll.latest))
@@ -896,6 +1240,8 @@ class UsagePollService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        /** The status-bar icon's tint: neutral, as the settings are. */
+        private const val NOTIFICATION_TINT = 0xFF8A8F98.toInt()
         /** How long after the lock the back is lit again: past HyperOS's own sleep of it. */
         private const val RELIGHT_AFTER_LOCK_MS = 700L
         /** The back counts as having gone dark with the front within this of the lock. */
@@ -924,6 +1270,12 @@ class UsagePollService : Service() {
         private const val GEOMETRY_PUSH_DELAY_MS = 1_500L
 
         private const val WATCHDOG_INTERVAL_MS = 20_000L
+        private const val SHELL_ALIVE_MS = 3_000L
+
+        /** How often the gravity reading goes to the shell's liquid: about 30 a second. */
+        private const val TILT_EVERY_MS = 33L
+        /** How long the charger's animation waits for the shell to bind. */
+        private const val CHARGE_BIND_MS = 2_500L
 
         /** Notification tap → re-place the panel. See onStartCommand. */
         const val ACTION_SHOW_PANEL = "dev.kb896.aiusage.SHOW_PANEL"

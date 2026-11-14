@@ -82,6 +82,11 @@ class RearActivity : Activity() {
          * turned on.
          */
         const val ACTION_NOTIFICATION_REMOVED = "dev.kb896.aiusage.NOTIFICATION_REMOVED"
+        /** A notification's button pressed on the back: [EXTRA_NOTIFICATION_KEY], [EXTRA_NOTIFICATION_ACTION]. For the relay. */
+        const val ACTION_NOTIFICATION_ACT = "dev.kb896.aiusage.NOTIFICATION_ACT"
+        const val EXTRA_NOTIFICATION_ACTION = "dev.kb896.aiusage.extra.NOTIFICATION_ACTION"
+        /** With [ACTION_NOTIFICATION_ACT]: the button is a live page's (a call's or a timer's: counted among its first three buttons). */
+        const val EXTRA_NOTIFICATION_LIVE = "dev.kb896.aiusage.extra.NOTIFICATION_LIVE"
         const val ACTION_NOTIFICATIONS_ACTIVE = "dev.kb896.aiusage.NOTIFICATIONS_ACTIVE"
         /** With [ACTION_NOTIFICATIONS_ACTIVE]: every card goes, the old keyless ones too (the debug build's clear, for filming). */
         const val EXTRA_NOTIFICATIONS_EVERYTHING = "dev.kb896.aiusage.extra.NOTIFICATIONS_EVERYTHING"
@@ -271,10 +276,57 @@ class RearActivity : Activity() {
          * false — out of it, and with [EXTRA_POCKET_RESTORE] being switched on again: the slider
          * up, unless [EXTRA_POCKET_GUEST] (a guest app was on top, and comes back on top).
          */
+        /**
+         * A word from outside, already let through (remote control: RemoteGate, RemotePolicy) and
+         * passed on by the app — this receiver still takes nothing from anybody else. [EXTRA_REMOTE_OP]
+         * is one of the REMOTE_ words below, [EXTRA_REMOTE_ARG] what it is about.
+         */
+        const val ACTION_REMOTE = "dev.kb896.aiusage.REMOTE"
+        const val EXTRA_REMOTE_OP = "op"
+        const val EXTRA_REMOTE_ARG = "arg"
+        /** Go to the page named in the argument (NamedPage). */
+        const val REMOTE_PAGE = "page"
+        /** Sleep as a double tap would: dimmed, let go, the next wake guarded. Not under always-on. */
+        const val REMOTE_SLEEP = "sleep"
+        /** Let go of the display: the shell is about to switch the back off (always-on's sleep). */
+        const val REMOTE_LET_GO = "let_go"
+        /** Into always-on now, not when the idle timer gets there. */
+        const val REMOTE_AOD_NOW = "aod"
+        /** Play the video background's run again, as a wake does. */
+        const val REMOTE_PLAY = "play"
+
         const val ACTION_POCKET = "dev.kb896.aiusage.POCKET"
         const val EXTRA_POCKETED = "pocketed"
         const val EXTRA_POCKET_RESTORE = "pocketRestore"
         const val EXTRA_POCKET_GUEST = "pocketGuest"
+        /**
+         * The poll service's table watch (TableWatch), which runs while the back is dark too:
+         * [EXTRA_TABLE_DOWN] true — settled on its face, every refusal it can see answered, and
+         * the back about to be woken for it; false — lifted.
+         */
+        const val ACTION_TABLE = "dev.kb896.aiusage.TABLE"
+        const val EXTRA_TABLE_DOWN = "tableDown"
+        /** With [ACTION_TABLE], instead of [EXTRA_TABLE_DOWN]: settled on its back (true), or picked up off it (false). */
+        const val EXTRA_TABLE_BACK = "tableBack"
+        /**
+         * The double tap's latch (ManualOff) cleared by the app ([EXTRA_MANUAL_OFF] false): "Show on
+         * the back", or the back lit by hand while it was set. The file is the truth; this is the news.
+         */
+        const val ACTION_MANUAL_OFF = "dev.kb896.aiusage.MANUAL_OFF"
+        const val EXTRA_MANUAL_OFF = "manualOff"
+        /**
+         * Camera mode, from the poll service's camera watch (CameraWatch): [EXTRA_CAMERA] is
+         * [CAMERA_LIT] — a camera in use and the back free: lit for it, the back about to be
+         * woken; [CAMERA_ASIDE] — in use, but the rear is the camera's own preview's (or a
+         * guest's): stand aside; [CAMERA_END] — the camera closed. See CameraMode.
+         */
+        const val ACTION_CAMERA = "dev.kb896.aiusage.CAMERA"
+        const val EXTRA_CAMERA = "camera"
+        const val CAMERA_LIT = "lit"
+        const val CAMERA_ASIDE = "aside"
+        const val CAMERA_END = "end"
+        /** The double tap during camera mode, to the app: the back off now, and kept off until the camera closes. */
+        const val ACTION_CAMERA_SLEEP = "dev.kb896.aiusage.CAMERA_SLEEP"
 
 
         const val EXTRA_STATE = "state"
@@ -311,14 +363,12 @@ class RearActivity : Activity() {
          * (PocketMode.due): the count starts over.
          */
         const val POCKET_TOUCH_QUIET_MS = 1_500L
-        /** table mode: gravity along -z beyond this, x and y within this, for this long */
-        const val TABLE_Z = 8.6f
-        const val TABLE_XY = 2.2f
-        const val TABLE_SETTLE_MS = 1_000L
         /** how long a notification keeps an always-on panel out of its dim, from the last card */
         const val NOTICE_GRACE_MS = 6_000L
         /** how often an always-on peek past its grace looks again for the strip to be done */
         const val PEEK_RECHECK_MS = 250L
+        /** The table's veil fading in or out, between the dim and normal. */
+        const val TABLE_VEIL_MS = 400L
 
         /**
          * The shortest gap between two requests to be moved back to the panel.
@@ -393,7 +443,24 @@ class RearActivity : Activity() {
                     moveTaskToBack(true)
                 }
                 ACTION_PORTAL_COVERED -> setCovered(intent.getBooleanExtra(EXTRA_PORTAL_COVERED, false))
-                ACTION_LOCK -> lockPanel()
+                // Not in camera mode: its page takes no touch anyway, and a slider is not the clock page.
+                ACTION_LOCK -> if (!cameraMode.lit) lockPanel()
+                ACTION_CAMERA -> when (intent.getStringExtra(EXTRA_CAMERA)) {
+                    CAMERA_LIT -> enterCamera()
+                    CAMERA_ASIDE -> cameraAside("the rear is the camera's own preview's, or a guest's")
+                    CAMERA_END -> leaveCamera()
+                }
+                ACTION_REMOTE -> remote(
+                    intent.getStringExtra(EXTRA_REMOTE_OP).orEmpty(),
+                    intent.getStringExtra(EXTRA_REMOTE_ARG).orEmpty(),
+                )
+                ACTION_TABLE -> if (intent.hasExtra(EXTRA_TABLE_BACK)) onBack(intent.getBooleanExtra(EXTRA_TABLE_BACK, false))
+                    else table(intent.getBooleanExtra(EXTRA_TABLE_DOWN, false))
+                ACTION_MANUAL_OFF -> if (!intent.getBooleanExtra(EXTRA_MANUAL_OFF, false) && manualOff) {
+                    manualOff = false
+                    Log.i(TAG, "manual off: cleared by the app")
+                    applyPosture("switched on from the app")
+                }
                 ACTION_POCKET -> if (intent.getBooleanExtra(EXTRA_POCKETED, false)) intoPocket() else outOfPocket(
                     restore = intent.getBooleanExtra(EXTRA_POCKET_RESTORE, false),
                     guest = intent.getBooleanExtra(EXTRA_POCKET_GUEST, false),
@@ -510,6 +577,8 @@ class RearActivity : Activity() {
             )
         }
         dial.onLockExpired = { onLockSpent() }
+        // Face down with "Only while charging": a charger in or out changes the posture.
+        dial.onPlugged = { applyPosture("the charger") }
         // The control centre: opening asks for the brightness, the cell sets it.
         dial.onControlCenterOpening = {
             sendBroadcast(Intent(ACTION_GET_REAR_BRIGHTNESS).setPackage(packageName))
@@ -553,7 +622,10 @@ class RearActivity : Activity() {
         // Something worth seeing arrived. Take the display back — it may be part-way
         // through being let go after an earlier lock ran out — and call off the hand-back
         // that release queued, because the lock has just been given a fresh reason.
-        dial.onNeedsScreen = {
+        dial.onNeedsScreen = needs@{
+            // Off by a rule (the double tap's latch, on its back, a pocket): the card is in the
+            // list, and nothing lights the back for it.
+            if (offByRule()) return@needs
             // Arriving during the double tap's dim it is a wake, as it would be in the dark:
             // the dim called off and the slider up (lockPanel). Left alone it was shown under
             // the veil — the hold refused while the dim runs — and went dark with the display.
@@ -591,6 +663,11 @@ class RearActivity : Activity() {
         // No-op until we are actually on the rear panel — see hideBars().
         hideBars()
 
+        // The double tap's latch, as the file has it: it outlives this process (ManualOff).
+        manualOff = manualLatch.on
+        // A call ringing or going on: heard from the audio mode, no permission needed.
+        callActive = RearPosture.inCall(audio.mode)
+        audio.addOnModeChangedListener(mainExecutor, callListener)
         (getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
             .registerDisplayListener(displayListener, null)
 
@@ -605,6 +682,10 @@ class RearActivity : Activity() {
                 addAction(ACTION_REAR_BRIGHTNESS)
                 addAction(ACTION_QUICK_STATES)
                 addAction(ACTION_POCKET)
+                addAction(ACTION_TABLE)
+                addAction(ACTION_MANUAL_OFF)
+                addAction(ACTION_CAMERA)
+                addAction(ACTION_REMOTE)
 
             },
             // NOT EXPORTED: only this app reaches it. It was exported for the shell's own
@@ -634,10 +715,15 @@ class RearActivity : Activity() {
             // back immediately, off has to start a countdown that was never running.
             // The table lights' switch, thrown either way: stop watching, or start again if the
             // panel is up (tableWatch checks the switch itself).
-            if (!decoded.config.showTableLights) tableWatch(false)
+            if (!wantsTable(decoded.config)) tableWatch(false)
             else if (!tableWatching && panelResumed) tableWatch(true)
-            if (keepAwake != decoded.config.keepPanelAwake) {
-                keepAwake = decoded.config.keepPanelAwake
+            if (!decoded.config.showTableLights && dial.tableGlow) dial.tableGlow = false
+            // Camera mode switched off while the camera is open: back to what it was now.
+            if (!decoded.config.cameraLight && cameraMode.state != CameraMode.State.OFF) leaveCamera()
+            // "Stay on in the hand" is keep-awake wherever no other posture rule applies.
+            val awake = decoded.config.keepPanelAwake || decoded.config.stayOnInHand
+            if (keepAwake != awake) {
+                keepAwake = awake
                 armSleep()
             }
             if (aodOn != decoded.config.alwaysOn) {
@@ -648,6 +734,8 @@ class RearActivity : Activity() {
                 if (!aodOn && inAod) { exitAod(); dial.unlock() }
                 armSleep()
             }
+            // The posture's switches (dim face down, off on its back, the camera's): as they are now.
+            applyPosture("settings")
             calibrationView.geometry = PanelGeometry.of(decoded.config.effectiveRingLayout)
         }
     }
@@ -662,6 +750,8 @@ class RearActivity : Activity() {
      * notification finished arriving.
      */
     private fun lockPanel() {
+        // Off by a rule (the double tap's latch, on its back, a pocket): nothing to light, nothing to guard.
+        if (offByRule()) return
         // During the double tap's dim this is a wake like one in the dark: the dim is called
         // off first, or the hold below is refused (holdScreen) and the card is shown under
         // the veil, to go dark with the display a few seconds later.
@@ -722,18 +812,30 @@ class RearActivity : Activity() {
     private val doubleTaps by lazy {
         GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
+                // MANUAL OFF, the posture's first rule, everywhere — the table's dim, always-on,
+                // camera mode, the full page: off now, and kept off until the user lights it
+                // himself (ManualOff). Camera mode first: its page takes no touch, so no button
+                // has been pressed.
+                if (cameraMode.lit) {
+                    setManualOff(true, "double tap in camera mode")
+                    cameraOff("double tap")
+                    return false
+                }
                 // Two quick presses of a button — media, camera, close — or anywhere in the
                 // open control centre, are the controls', not a sleep: the first of them has
                 // already pressed what it landed on (RearDialView.onTapTarget).
                 if (dial.onTapTarget(e.x, e.y) || dial.controlCenterUp) return false
-                if (aodOn) {
-                    // always-on: the full panel drops into it; a dimmed page raises the slider
-                    if (!inAod) enterAod() else if (!dial.isLocked) dial.lock()
-                    return false
+                // a second double tap during the dim calls it off (and the latch with it); a single
+                // touch does not, so a dimming panel is not brought back by a brush of the finger
+                if (sleepStage.dimming) {
+                    setManualOff(false, "the dim called off")
+                    endDim(off = false)
+                    applyPosture("the dim called off")
+                } else {
+                    setManualOff(true, "double tap")
+                    beginDim()
+                    applyPosture("double tap")
                 }
-                // a second double tap during the dim calls it off; a single touch does not,
-                // so a dimming panel is not brought back by a brush of the finger
-                if (sleepStage.dimming) endDim(off = false) else beginDim()
                 return false // observed, never consumed: the panel's own controls still get the tap
             }
         })
@@ -747,12 +849,32 @@ class RearActivity : Activity() {
         if (touchCovered) return true
         dial.throughCrt(ev) // first: everything below reads the flat picture's coordinates
         dial.toPanel(ev) // then real pixels into panel units — the Pro Max's display is larger
+        // The table's dim, decided as the finger lands and before the double tap hears it: its
+        // second touch lands on the full page the first one gave, and is that page's. Every
+        // touch counts for the posture's thirty seconds (RearPosture.TOUCH_MS).
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            tableTouch = level == RearLevel.DIM
+            lastTouchAt = SystemClock.uptimeMillis()
+            if (!tableTouch && onTable) schedulePostureTick()
+        }
         if (systemDoubleTapTakenOver) doubleTaps.onTouchEvent(ev)
+        // Camera mode: the hand holding the phone to take a photo is on the back. Nothing of it
+        // reaches the page — no button, no paging — only the double tap above.
+        if (cameraMode.lit) return true
         // A dimmed page — the double tap's dim, or always-on — takes no touch but the
         // double tap: no paging, no buttons, no drag. The one exception is the slider,
         // which has to be swiped: a touch that starts on its band goes through, and so
         // does the rest of that same gesture wherever the finger wanders.
         if (sleepStage.dimming) return true
+        // The table's dim takes one tap, whole, and nothing of it reaches the page: the
+        // finger lifting is the page at normal brightness (RearPosture) — no slider to swipe.
+        if (tableTouch || level == RearLevel.DIM) {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_UP -> if (tableTouch) { tableTouch = false; applyPosture("a tap on the dim") }
+                MotionEvent.ACTION_CANCEL -> tableTouch = false
+            }
+            return true
+        }
         if (inAod || guardedAfterWake) {
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> sliderTouch = dial.isLocked && dial.lockBand().contains(ev.x, ev.y)
@@ -827,6 +949,9 @@ class RearActivity : Activity() {
         Log.i(TAG, if (on) "portal: covered by a private display's guest — standing down" else "portal: uncovered")
         if (on) {
             window.decorView.removeCallbacks(sleepPanel)
+            window.decorView.removeCallbacks(postureTick)
+            // Over camera mode: the back is the guest's.
+            cameraAside("covered by a guest")
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             // Let go just before it came: the shell would go on hearing it dozes, and hold nothing.
             if (!holding) holdScreen(true)
@@ -835,6 +960,41 @@ class RearActivity : Activity() {
         }
         dial.displayAwake = takesUpdates(display?.state) && !on
         armSleep()
+        if (!on) applyPosture("uncovered")
+    }
+
+    /**
+     * What remote control asked of the panel itself. Each does only what a finger on the back
+     * could already do, behind the same refusals: nothing here lights a back in a pocket, sleeps
+     * a panel nobody can see, or steps past the slider.
+     */
+    private fun remote(op: String, arg: String) {
+        val lit = display?.state == android.view.Display.STATE_ON
+        when (op) {
+            REMOTE_PAGE -> {
+                val went = dial.goToNamed(arg)
+                Log.i(TAG, "remote: page $arg${if (went) "" else " — no such page now"}")
+                // Somebody asked to see it: the idle countdown starts over, as for a touch.
+                if (went && !inAod && !pocketed) armSleep()
+            }
+            // The double tap's own sleep, and only where a double tap would have slept: under
+            // always-on it does not (the app goes through the shell there, REMOTE_LET_GO), and a
+            // dark, covered, pocketed or already dimming panel has nothing to dim.
+            // In camera mode, the double tap's sleep is camera mode's: off until the camera closes.
+            // It is the double tap's, so its latch too (ManualOff).
+            REMOTE_SLEEP -> if (cameraMode.lit) { setManualOff(true, "remote sleep"); cameraOff("remote sleep") }
+                else if (!aodOn && lit && !covered && !pocketed && !sleepStage.dimming) { setManualOff(true, "remote sleep"); beginDim(); applyPosture("remote sleep") }
+                else Log.i(TAG, "remote: sleep declined (aod=$aodOn lit=$lit covered=$covered pocketed=$pocketed)")
+            REMOTE_LET_GO -> {
+                window.decorView.removeCallbacks(sleepPanel)
+                window.decorView.removeCallbacks(restorePanel)
+                awaitingDoze = false
+                if (holding) holdScreen(false)
+                Log.i(TAG, "remote: let go of the display — the shell switches the back off")
+            }
+            REMOTE_PLAY -> dial.replayVideo()
+            REMOTE_AOD_NOW -> if (aodOn && lit && !covered && !pocketed && !sleepStage.dimming && !cameraMode.lit && level == RearLevel.NORMAL) enterAod()
+        }
     }
 
     private fun beginDim() { beginDimInner(); sendMirror() }
@@ -911,8 +1071,43 @@ class RearActivity : Activity() {
         }
     }
 
+    /**
+     * The window's brightness for the posture's level (RearPosture): full for the camera, the
+     * system's otherwise. The override is the window's own (never the stored rear brightness),
+     * so it ends with the level, or with the panel's window.
+     *
+     * The table's DIM is not an override but a veil over the system's brightness
+     * ([setTableVeil]): a fixed level is BRIGHTER than auto-brightness turned right down (0.045
+     * over 0.019, the double tap's dim found), so a fixed dim could outshine the hand's normal.
+     * Under a veil it is always a share of normal, and the page under it animates as ever.
+     */
     private val restoreBrightness = Runnable {
-        window.attributes = window.attributes.apply { screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE }
+        val want = when (level) {
+            RearLevel.FULL -> WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL
+            else -> WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        }
+        if (window.attributes.screenBrightness != want) {
+            window.attributes = window.attributes.apply { screenBrightness = want }
+        }
+        setTableVeil(level == RearLevel.DIM)
+    }
+
+    /** The table's dim: a black veil at RearPosture.DIM_VEIL_ALPHA, faded in and out; touches pass under it. */
+    private var tableVeil: View? = null
+    private fun setTableVeil(on: Boolean) {
+        val target = if (on) RearPosture.DIM_VEIL_ALPHA else 0f
+        val v = tableVeil ?: if (!on) return else View(this).apply {
+            setBackgroundColor(Color.BLACK)
+            alpha = 0f
+            isClickable = false
+            isFocusable = false
+        }.also { tableVeil = it }
+        if (on && v.parent == null) addContentView(v, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        if (v.alpha == target && (on || v.parent == null)) return
+        v.animate().cancel()
+        v.animate().alpha(target).setDuration(TABLE_VEIL_MS)
+            .withEndAction { if (v.alpha == 0f && level != RearLevel.DIM) (v.parent as? ViewGroup)?.removeView(v) }
+            .start()
     }
 
     private fun holdScreen(on: Boolean) {
@@ -922,7 +1117,8 @@ class RearActivity : Activity() {
         // stayed cleared and the display never let go (seen in the wakelock history).
         // Nor in a pocket: the back is switched off for it, and a notification's hold there
         // (onNeedsScreen, the lock) is a request to light it inside the pocket.
-        if (on && (sleptByDoubleTap || sleepStage.dimming || pocketed)) return
+        // Nor while a posture rule keeps the back off: the double tap's latch, lying on its back.
+        if (on && (sleptByDoubleTap || sleepStage.dimming || pocketed || offByRule())) return
         // Covered, it never says it lets go ([setCovered]): the back is the guest hold's.
         if (!on && covered) return
         if (on) {
@@ -1045,32 +1241,321 @@ class RearActivity : Activity() {
             ?: sensors.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER)
     }
     private var tableWatching = false
-    private var flatSince = -1L
+    /** The settle rule, shared with the poll service's watch (TableWatch). */
+    private val faceDown = FaceDown()
     private val tableListener = object : android.hardware.SensorEventListener {
         override fun onSensorChanged(e: android.hardware.SensorEvent) {
-            val x = e.values[0]; val y = e.values[1]; val z = e.values[2]
-            // face down and level: gravity along -z, nothing much along x or y
-            val flat = z < -TABLE_Z && kotlin.math.abs(x) < TABLE_XY && kotlin.math.abs(y) < TABLE_XY
-            val now = SystemClock.uptimeMillis()
-            if (flat) {
-                if (flatSince < 0) flatSince = now
-                if (!dial.tableGlow && now - flatSince >= TABLE_SETTLE_MS) { dial.tableGlow = true; Log.i(TAG, "table mode: flat on its face — the margins glow") }
-            } else {
-                flatSince = -1L
-                if (dial.tableGlow) dial.tableGlow = false
+            when (faceDown.reading(e.values[0], e.values[1], e.values[2], SystemClock.uptimeMillis())) {
+                true -> table(true)
+                false -> table(false)
+                null -> Unit
             }
         }
         override fun onAccuracyChanged(sensor: android.hardware.Sensor?, accuracy: Int) = Unit
     }
+    /** Anything that cares whether the phone is on its face: the lights, the dim, a clip that plays there. */
+    private fun wantsTable(c: dev.kb896.aiusage.data.PanelConfig): Boolean =
+        c.showTableLights || c.tableMode || c.video.playOnTable
+
     private fun tableWatch(asked: Boolean) {
-        // Only while the table lights are wanted at all — their switch is off, nothing watches.
-        val on = asked && dial.config.showTableLights
+        // Only while something wants to know — with every such switch off, nothing watches.
+        val on = asked && wantsTable(dial.config)
         if (on == tableWatching) return
         val sensor = gravitySensor ?: return
         tableWatching = on
-        if (on) sensors.registerListener(tableListener, sensor, android.hardware.SensorManager.SENSOR_DELAY_UI)
-        else { sensors.unregisterListener(tableListener); flatSince = -1L; dial.tableGlow = false }
+        if (on) {
+            // Already told it lies there (by the service's watch, or this one before the dark):
+            // no second settling, and the first reading off the table is the lift.
+            if (onTable) faceDown.assumeDown()
+            sensors.registerListener(tableListener, sensor, android.hardware.SensorManager.SENSOR_DELAY_UI)
+        } else {
+            sensors.unregisterListener(tableListener)
+            faceDown.reset()
+            // The watch stopping is not a lift: still on its face as far as anybody knows. The
+            // service's watch (which goes on in the dark) says when it is lifted, and this one,
+            // started again, hears the lift on its first reading off the table.
+        }
     }
+
+    /** Lying on its face, settled; or picked up again. From this panel's watch, or the service's (ACTION_TABLE). */
+    private var onTable = false
+    private fun table(on: Boolean) {
+        val was = onTable
+        onTable = on
+        val c = dial.config
+        dial.tableGlow = on && c.showTableLights
+        dial.onTable = on
+        if (on && !was) Log.i(TAG, "table: flat on its face")
+        if (!on && was) Log.i(TAG, "table: picked up")
+        if (on != was) {
+            // A touch or a card from before the lie is not one on the table: the dim from the start.
+            if (on) lastTouchAt = 0L
+            applyPosture(if (on) "face down" else "picked up")
+        }
+    }
+
+    /** On its back, settled and still (the service's watch, LyingOnBack), or picked up off it. */
+    private var lyingOnBack = false
+    private fun onBack(down: Boolean) {
+        if (lyingOnBack == down) return
+        lyingOnBack = down
+        Log.i(TAG, if (down) "posture: lying on its back" else "posture: off its back")
+        applyPosture(if (down) "lying on its back" else "off its back")
+    }
+
+    // ---- the posture: one rule for what the back does (RearPosture) ----
+    /**
+     * THE BACK'S POSTURE. Everything that decides whether the back is off, dim, normal or full
+     * goes through [applyPosture]: the facts gathered here, RearPosture's answer, and the
+     * activity doing it — the hold, the window's brightness, the idle timer. Called on every
+     * change of a fact (the double tap's latch, the pocket, the table either way, the camera, a
+     * call, a touch on the dim, a card on the table, the charger, the settings) and when a
+     * touch's or a card's time runs out ([postureTick]).
+     *
+     * MANUAL OFF ([manualOff], ManualOff): the double tap sets it as the dim begins; only the user
+     * clears it — the back lit while it is set (onDisplayState: nothing automatic can light it
+     * then, the bridge declines every wake), the app's "Show on the back" (ACTION_MANUAL_OFF), or
+     * a second double tap calling the dim off.
+     */
+    private var level = RearLevel.NORMAL
+    private var manualOff = false
+    private val manualLatch by lazy { ManualOff.of(this) }
+    /** The gesture began on the table's dim, and is its tap. */
+    private var tableTouch = false
+    /** When the back was last touched (uptime); 0 for not since the lie began. */
+    private var lastTouchAt = 0L
+    /** A card on the table, until it has had its time ([endNoticeHold]). */
+    private var noticeHeld = false
+    /** A call ringing or going on (AudioManager's mode, RearPosture.inCall). */
+    private var callActive = false
+
+    private fun setManualOff(on: Boolean, why: String) {
+        if (manualOff == on) return
+        manualOff = on
+        manualLatch.set(on)
+        Log.i(TAG, "manual off: ${if (on) "set" else "cleared"} — $why")
+    }
+
+    /** A rule that keeps the back dark: no hold, no lock, no card lights it. */
+    private fun offByRule(): Boolean = manualOff || pocketed || (lyingOnBack && dial.config.offOnBack)
+
+    private fun postureSettings() = RearPosture.Settings.of(dial.config)
+
+    private fun postureNow(now: Long, s: RearPosture.Settings): RearLevel = RearPosture.wanted(
+        RearPosture.Facts(
+            manualOff = manualOff,
+            pocketed = pocketed,
+            lyingOnBack = lyingOnBack,
+            faceDown = onTable,
+            cameraInUse = cameraMode.lit,
+            callActive = callActive,
+            recentTouch = lastTouchAt > 0 && now - lastTouchAt < RearPosture.TOUCH_MS,
+            recentNotification = noticeHeld,
+            plugged = !s.faceDownChargingOnly || plugged(),
+        ),
+        s,
+    )
+
+    private fun applyPosture(why: String) {
+        window.decorView.removeCallbacks(postureTick)
+        if (covered) return // the back is the guest's; uncovered, it is applied again
+        val now = SystemClock.uptimeMillis()
+        val s = postureSettings()
+        val want = postureNow(now, s)
+        val was = level
+        level = want
+        if (want != was) Log.i(TAG, "posture: $was -> $want ($why)")
+        schedulePostureTick()
+        when (want) {
+            RearLevel.OFF -> {
+                window.decorView.removeCallbacks(sleepPanel)
+                // Let go, and HyperOS powers the back down. Manual off: the double tap's dim let go
+                // already (or a new panel holds from onCreate, and lets go now). Pocketed: the
+                // shell switched it off. On its back: let go here.
+                if (holding) holdScreen(false)
+            }
+            RearLevel.DIM -> {
+                window.decorView.removeCallbacks(sleepPanel)
+                // Always-on's dim becomes the table's: no slider (a tap is the way out), the page animated.
+                if (inAod) {
+                    inAod = false
+                    window.decorView.removeCallbacks(endPeek)
+                    dial.aodPeek = false
+                    dial.aod = false
+                    if (dial.isLocked && !guardedAfterWake) {
+                        unlockingBySpent = true
+                        try { dial.unlock() } finally { unlockingBySpent = false }
+                    }
+                }
+                dial.ringsClosed = false
+                if (!holding && !awaitingDoze) holdScreen(true)
+            }
+            RearLevel.NORMAL -> {
+                // Back from off or the dim, or "Stay on in the hand": the hold taken (refused where it must be).
+                if ((was != RearLevel.NORMAL || s.stayOnInHand) && !holding && !awaitingDoze) holdScreen(true)
+                armSleep()
+            }
+            RearLevel.FULL -> {
+                window.decorView.removeCallbacks(sleepPanel)
+                if (!holding && !awaitingDoze) holdScreen(true)
+            }
+        }
+        // Not under the double tap's dim: its veil is the dim, and the brightness comes back once dark.
+        if (!sleepStage.dimming) restoreBrightness.run()
+    }
+
+    /** A touch's or a card's time on the table running out: the posture looked at again then. */
+    private val postureTick = Runnable { applyPosture("a touch's time is up") }
+
+    private fun schedulePostureTick() {
+        window.decorView.removeCallbacks(postureTick)
+        if (!onTable || lastTouchAt <= 0) return
+        val left = lastTouchAt + RearPosture.TOUCH_MS - SystemClock.uptimeMillis()
+        if (left > 0) window.decorView.postDelayed(postureTick, left)
+    }
+
+    /** A card while face down: normal brightness for its time, as always-on's peek has it ([endPeek]'s rule). */
+    private val endNoticeHold: Runnable = Runnable {
+        if (!dial.noticesIdle && display?.state == android.view.Display.STATE_ON) {
+            window.decorView.postDelayed(endNoticeHoldRef, PEEK_RECHECK_MS)
+            return@Runnable
+        }
+        noticeHeld = false
+        applyPosture("the card has had its time")
+    }
+    private val endNoticeHoldRef: Runnable get() = endNoticeHold
+
+    private val audio by lazy { getSystemService(android.media.AudioManager::class.java) }
+    /** A call ringing or going on: face down, normal brightness while it lasts. No permission needed for the mode. */
+    private val callListener = android.media.AudioManager.OnModeChangedListener { mode ->
+        val call = RearPosture.inCall(mode)
+        if (call == callActive) return@OnModeChangedListener
+        callActive = call
+        applyPosture(if (call) "a call" else "the call is over")
+    }
+
+    // ---- camera mode: a camera in use on the phone (CameraWatch, in the app process) ----
+    /**
+     * CAMERA MODE (config.cameraLight; CameraMode decides, RearPosture's FULL). A camera in use
+     * lights the back at full brightness — the window's own override, which ends with the mode
+     * (restoreBrightness) — with the normal animated clock page and the wake's animation (the
+     * rings opening, a Linear clip's run). No dim, always-on or idle sleep while it lasts, and the
+     * page takes no touch but the double tap, which switches the back off (the manual latch, kept
+     * past the camera closing). Closed, the back goes to what the posture says.
+     *
+     * Never in a pocket, under a guest, or switched off by hand, and never over the camera's own
+     * rear preview: the watch tells the panel to stand aside then (ASIDE), and the keep-alive does
+     * not cover it. Lying on its back it waits, dark (the posture's OFF), and lights if picked up.
+     */
+    private val cameraMode = CameraMode()
+
+    private fun enterCamera() {
+        val lit = display?.state == android.view.Display.STATE_ON
+        val before = when {
+            !lit -> CameraMode.Before.DARK
+            inAod -> CameraMode.Before.AOD
+            else -> CameraMode.Before.LIT
+        }
+        if (!cameraMode.start(dial.config.cameraLight, allowed = !pocketed && !covered && !manualOff, before = before)) {
+            Log.i(TAG, "camera: not lit for it (state=${cameraMode.state} switch=${dial.config.cameraLight} pocketed=$pocketed covered=$covered manualOff=$manualOff)")
+            return
+        }
+        Log.i(TAG, "camera: lit at full brightness — the clock page, until the camera closes (was $before)")
+        window.decorView.removeCallbacks(sleepPanel)
+        window.decorView.removeCallbacks(endPeek)
+        // A lock running out and letting go is called off: the back is the camera's now.
+        window.decorView.removeCallbacks(restorePanel)
+        awaitingDoze = false
+        if (sleepStage.dimming) endDim(off = false)
+        // Out of always-on (or the slider of a wake): the page, not its guard — it takes no touch anyway.
+        inAod = false
+        dial.aodPeek = false
+        if (dial.isLocked) {
+            unlockingBySpent = true
+            try { dial.unlock() } finally { unlockingBySpent = false }
+        }
+        guardedAfterWake = false
+        dial.tableDim = false
+        dial.aod = false
+        dial.goToNamed(NamedPage.CLOCK)
+        if (lit) {
+            // The wake's animation on a back already lit: the rings open if they were closed,
+            // and a Linear clip plays its run again.
+            dial.ringsClosed = false
+            dial.replayVideo()
+        } else {
+            // Dark: closed now, they open as the back lights (onDisplayState), and the display
+            // waking plays the clip (RearDialView.displayAwake).
+            dial.ringsClosed = true
+        }
+        applyPosture("the camera")
+        sendMirror()
+    }
+
+    /** The double tap during camera mode (the panel's, or HyperOS's own: onDisplayState): off now. */
+    private fun cameraOff(why: String) {
+        if (!cameraMode.doubleTap()) return
+        Log.i(TAG, "camera: $why — the back off")
+        window.decorView.removeCallbacks(sleepPanel)
+        dial.ringsClosed = true
+        holdScreen(false)
+        // Refuses holds until something really lights the back again, as the double tap's sleep does.
+        sleptByDoubleTap = true
+        applyPosture(why)
+        // The app switches the rear off and declines every wake until the camera closes.
+        sendBroadcast(Intent(ACTION_CAMERA_SLEEP).setPackage(packageName))
+    }
+
+    /** The back taken by something else while the camera is in use: its brightness back, and the panel out of the way. */
+    private fun cameraAside(why: String) {
+        if (!cameraMode.aside()) return
+        Log.i(TAG, "camera: standing aside — $why")
+        applyPosture("the camera stands aside")
+        armSleep()
+    }
+
+    /**
+     * The power button: the phone no longer interactive, or the front's display already off.
+     * Read as the back goes dark: HyperOS ends interactivity first, then sleeps both displays.
+     */
+    private fun frontLocked(): Boolean {
+        val power = getSystemService(android.os.PowerManager::class.java)
+        if (power != null && !power.isInteractive) return true
+        val front = (getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+            .getDisplay(android.view.Display.DEFAULT_DISPLAY)
+        return front != null && front.state != android.view.Display.STATE_ON
+    }
+
+    /** The camera closed (or the switch went off): back to what the posture says. */
+    private fun leaveCamera() {
+        val before = cameraMode.end()
+        if (before == null) {
+            // Not lit for it (aside, switched off by hand, never lit): nothing to undo, but the
+            // posture is looked at again all the same — the camera is no longer a fact.
+            applyPosture("the camera closed")
+            sendMirror()
+            return
+        }
+        Log.i(TAG, "camera: closed — back to the posture (was $before)")
+        applyPosture("the camera closed")
+        // Off or dim by the posture: done. In the hand with "Stay on in the hand": lit, done too.
+        if (level != RearLevel.NORMAL || dial.config.stayOnInHand) { sendMirror(); return }
+        when {
+            aodOn && before != CameraMode.Before.LIT -> enterAod()
+            // Lit for the camera alone: let go now, as the idle would have long before.
+            before == CameraMode.Before.DARK && !keepAwake -> {
+                window.decorView.removeCallbacks(sleepPanel)
+                holdScreen(false)
+            }
+            else -> armSleep()
+        }
+        sendMirror()
+    }
+
+    /** A charger in — EXTRA_PLUGGED, as the panel's charging line reads it; a full battery on one still counts. */
+    private fun plugged(): Boolean = dial.pluggedIn ||
+        (registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            ?.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
 
     /**
      * A notification in always-on lifts the dim: the panel lights up fully with the card,
@@ -1095,6 +1580,13 @@ class RearActivity : Activity() {
     /** [endPeek] re-arming itself needs a name for itself. */
     private val endPeekRef: Runnable get() = endPeek
     private fun peekForNotice() {
+        // Face down, a card is the posture's: normal brightness for its time (RearPosture), by the same rule.
+        if (onTable) {
+            noticeHeld = true
+            window.decorView.removeCallbacks(endNoticeHold)
+            window.decorView.postDelayed(endNoticeHold, NOTICE_GRACE_MS)
+            applyPosture("a card")
+        }
         if (!inAod) return
         dial.aodPeek = true
         window.decorView.removeCallbacks(endPeek)
@@ -1123,7 +1615,9 @@ class RearActivity : Activity() {
     private fun intoPocket() {
         pocketed = true
         window.decorView.removeCallbacks(sleepPanel)
+        cameraAside("in a pocket")
         holdScreen(false)
+        applyPosture("in a pocket")
         Log.i(TAG, "pocket: switched off for a pocket — no holds until out of it")
     }
 
@@ -1139,7 +1633,7 @@ class RearActivity : Activity() {
     private fun outOfPocket(restore: Boolean, guest: Boolean) {
         if (!pocketed && !restore) return
         pocketed = false
-        if (!restore) return
+        if (!restore) { applyPosture("the pocket called off"); return }
         Log.i(TAG, "pocket: out of it — back as it was, the slider up${if (guest) " (a guest on top: no slider over it)" else ""}")
         if (!guest) {
             if (inAod) {
@@ -1155,6 +1649,7 @@ class RearActivity : Activity() {
         // come takes it (onDisplayState), and this only asks for what it will.
         if (display?.state == android.view.Display.STATE_ON) holdScreen(true)
         armSleep()
+        applyPosture("out of a pocket")
     }
 
     /**
@@ -1172,7 +1667,15 @@ class RearActivity : Activity() {
      * thirty seconds after it started.
      */
     private val sleepPanel = Runnable {
-        if (keepAwake || covered) return@Runnable
+        if (covered) return@Runnable
+        // Off by a rule already: nothing for the idle to do.
+        if (offByRule()) return@Runnable
+        // Camera mode has no idle sleep: the camera closing ends it.
+        if (cameraMode.lit) return@Runnable
+        // Anything but NORMAL has no idle sleep, and face down the posture's own clock (a touch's
+        // thirty seconds) takes the page back to the dim.
+        if (level != RearLevel.NORMAL || (onTable && dial.config.tableMode)) return@Runnable
+        if (keepAwake) return@Runnable
         // Stopped behind a guest app: letting go would tell the app process the panel is
         // dozing, which pauses the shell service's guest checks while the guest is in plain
         // view. Stopped with the rear still lit is that — something is in front of the panel
@@ -1190,6 +1693,10 @@ class RearActivity : Activity() {
     private fun armSleep() {
         window.decorView.removeCallbacks(sleepPanel)
         if (covered) return
+        // Camera mode: lit until the camera closes, no countdown.
+        if (cameraMode.lit) return
+        // Off, dim or full by the posture: no countdown (the dim's way back is the posture's tick).
+        if (level != RearLevel.NORMAL) return
         if (keepAwake) {
             // Not while a spent lock is letting the display go — see KeepAwakeHold.
             if (KeepAwakeHold.retake(keepAwake, holding, awaitingDoze)) holdScreen(true)
@@ -1219,6 +1726,20 @@ class RearActivity : Activity() {
     }
 
     private fun onLockSpent() {
+        // In camera mode (a slider raised from outside, say): handed back, never let go of.
+        if (cameraMode.lit) {
+            guardedAfterWake = false
+            window.decorView.removeCallbacks(restorePanel)
+            window.decorView.post(restorePanel)
+            return
+        }
+        // Face down on the dim, or in the hand with "Stay on in the hand", as in always-on: the
+        // back is held there on purpose, and a slider that ran out unswiped must not let it go
+        // dark. Re-armed, its guard (guardedAfterWake) kept as it was.
+        if (level == RearLevel.DIM || (level == RearLevel.NORMAL && dial.config.stayOnInHand)) {
+            dial.lock()
+            return
+        }
         guardedAfterWake = false
         if (inAod) {
             // nobody swiped: in always-on the slider never leaves — re-arm it
@@ -1280,7 +1801,22 @@ class RearActivity : Activity() {
     }
 
     private fun onDisplayState(on: Boolean) {
+        // Dark under camera mode. Only HyperOS's own double tap (the panel could not take it
+        // over) is the user's off, with the double tap's latch. Not a dark the panel asked for
+        // itself, a posture rule (lying on its back): camera mode stays, and picked up the back
+        // is full again. Nor the power button, the front's lock taking the back with it: the
+        // panel stands aside for the lock, and the camera closing (or the lock's relight)
+        // brings back what the posture says.
+        if (!on && cameraMode.lit) when {
+            offByRule() -> Log.i(TAG, "camera: dark by a posture rule — camera mode kept for when it ends")
+            frontLocked() -> cameraAside("the front locked and took the back with it")
+            else -> {
+                setManualOff(true, "the back went dark under camera mode")
+                cameraOff("the display went dark")
+            }
+        }
         if (!on) {
+            // Dark: the panel's own table watch stops (the service's goes on and says what changes).
             tableWatch(false)
             if (sleepStage.dimming) endDim(off = true)
             if (!awaitingDoze) return
@@ -1289,6 +1825,10 @@ class RearActivity : Activity() {
             window.decorView.post(restorePanel)
             return
         }
+        // Lit while the double tap's latch is set: nothing automatic can have done it (the bridge
+        // declines every wake, the panel takes no hold), so it is the user — the double tap to
+        // wake, the power button. The latch is his to end (ManualOff).
+        if (manualOff) setManualOff(false, "the back lit by hand")
         if (sleepStage.dimming) endDim(off = false)
         // Lit again after the dim's sleep: no longer paused. The display coming on is what
         // starts the video over (RearDialView.displayAwake), with its frame faded from.
@@ -1299,16 +1839,27 @@ class RearActivity : Activity() {
         // it lit the full panel (DoubleTapSleep.guardsWake). Only a swipe ends it.
         val wokeFromSleep = sleptByDoubleTap || sleepStage.guardsWake
         sleptByDoubleTap = false // lit by something real: holds mean something again
-        if (!aodOn) dial.ringsClosed = false // awake after the double tap's sleep: the rings open
-        if (!aodOn && wokeFromSleep) {
+        // Lit for the camera (the watch told the panel before it woke the back): its page, held,
+        // at full brightness — no slider, no always-on, no dim — and the rings opening.
+        if (cameraMode.lit) {
+            dial.ringsClosed = false
+            applyPosture("lit for the camera")
+            return
+        }
+        // Always-on rests the back only where the posture leaves an idle to rest from: with
+        // "Stay on in the hand" there is none, and a wake is the page, guarded as without it.
+        val aodRests = aodOn && !dial.config.stayOnInHand
+        if (!aodRests) dial.ringsClosed = false // awake after the double tap's sleep: the rings open
+        if (!aodRests && wokeFromSleep) {
             // the slider up, the page guarded, until the swipe — see guardedAfterWake
             guardedAfterWake = true
             dial.lock()
         }
         if (!holding && !awaitingDoze) holdScreen(true)
-        if (aodOn) { if (inAod) { if (!holding) holdScreen(true) } else enterAod() }
-        // Lit again, for whatever reason. Start the clock over rather than letting a
-        // stale countdown put it straight back to sleep.
+        if (aodRests && level == RearLevel.NORMAL) { if (inAod) { if (!holding) holdScreen(true) } else enterAod() }
+        // Lit again, for whatever reason: the posture as it is now — which also starts the idle
+        // clock over rather than letting a stale countdown put it straight back to sleep.
+        applyPosture("lit")
         armSleep()
     }
 
@@ -1575,7 +2126,10 @@ class RearActivity : Activity() {
         window.decorView.removeCallbacks(restoreBrightness)
         window.decorView.removeCallbacks(sleepPanel)
         window.decorView.removeCallbacks(endPeek)
+        window.decorView.removeCallbacks(postureTick)
+        window.decorView.removeCallbacks(endNoticeHold)
         tableWatch(false)
+        runCatching { audio.removeOnModeChangedListener(callListener) }
         runCatching {
             (getSystemService(Context.DISPLAY_SERVICE)
                 as android.hardware.display.DisplayManager)

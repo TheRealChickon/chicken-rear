@@ -26,8 +26,8 @@ class GlassField @JvmOverloads constructor(
         background = null
         val h = (16 * density).toInt(); val v = (11 * density).toInt()
         setPadding(h, v, h, v)
-        setTextColor(Panel.Palette.FG)
-        setHintTextColor(Panel.Palette.DIM)
+        setTextColor(dev.kb896.aiusage.ui.glass.Ink.fg())
+        setHintTextColor(dev.kb896.aiusage.ui.glass.Ink.dim())
         UiType.dress(this)
     }
 

@@ -193,6 +193,19 @@ class MediaWatcher(private val context: Context) {
         )
 
         val send = { path: String? ->
+            // And to the back's own card (rear/MusicFace), with the cover small enough to cross a binder.
+            runCatching {
+                val b = android.os.Bundle()
+                b.putBoolean("active", active); b.putString("title", title.orEmpty()); b.putString("artist", artist.orEmpty())
+                b.putBoolean("playing", state == PlaybackState.STATE_PLAYING)
+                if (active && path != null) smallArt(path)?.let { b.putByteArray("art", it) }
+                // The player's own icon, for a track that comes with no cover: the back shows that in the cover's
+                // place, never a drawn stand-in.
+                if (active) c?.packageName?.let { pkg -> playerIcon(pkg)?.let { b.putByteArray("icon", it) } }
+                Graph.of(context).bridge.setMedia(b)
+                // And, if he has it on, how loud it is (MusicLevel): started and stopped with the playing.
+                MusicLevel.sync(context, active && state == PlaybackState.STATE_PLAYING)
+            }
             context.sendBroadcast(
                 Intent(RearActivity.ACTION_MEDIA)
                     .setPackage(context.packageName)
@@ -441,6 +454,29 @@ class MediaWatcher(private val context: Context) {
         if (scaled !== art) scaled.recycle()
         tmp.renameTo(artFile())
         return artFile().path
+    }
+
+    /** The cover at [path] as a JPEG 288 px across (the back shows it 193 px square): some tens of kilobytes. Null when it cannot be read. */
+    private fun smallArt(path: String): ByteArray? = runCatching {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(path, bounds)
+        var sample = 1
+        while (minOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 288) sample *= 2
+        val bmp = android.graphics.BitmapFactory.decodeFile(path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
+        val small = android.graphics.Bitmap.createScaledBitmap(bmp, 288, (288f * bmp.height / bmp.width).toInt().coerceAtLeast(1), true)
+        java.io.ByteArrayOutputStream().also { small.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, it) }.toByteArray()
+    }.getOrNull()
+
+    private val playerIcons = HashMap<String, ByteArray?>()
+
+    /** [pkg]'s launcher icon as the phone draws it, 256 px, PNG; null when it cannot be had. Read once per app. */
+    private fun playerIcon(pkg: String): ByteArray? = playerIcons.getOrPut(pkg) {
+        runCatching {
+            val d = context.packageManager.getApplicationIcon(pkg)
+            val bmp = android.graphics.Bitmap.createBitmap(256, 256, android.graphics.Bitmap.Config.ARGB_8888)
+            d.setBounds(0, 0, 256, 256); d.draw(android.graphics.Canvas(bmp))
+            java.io.ByteArrayOutputStream().also { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        }.getOrNull()
     }
 
     private fun artFile() = java.io.File(context.filesDir, ART_NAME)

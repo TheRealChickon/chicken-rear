@@ -17,7 +17,17 @@ import kotlin.math.abs
  */
 class NoticeShade(private val left: Float) {
 
-    data class Item(val key: String, val pkg: String, val app: String, val title: String, val text: String)
+    /**
+     * One notification. [time] is when it was posted (wall clock, ms; 0 for unknown). [actions]
+     * are its buttons' words, the ones that need nothing typed, in the order the listener can
+     * press them by (NotificationRelay.act).
+     */
+    data class Item(
+        val key: String, val pkg: String, val app: String, val title: String, val text: String,
+        val time: Long = 0L, val actions: List<String> = emptyList(),
+        /** The app's own colour for this notification (its accent, or its icon's), 0 for none: the pop-up's (NoticePop). */
+        val color: Int = 0,
+    )
 
     sealed interface Effect {
         data class Dismissed(val key: String) : Effect
@@ -25,6 +35,8 @@ class NoticeShade(private val left: Float) {
         data class ShutAt(val atMs: Long) : Effect
         /** The row of [key] tapped. */
         data class Tapped(val key: String) : Effect
+        /** Button [index] of the row of [key] tapped. */
+        data class Action(val key: String, val index: Int) : Effect
         /** All of [keys] dismissed at once, by the clear button; the last of them gone at [doneAtMs]. */
         data class ClearedAll(val keys: List<String>, val doneAtMs: Long) : Effect
     }
@@ -38,6 +50,7 @@ class NoticeShade(private val left: Float) {
     /** On its way out: swiped, flying sideways from [fromDx]; or [up], cleared, sliding off to the right from [atMs] in its turn. */
     private class Leaving(val fromDx: Float, val dir: Float, val atMs: Long, val up: Boolean = false)
 
+    private var fingerAction = -1
     private var items: List<Item> = emptyList()
     private val leaving = HashMap<String, Leaving>()
 
@@ -187,7 +200,9 @@ class NoticeShade(private val left: Float) {
             (x - c.cx) * (x - c.cx) + (y - c.cy) * (y - c.cy) <= r * r
         } ?: false
         if (onClear) fingerRow = null
-        fingerRow = if (fromBottom) null else rows(now).firstOrNull { x >= rowLeft && x <= RIGHT && y >= it.top && y <= it.top + it.height }?.item?.key
+        val row = if (fromBottom) null else rows(now).firstOrNull { x >= rowLeft && x <= RIGHT && y >= it.top && y <= it.top + it.height }
+        fingerRow = row?.item?.key
+        fingerAction = row?.let { actionAt(x - rowLeft, y - it.top, it.item.actions.size) } ?: -1
     }
 
     fun fingerMove(x: Float, y: Float, now: Long) {
@@ -252,6 +267,7 @@ class NoticeShade(private val left: Float) {
             Finger.UNDECIDED -> when {
                 onClear -> clearAll(now)
                 fingerRow == null -> close(now)
+                fingerAction >= 0 -> fingerRow?.let { listOf(Effect.Action(it, fingerAction)) } ?: emptyList()
                 else -> fingerRow?.let { listOf(Effect.Tapped(it)) } ?: emptyList()
             }
             Finger.NONE -> emptyList()
@@ -346,6 +362,25 @@ class NoticeShade(private val left: Float) {
 
     companion object {
         /** A finger at [x], [y] starts the pull: the top edge's right half, past the control centre's. */
+        // A row's buttons: up to [ACTIONS] pills along its foot, from the text's left edge. Fixed
+        // places, so the model knows them without measuring a word (NoticeCard draws them there).
+        const val ACTIONS = 2
+        /** From the row's left edge to its text and to its small icon over it. */
+        const val TEXT_X = 26f
+        const val PILL_W = 168f
+        const val PILL_H = 34f
+        const val PILL_GAP = 10f
+        /** A pill's top, from the row's top. */
+        const val PILL_TOP = 102f
+
+        /** Which button a finger at [x], [y] from a row's top left is on, of [count]; -1 for none. Generous above and below. */
+        fun actionAt(x: Float, y: Float, count: Int): Int {
+            val n = minOf(count, ACTIONS)
+            if (n <= 0 || y < PILL_TOP - 8f) return -1
+            val i = ((x - TEXT_X + PILL_GAP / 2f) / (PILL_W + PILL_GAP)).toInt()
+            return if (x >= TEXT_X - PILL_GAP / 2f && i in 0 until n) i else -1
+        }
+
         fun startsPull(x: Float, y: Float, left: Float): Boolean =
             y <= ControlCenter.EDGE && x > left + (Panel.WIDTH - left) / 2f
 

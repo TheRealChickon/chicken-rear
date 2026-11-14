@@ -40,7 +40,12 @@ import java.util.concurrent.Executors
  * Only while the switch is on and the back is lit, or switched off for a pocket: a back
  * dark for any other reason is not watched (PocketMode.watching).
  */
-class PocketWatch(private val context: Context, private val bridge: ShizukuBridge) {
+class PocketWatch(
+    private val context: Context,
+    private val bridge: ShizukuBridge,
+    /** The shell's pocket began or ended (ShizukuBridge.isPocketed changed): on the main thread. */
+    private val onPocketChanged: () -> Unit = {},
+) {
 
     private val sensors = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val displays = context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
@@ -67,11 +72,7 @@ class PocketWatch(private val context: Context, private val bridge: ShizukuBridg
      * name, in case another model spells it differently.
      */
     private val sensor: Sensor? by lazy {
-        val all = sensors.getSensorList(Sensor.TYPE_ALL)
-        val rear = Regex("(?i)prox.*(back|rear|sub)|(back|rear|sub).*prox")
-        val backs = all.filter { it.stringType == "xiaomi.sensor.proxmity_back" }
-            .ifEmpty { all.filter { rear.containsMatchIn(it.stringType) || rear.containsMatchIn(it.name) } }
-        (backs.firstOrNull { it.isWakeUpSensor } ?: backs.firstOrNull()).also {
+        RearProximity.find(sensors).also {
             if (it == null) Log.w(TAG, "no rear proximity sensor — no pocket mode")
             else Log.i(TAG, "the rear proximity sensor: ${it.name} (${it.stringType}), wake-up ${it.isWakeUpSensor}, range ${it.maximumRange}")
         }
@@ -135,7 +136,7 @@ class PocketWatch(private val context: Context, private val bridge: ShizukuBridg
 
     private val listener = object : SensorEventListener {
         override fun onSensorChanged(e: SensorEvent) {
-            val covered = e.values[0] < e.sensor.maximumRange.coerceAtLeast(1f) * 0.5f
+            val covered = !debugLit() && RearProximity.covered(e.values[0], e.sensor.maximumRange)
             act(mode.reading(covered, SystemClock.uptimeMillis()))
             sync()
         }
@@ -145,6 +146,8 @@ class PocketWatch(private val context: Context, private val bridge: ShizukuBridg
 
     /** The debounce's end. A back the panel is already letting go of is left to go (PocketMode.due). */
     private val due = Runnable {
+        // A debug build's forced posture that lights the back (StayOn's posture-override) is not a pocket, wherever the phone lies.
+        if (debugLit()) { act(mode.reading(false, SystemClock.uptimeMillis())); sync(); return@Runnable }
         val touchedAgo = bridge.msSinceRearTouch()
         act(mode.due(SystemClock.uptimeMillis(), lettingGo = bridge.isDozing(),
             touching = touchedAgo != null && touchedAgo < RearActivity.POCKET_TOUCH_QUIET_MS))
@@ -156,6 +159,9 @@ class PocketWatch(private val context: Context, private val bridge: ShizukuBridg
         val at = mode.dueAt()
         if (at >= 0 && watching) handler.postAtTime(due, at)
     }
+
+    /** A debug build is told to hold the back lit for a look at it (files/posture-override: "hand", "facedown", …): the cover of a phone lying on its back is not a pocket then. */
+    private fun debugLit(): Boolean = NightRule.debugWords(context).any { it == "hand" || it == "facedown" || it == "home" || it == "homenight" || it == "camera" || it == "saver" }
 
     private fun act(a: PocketMode.Act) {
         if (stopped) return // a reading already queued as the watch stopped
@@ -181,6 +187,7 @@ class PocketWatch(private val context: Context, private val bridge: ShizukuBridg
             if (bridge.pocketSleep()) {
                 guestAtSleep = guest
                 tellPanel(pocketed = true, restore = false, guest = guest)
+                handler.post(onPocketChanged)
             } else {
                 Log.w(TAG, "pocket: the back could not be switched off — left as it is")
                 handler.post { mode.refused(); sync() }
@@ -198,6 +205,7 @@ class PocketWatch(private val context: Context, private val bridge: ShizukuBridg
         Log.i(TAG, "pocket: covered while going dark — switching the back off now")
         worker.execute {
             if (bridge.pocketSleep()) bridge.pocketEnd(light = false)
+            handler.post(onPocketChanged)
         }
     }
 
@@ -212,6 +220,7 @@ class PocketWatch(private val context: Context, private val bridge: ShizukuBridg
             try {
                 tellPanel(pocketed = false, restore = true, guest = guestAtSleep)
                 bridge.pocketEnd(light = true)
+                handler.post(onPocketChanged)
             } finally {
                 wakeLock.release()
             }
@@ -224,6 +233,7 @@ class PocketWatch(private val context: Context, private val bridge: ShizukuBridg
         worker.execute {
             tellPanel(pocketed = false, restore = false, guest = guestAtSleep)
             bridge.pocketEnd(light = false)
+            handler.post(onPocketChanged)
         }
     }
 

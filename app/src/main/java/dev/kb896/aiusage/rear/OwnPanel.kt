@@ -20,7 +20,7 @@ package dev.kb896.aiusage.rear
 object OwnPanel {
 
     /** Both builds' packages start here; anything else is not the other build. */
-    const val FAMILY = "dev.kb896.aiusage"
+    const val FAMILY = "dev.chicken.rear"
 
     const val ACTIVITY = "RearActivity"
 

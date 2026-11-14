@@ -19,8 +19,8 @@ import android.widget.Toast
  */
 object Privacy {
 
-    /** The privacy policy, on the panel's site: the General tab's row and the notice. */
-    const val POLICY_URL = "https://rear.896.ro/en/privacy/"
+    /** What this fork does with data, in its README: the Advanced page's row and the notice. */
+    const val POLICY_URL = "https://github.com/TheRealChickon/chicken-rear/blob/master/README.md#privacy"
 
     /**
      * The notice's version. Bump it when [NOTICE] changes in a way someone who has read the
@@ -38,7 +38,6 @@ object Privacy {
         "What leaves your phone:\n" +
             "• Your Claude usage and plan, read from Anthropic with your own Claude account — " +
             "and the sign-in itself, in your browser.\n" +
-            "• A check for a new version, on GitLab.\n" +
             "• Only if you turn them on: the weather, from Open-Meteo (the place you type, or " +
             "your approximate location), and lyrics, from lrclib.net (the song's name, artist, " +
             "album and length).\n\n" +

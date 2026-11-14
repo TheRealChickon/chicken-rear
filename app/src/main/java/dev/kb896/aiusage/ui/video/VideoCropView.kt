@@ -14,7 +14,6 @@ import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.widget.FrameLayout
-import dev.kb896.aiusage.Panel
 import dev.kb896.aiusage.rear.ArtPlacement
 import dev.kb896.aiusage.ui.CropGesture
 
@@ -73,7 +72,7 @@ class VideoCropView(context: Context) : FrameLayout(context) {
         private val frame = Paint().apply {
             style = Paint.Style.STROKE
             strokeWidth = 2f * resources.displayMetrics.density
-            color = Panel.Palette.WORK
+            color = dev.kb896.aiusage.ui.glass.Ink.ACCENT
         }
         override fun onDraw(canvas: Canvas) {
             val box = region()

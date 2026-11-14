@@ -89,4 +89,41 @@ class RearTouchesTest {
         val e = touches().run(land(60100, 54500).map { "/dev/input/event7: $it" })
         assertTrue(e.single() is RearTouches.Down)
     }
+
+    // -- a finger that rests (the review's 16) ----------------------------------------------------------------
+
+    private fun slot(n: Int) = "0003 002f ${hex(n)}"
+    private fun landIn(n: Int, x: Int, y: Int, id: Int) = listOf(slot(n), "0003 0039 ${hex(id)}", "0003 0035 ${hex(x)}", "0003 0036 ${hex(y)}", syn)
+
+    @Test fun `with one finger resting on the back, another finger's stroke is seen`() {
+        val t = touches()
+        // The hand that holds the phone: a finger down at the edge, and still there a second later.
+        assertTrue(t.run(landIn(0, 5000, 30000, 1), 0L).single() is RearTouches.Down)
+        // A second finger lands at 2 s: the resting one is let go, the new one is the finger.
+        val e = t.run(landIn(1, 80000, 30000, 2), 2_000L)
+        assertEquals(2, e.size)
+        assertTrue(e[0] is RearTouches.Up); assertEquals(50f, e[0].x, 0.5f)
+        assertTrue(e[1] is RearTouches.Down); assertEquals(800f, e[1].x, 0.5f)
+        // Its moves and its lift are read.
+        val m = t.run(listOf(slot(1), "0003 0035 ${hex(50000)}", syn), 2_100L).single()
+        assertTrue(m is RearTouches.Move); assertEquals(500f, m.x, 0.5f)
+        val u = t.run(listOf(slot(1), "0003 0039 ffffffff", syn), 2_150L).single()
+        assertTrue(u is RearTouches.Up)
+        // The resting finger moving or lifting afterwards is nobody's.
+        assertTrue(t.run(listOf(slot(0), "0003 0035 ${hex(6000)}", syn), 2_300L).isEmpty())
+        assertTrue(t.run(listOf(slot(0), "0003 0039 ffffffff", syn), 2_400L).isEmpty())
+    }
+
+    @Test fun `a first finger that is doing something keeps the back to itself`() {
+        // Just landed (it may be a tap or a swipe): a second finger is ignored, as it always was.
+        val quick = touches()
+        quick.run(landIn(0, 60000, 30000, 1), 0L)
+        assertTrue(quick.run(landIn(1, 20000, 30000, 2), 200L).isEmpty())
+        // Down for long but moving (a slow drag): ignored too.
+        val drag = touches()
+        drag.run(landIn(0, 60000, 30000, 1), 0L)
+        drag.run(listOf(slot(0), "0003 0035 ${hex(50000)}", syn), 900L)
+        assertTrue(drag.run(landIn(1, 20000, 30000, 2), 2_000L).isEmpty())
+        assertTrue(drag.run(listOf(slot(0), "0003 0035 ${hex(40000)}", syn), 2_100L).single() is RearTouches.Move)
+    }
 }

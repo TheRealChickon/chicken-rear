@@ -151,4 +151,14 @@ class WatchdogTest {
         assertEquals(Watchdog.State.DOZING, Watchdog.decide(null, alive = null, calibrating = false, dozing = true).state)
         assertEquals(Watchdog.State.CALIBRATING, Watchdog.decide(null, alive = null, calibrating = true).state)
     }
+
+    @Test fun `companion mode has nothing to watch, whatever the readings say`() {
+        for (alive in listOf(true, false, null)) for (calibrating in listOf(true, false)) for (dozing in listOf(true, false)) {
+            val d = Watchdog.decide(previous = null, alive = alive, calibrating = calibrating, dozing = dozing, companion = true)
+            assertEquals(Watchdog.State.NOTHING, d.state)
+            assertFalse(d.shouldRespawn)
+        }
+        // Logged once, on the change, as every state is.
+        assertFalse(Watchdog.decide(previous = Watchdog.State.NOTHING, alive = false, calibrating = false, companion = true).isNewState)
+    }
 }

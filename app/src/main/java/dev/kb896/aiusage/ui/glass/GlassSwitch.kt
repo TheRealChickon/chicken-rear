@@ -226,7 +226,7 @@ class GlassSwitch(context: Context) : View(context), Checkable, Glassy {
         if (backdrop != null) {
             getLocationOnScreen(loc)
             lc.drawBitmap(backdrop, -(loc[0] - Backdrop.origin[0]).toFloat(), -(loc[1] - Backdrop.origin[1]).toFloat(), null)
-        } else lc.drawColor(dev.kb896.aiusage.Panel.Palette.BG)
+        } else lc.drawColor(Backdrop.ground())
         lc.drawRoundRect(track, tr, tr, paint)
         return localShader!!
     }

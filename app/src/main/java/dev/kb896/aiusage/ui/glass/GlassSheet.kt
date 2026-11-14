@@ -10,11 +10,10 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.core.view.doOnLayout
 import dev.kb896.aiusage.Panel
-import dev.kb896.aiusage.rear.Glass
 
 /**
- * A dialog as a sheet of glass, ported from catalog/destinations/DialogContent.kt
- * (Apache 2.0): a 48dp corner, the card tint, and the catalog scrim behind it.
+ * A dialog as a sheet of glass, after catalog/destinations/DialogContent.kt (Apache 2.0):
+ * the cards' plain glass and corner (Pane.card), and the catalog scrim behind it.
  *
  * The sheet is the background of the framework dialog's own panel rather than a root of
  * ours, so Modal's builder API and the framework's title, message and button layout are
@@ -29,8 +28,8 @@ class GlassSheetDrawable : Drawable() {
         // screen position and density the pane needs to sample the wallpaper.
         val host = callback as? View ?: return
         val d = host.resources.displayMetrics.density
-        luminance = Pane.draw(canvas, host, bounds.left.toFloat(), bounds.top.toFloat(),
-            bounds.right.toFloat(), bounds.bottom.toFloat(), 48 * d, Glass.CARD_TINT)
+        luminance = Pane.card(canvas, host, bounds.left.toFloat(), bounds.top.toFloat(),
+            bounds.right.toFloat(), bounds.bottom.toFloat(), Pane.CARD_RADIUS_DP * d)
     }
     override fun setAlpha(alpha: Int) = Unit
     override fun setColorFilter(filter: ColorFilter?) = Unit
@@ -93,7 +92,11 @@ object GlassSheet {
     /** Recolour every TextView under [view] — title, message, buttons — from [lum]. */
     private fun ink(view: View, lum: Float) {
         // A card title inside a sheet keeps its dimmer ink, as it does on a card.
-        if (view is TextView) view.setTextColor(if (view.tag == CardTitle.TAG) Ink.secondary(lum) else Ink.primary(lum))
+        if (view is TextView) view.setTextColor(when (view.tag) {
+            CardTitle.NOTE_TAG -> Ink.tertiary(lum)
+            CardTitle.TAG -> Ink.secondary(lum)
+            else -> Ink.primary(lum)
+        })
         if (view is ViewGroup) for (i in 0 until view.childCount) ink(view.getChildAt(i), lum)
     }
 
@@ -129,7 +132,7 @@ class FrostDrawable(private val behind: View) : Drawable() {
         val d = host.resources.displayMetrics.density
         val w = bounds.width(); val h = bounds.height()
         if (w <= 0 || h <= 0) return
-        val r = RADIUS_DP * d
+        val r = Pane.CARD_RADIUS_DP * d
         if (canvas.isHardwareAccelerated && canvas is android.graphics.RecordingCanvas) {
             host.getLocationOnScreen(here)
             behind.getLocationOnScreen(there)
@@ -156,9 +159,10 @@ class FrostDrawable(private val behind: View) : Drawable() {
         paint.color = TINT
         canvas.drawRoundRect(rect, r, r, paint)
         paint.style = android.graphics.Paint.Style.STROKE
-        paint.strokeWidth = 1 * d
+        val edge = (0.75f * d).coerceAtLeast(1f)
+        paint.strokeWidth = edge
         paint.color = RIM
-        rect.inset(0.5f * d, 0.5f * d)
+        rect.inset(edge / 2f, edge / 2f)
         canvas.drawRoundRect(rect, r, r, paint)
     }
 
@@ -167,12 +171,12 @@ class FrostDrawable(private val behind: View) : Drawable() {
     @Deprecated("Deprecated in Java") override fun getOpacity() = PixelFormat.TRANSLUCENT
 
     private companion object {
-        const val RADIUS_DP = 28f
         /** How far the blur reaches: a frost, not a smear. */
         const val BLUR_DP = 24f
-        /** The colour lifted before the blur, as the bar's vibrancy does. */
-        const val VIBRANCY = 1.5f
-        const val TINT = 0x661E2228
-        const val RIM = 0x2EFFFFFF
+        /** Colour taken down before the blur: the sheet is neutral, whatever is behind it. */
+        const val VIBRANCY = 0.4f
+        /** A veil, no hue, over the frost: near-black, or near-white in the light theme. */
+        val TINT get() = if (Ink.dark) 0xB3141416.toInt() else 0xE0F7F7F9.toInt()
+        val RIM get() = Pane.CARD_EDGE
     }
 }

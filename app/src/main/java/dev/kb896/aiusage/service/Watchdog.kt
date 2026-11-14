@@ -22,7 +22,11 @@ package dev.kb896.aiusage.service
  */
 object Watchdog {
 
-    enum class State { ALIVE, DEAD, CALIBRATING, DOZING, UNKNOWN }
+    /**
+     * [NOTHING]: companion mode (PanelConfig.rearMode). Xiaomi's own rear screen is the base
+     * and there is no panel of ours to keep alive, so there is nothing to watch or re-place.
+     */
+    enum class State { ALIVE, DEAD, CALIBRATING, DOZING, UNKNOWN, NOTHING }
 
     data class Decision(val state: State, val isNewState: Boolean) {
         /** Only a confirmed-dead panel that is neither calibrating nor dozing — never an unknown one. */
@@ -61,8 +65,11 @@ object Watchdog {
         alive: Boolean?,
         calibrating: Boolean,
         dozing: Boolean = false,
+        companion: Boolean = false,
     ): Decision {
         val state = when {
+            // Before every other reading: in companion mode no reading means anything.
+            companion -> State.NOTHING
             dozing -> State.DOZING
             calibrating -> State.CALIBRATING
             alive == null -> State.UNKNOWN

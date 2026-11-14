@@ -101,4 +101,32 @@ class GuestGateTest {
         assertEquals(Tick.GUEST_ON_TOP, private(rearTask = null))
         assertEquals(Tick.GUEST_BEHIND, private(onTop = false, rearTask = null))
     }
+
+    // Companion mode: Xiaomi's rear screen is the base, and there is no panel to put back.
+
+    private val xiaomi = "com.xiaomi.subscreencenter"
+
+    @Test fun `companion, something else over the guest drops it — nothing is re-placed`() {
+        assertEquals(Tick.USUAL, GuestGate.tick(guest, alive = true, onRear = true, top = xiaomi, ours = us))
+        assertEquals(GuestGate.Usual.DROP_GUEST, GuestGate.onUsual(companion = true))
+        assertEquals(GuestGate.Usual.REPLACE_PANEL, GuestGate.onUsual(companion = false))
+    }
+
+    @Test fun `companion, a guest's end only drops it, Replace puts a placed panel back`() {
+        assertEquals(false, GuestGate.endRestoresPanel(companion = true, panelPlaced = true))
+        assertEquals(false, GuestGate.endRestoresPanel(companion = true, panelPlaced = false))
+        assertEquals(true, GuestGate.endRestoresPanel(companion = false, panelPlaced = true))
+        assertEquals(false, GuestGate.endRestoresPanel(companion = false, panelPlaced = false))
+    }
+
+    @Test fun `companion, Xiaomi's launcher under a private guest is the base, not an app hidden`() {
+        assertEquals(Tick.GUEST_ON_TOP, GuestGate.tickPrivate(alive = true, onDisplay = true, layer = true, onTop = true,
+            rearLit = true, rearTask = xiaomi, ours = us, base = xiaomi))
+        // Without a base (Replace mode) it is the usual recovery, as before.
+        assertEquals(Tick.USUAL, GuestGate.tickPrivate(alive = true, onDisplay = true, layer = true, onTop = true,
+            rearLit = true, rearTask = xiaomi, ours = us))
+        // And Xiaomi's camera (or anything else) over it still is.
+        assertEquals(Tick.USUAL, GuestGate.tickPrivate(alive = true, onDisplay = true, layer = true, onTop = true,
+            rearLit = true, rearTask = "com.android.camera", ours = us, base = xiaomi))
+    }
 }

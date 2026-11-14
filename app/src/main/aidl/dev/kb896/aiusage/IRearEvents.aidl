@@ -50,4 +50,30 @@ oneway interface IRearEvents {
     void onRecording(boolean on) = 14;
     // The screenshot just taken, binned from its polaroid on the back: out of the gallery.
     void onDeleteLastShot() = 15;
+    // Companion mode: the back went dark right after a double tap on it (ManualOff.byDoubleTap).
+    // The app sets the double tap's latch, so no wake of its own lights it again until the user
+    // does (ShizukuBridge.wake); the rear lighting up clears it (UsagePollService).
+    void onSwitchedOffByHand() = 16;
+    /**
+     * A camera on the phone was opened or closed, as the camera service itself says (the shell
+     * asks it: `dumpsys media.camera`). The app's own CameraManager callback does not hear
+     * Xiaomi's Camera on this phone.
+     */
+    void onCameraOpen(boolean open) = 17;
+    /** A notification's button pressed on the back: [index] among the ones the list was given (NoticeShade.Item.actions). */
+    void onNoticeAction(String key, int index) = 18;
+    /** A press and hold on the back picked the face [file] (a clip's file name): the app keeps it (PanelConfig.sceneLoop). */
+    void onFacePicked(String file) = 19;
+    /** The usage page has been swiped in on the back: fresh figures are welcome (the app keeps its own floor between fetches). */
+    void onUsageShown() = 20;
+    /** The note pinned at [at] was removed on the back (its bin): the app takes it off its list (PanelConfig.pins). */
+    void onPinRemoved(long at) = 21;
+    /** A button of the playing card pressed on the back: "previous", "playpause", "next" (RearActivity.MEDIA_*). */
+    void onMediaCommand(String action) = 22;
+    /** Button [index] of the live card pressed on the back: handed to the notification [key] it came from. */
+    void onLiveAction(String key, int index) = 23;
+    /** A finger on the back while the back is not being held lit: the app's stay-on rule looks again (it does not look by itself then). */
+    void onRearTouch() = 24;
+    /** A double tap on the back while it is dark: he wakes it by hand, which also ends "switched off by hand". */
+    void onWokenByHand() = 25;
 }

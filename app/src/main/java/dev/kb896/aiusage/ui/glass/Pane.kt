@@ -24,8 +24,11 @@ import kotlin.math.min
  * paint at draw time, which the panel's mist already depends on.
  */
 object Pane {
-    /** The brightness every front pane's tint is worked out at — a dark background's. */
-    const val FRONT_LUMINANCE = 0.25f
+    /**
+     * The brightness every front pane's tint is worked out at: a dark background's, or a
+     * light one's in the light theme, so clear glass lifts off black and darkens on white.
+     */
+    val FRONT_LUMINANCE get() = if (Ink.dark) 0.25f else 0.85f
 
     /** What a pane reads as over no backdrop at all: the panel colour, which is dark. */
     const val FALLBACK_LUMINANCE = 0.12f
@@ -133,6 +136,50 @@ object Pane {
         return lum
     }
 
+    /** Every card's and every sheet's corner, so the screen has one radius. */
+    const val CARD_RADIUS_DP = 24f
+
+    /**
+     * A card's body: white at 6%, a translucent lift off the near-black wallpaper; in the
+     * light theme white at 72%, a paler sheet over the near-white one.
+     */
+    val CARD_BODY get() = if (Ink.dark) 0x0FFFFFFF else 0xB8FFFFFF.toInt()
+
+    /** A card's edge: a hairline of white at 10% (black at 8% in light), even all round. */
+    val CARD_EDGE get() = if (Ink.dark) 0x1AFFFFFF else 0x14000000
+
+    /**
+     * The plain glass every card and sheet is: a translucent body and a hairline edge.
+     * No lens and no highlight rim: over a near-flat wallpaper the lens bends nothing worth
+     * seeing, and the angled rim was the noise the screen did not need. Returns the
+     * luminance under it, as [draw] does.
+     */
+    fun card(
+        canvas: Canvas, view: View,
+        left: Float, top: Float, right: Float, bottom: Float, radius: Float,
+    ): Float {
+        val w = right - left; val h = bottom - top
+        if (w <= 0f || h <= 0f) return FALLBACK_LUMINANCE
+        val density = view.resources.displayMetrics.density
+        val lum = if (Backdrop.bitmap == null) FALLBACK_LUMINANCE else {
+            view.getLocationOnScreen(loc)
+            val sx = loc[0] - Backdrop.origin[0] + left
+            val sy = loc[1] - Backdrop.origin[1] + top
+            Backdrop.luminance(sx, sy, sx + w, sy + h)
+        }
+        rect.set(left, top, right, bottom)
+        paint.shader = null
+        paint.style = Paint.Style.FILL; paint.color = CARD_BODY
+        canvas.drawRoundRect(rect, radius, radius, paint)
+        // Hairline: a little under a dp, never under a pixel, inset by half so it sits inside.
+        val edge = (0.75f * density).coerceAtLeast(1f)
+        rect.inset(edge / 2f, edge / 2f)
+        paint.style = Paint.Style.STROKE; paint.strokeWidth = edge; paint.color = CARD_EDGE
+        canvas.drawRoundRect(rect, radius - edge / 2f, radius - edge / 2f, paint)
+        paint.style = Paint.Style.FILL
+        return lum
+    }
+
     /**
      * How far in from a pane's edge the lens still bends the backdrop: the refraction
      * height the shader is actually given, plus 2dp so the clip never eats into the band.
@@ -158,17 +205,23 @@ object Pane {
         // first layout has none — the same case draw already declines to draw.
         if (progress <= 0f || w <= 0f || h <= 0f) return
         rect.set(left, top, right, bottom)
-        paint.blendMode = BlendMode.PLUS
+        // Added light shows on the dark screen and not on white: there the press darkens.
+        val lift = if (Ink.dark) 255 else 0
+        paint.blendMode = if (Ink.dark) BlendMode.PLUS else null
         paint.shader = null; paint.style = Paint.Style.FILL
-        paint.color = Color.argb((0.08f * progress * 255).toInt(), 255, 255, 255)
+        paint.color = Color.argb((0.08f * progress * 255).toInt(), lift, lift, lift)
         canvas.drawRoundRect(rect, radius, radius, paint)
         val r = min(w, h) * 1.5f
         matrix.setTranslate(x.coerceIn(left, right), y.coerceIn(top, bottom))
         matrix.preScale(r, r)
         disc.setLocalMatrix(matrix)
         paint.shader = disc
-        paint.alpha = (0.15f * progress * 255).toInt()
+        // The disc is white; on white it is drawn through a black filter instead.
+        paint.colorFilter = if (Ink.dark) null else darken
+        paint.alpha = ((if (Ink.dark) 0.15f else 0.06f) * progress * 255).toInt()
         canvas.drawRoundRect(rect, radius, radius, paint)
-        paint.shader = null; paint.blendMode = null
+        paint.shader = null; paint.blendMode = null; paint.colorFilter = null
     }
+
+    private val darken = android.graphics.PorterDuffColorFilter(Color.BLACK, android.graphics.PorterDuff.Mode.SRC_IN)
 }

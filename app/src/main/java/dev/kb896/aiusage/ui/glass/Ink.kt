@@ -23,58 +23,98 @@ package dev.kb896.aiusage.ui.glass
  *   limitations under the License.
  * ---------------------------------------------------------------------------------
  *
- * The catalog keys light and dark on isSystemInDarkTheme(). Here the backdrop is a
- * photograph, so one screen has light and dark regions at once; each control reads its
- * own luminance cell and takes the catalog's light or dark value for it.
+ * The catalog keys light and dark on isSystemInDarkTheme(), and so does this now ([dark]):
+ * the settings follow the phone's light or dark mode. The luminance parameters stay for
+ * the callers' sake and no longer change an answer.
  */
 object Ink {
     const val LIGHT = 0.5f
 
     /**
-     * NEVER LIGHT, on the front: nothing here reacts to what is behind it any more — not
-     * the text, not the tracks, the switch's on colour, the accent or the dim behind a
-     * dialog. Every branch below takes its dark-background answer, the one the silk asks
-     * for, wherever the control happens to sit on it.
+     * THE SYSTEM'S THEME, not the cell's: dark when the phone is in dark mode, light when it
+     * is not. Set from the configuration by the settings screen as it is created
+     * ([follow]); a change of theme recreates that activity, which sets it again before a
+     * view is built. The panel's process never sets it and never reads these tokens.
      */
-    @Suppress("UNUSED_PARAMETER")
-    fun isLight(luminance: Float) = false
+    @Volatile var dark = true
+
+    /** Take the theme from [config]'s night bit. */
+    fun follow(config: android.content.res.Configuration) {
+        dark = (config.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+    }
 
     /**
-     * TEXT IS WHITE, whatever is behind it. It used to flip to black over a light part
-     * of the background, so a card's words changed colour as it scrolled across the
-     * silk; the luminance is still taken, and still decides the glass's own tint and the
-     * tracks, but not the text.
+     * Light means the light THEME. Nothing reacts to the cell behind a control any more:
+     * the whole screen is one ground, near-black or near-white, and every control takes
+     * the answer for it wherever it sits.
      */
     @Suppress("UNUSED_PARAMETER")
-    fun primary(luminance: Float): Int = 0xFFFFFFFF.toInt()
+    fun isLight(luminance: Float) = !dark
 
-    /** White at 60%, for the quieter text — and like [primary], whatever is behind it. */
+    /** Text: white on the dark screen, near-black on the light one. */
     @Suppress("UNUSED_PARAMETER")
-    fun secondary(luminance: Float): Int = 0x99FFFFFF.toInt()
+    fun primary(luminance: Float): Int = if (dark) 0xFFFFFFFF.toInt() else PRIMARY_LIGHT
 
-    /** The toggle's on colour: the accent, as every switch's is. */
+    const val PRIMARY_LIGHT = 0xFF1C1C1E.toInt()
+
+    /** The quieter text: the primary at 60%. */
     @Suppress("UNUSED_PARAMETER")
-    fun on(luminance: Float): Int = ACCENT
+    fun secondary(luminance: Float): Int = if (dark) 0x99FFFFFF.toInt() else 0x99000000.toInt()
 
-    /** The slider fill and the segmented selection. LiquidSlider.kt:59-60. */
+    /** Quietest text: a short note under a control, below [secondary]. */
+    @Suppress("UNUSED_PARAMETER")
+    fun tertiary(luminance: Float): Int = if (dark) TERTIARY else TERTIARY_LIGHT
+
+    const val TERTIARY = 0x73FFFFFF
+    /** Black at 54%: #757575 on white, still above 4.5:1. */
+    const val TERTIARY_LIGHT = 0x8A000000.toInt()
+
     /**
-     * The app's accent, #C26BFF — the bottom bar's open tab, the confirm in every dialog,
-     * a slider's fill, a switch that is on, the font list's tick. The one place it is
-     * written; styles_dialog.xml repeats it for what the framework tints.
+     * The toggle's on colour: a grey, not the accent. The thumb is white, so a white track
+     * would swallow it; light grey on the dark screen, a dark grey on the light one.
      */
     @Suppress("UNUSED_PARAMETER")
-    fun accent(luminance: Float): Int = ACCENT
+    fun on(luminance: Float): Int = if (dark) ON else ON_LIGHT
 
-    const val ACCENT = 0xFFC26BFF.toInt()
+    const val ON = 0xFF9A9AA0.toInt()
+    const val ON_LIGHT = 0xFF58585C.toInt()
 
-    /** An inactive track. LiquidToggle.kt:59-60: grey at 0.2 light, 0.36 dark. */
-    fun track(luminance: Float): Int =
-        if (isLight(luminance)) 0x33787878 else 0x5C787880
+    /**
+     * The app's one accent: the bottom bar's open tab, the confirm in every dialog, a
+     * slider's fill, a done setup step, the font list's tick. Neutral on purpose, so it is
+     * the text's own end of the scale: a soft white (#ECECEF) on the dark screen, a near-black
+     * on the light one. styles_dialog.xml (through colors.xml) repeats it for what the
+     * framework tints. The back does not read it (RearDialView keeps its own colours).
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun accent(luminance: Float): Int = if (dark) ACCENT else ACCENT_LIGHT
 
-    /** The dialog scrim. DialogContent.kt:46-47. */
-    fun scrimAlpha(luminance: Float): Float = if (isLight(luminance)) 0.23f else 0.56f
-    fun scrimColor(luminance: Float): Int =
-        if (isLight(luminance)) 0xFF29293A.toInt() else 0xFF121212.toInt()
+    /**
+     * The dark accent, and the frame colour of the crop and trim editors whichever theme:
+     * those draw over a picture under a black shade, where only a light line shows.
+     */
+    const val ACCENT = 0xFFECECEF.toInt()
+    const val ACCENT_LIGHT = 0xFF1C1C1E.toInt()
+
+    /** A row's icon (white drawables, tinted with this): the text's own ink in either theme. */
+    fun icon(): Int = primary(0f)
+
+    /** Plain text outside the glass (Panel.Palette.FG's place on the front). */
+    fun fg(): Int = if (dark) 0xFFC5C8C6.toInt() else 0xFF2C2C2E.toInt()
+
+    /** Hints and a way out (Panel.Palette.DIM's place on the front). */
+    fun dim(): Int = if (dark) 0xFF555555.toInt() else 0xFF7C7C80.toInt()
+
+    /** An inactive track. LiquidToggle.kt:59-60: grey at 0.36 dark; a touch over its 0.2 light. */
+    @Suppress("UNUSED_PARAMETER")
+    fun track(luminance: Float): Int = if (dark) 0x5C787880 else 0x40787880
+
+    /** The dialog scrim. DialogContent.kt:46-47; no hue in either. */
+    @Suppress("UNUSED_PARAMETER")
+    fun scrimAlpha(luminance: Float): Float = if (dark) 0.56f else 0.23f
+    @Suppress("UNUSED_PARAMETER")
+    fun scrimColor(luminance: Float): Int = if (dark) 0xFF121212.toInt() else 0xFF1C1C1E.toInt()
 
     /** [colour] moved [t] of the way toward [toward], per channel, alpha kept. */
     fun mix(colour: Int, toward: Int, t: Float): Int {

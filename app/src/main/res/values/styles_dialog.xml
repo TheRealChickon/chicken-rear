@@ -11,29 +11,30 @@
       and buttons text appearances that name a family, and a font resource set at theme
       level does not travel into all of them. Modal walks the finished dialog for that.
 
-      Colours are Panel.Palette's, repeated because a style cannot read a Kotlin object.
-        BG #1D1F21   FG #C5C8C6   DIM #555555   WORK/green #B14CFF   RULE #2F3234
+      Colours come from colors_settings.xml, light, with a night twin for the dark theme
+      (Ink.accent, Ink.fg, Ink.dim): a style cannot read a Kotlin object. The framework
+      parent follows the theme too (PanelDialogBase in themes_settings.xml).
     -->
-    <style name="PanelDialog" parent="@android:style/Theme.Material.Dialog.Alert">
+    <style name="PanelDialog" parent="PanelDialogBase">
         <item name="android:windowBackground">@drawable/dialog_bg</item>
 
         <!-- Buttons, the text cursor, the EditText underline and every other tinted
              control take this. It was the single loudest stock colour: a blue "IMPORT"
              on a green-and-grey panel app. -->
-        <item name="android:colorAccent">#B14CFF</item>
-        <item name="android:colorControlActivated">#B14CFF</item>
-        <item name="android:colorControlNormal">#555555</item>
+        <item name="android:colorAccent">@color/settings_accent</item>
+        <item name="android:colorControlActivated">@color/settings_accent</item>
+        <item name="android:colorControlNormal">@color/settings_control</item>
 
-        <item name="android:textColorPrimary">#C5C8C6</item>
-        <item name="android:textColorSecondary">#555555</item>
-        <item name="android:textColorHint">#555555</item>
+        <item name="android:textColorPrimary">@color/settings_text</item>
+        <item name="android:textColorSecondary">@color/settings_text_dim</item>
+        <item name="android:textColorHint">@color/settings_text_dim</item>
 
-        <!-- Title in green, matching the section headings it is one tap away from. -->
+        <!-- Title in plain light text: the accent is for what to press, not for headings. -->
         <item name="android:windowTitleStyle">@style/PanelDialog.Title</item>
     </style>
 
     <style name="PanelDialog.Title" parent="@android:style/TextAppearance.Material.DialogWindowTitle">
-        <item name="android:textColor">#B14CFF</item>
+        <item name="android:textColor">@color/settings_accent</item>
         <item name="android:textSize">15sp</item>
     </style>
 
@@ -48,7 +49,7 @@
         <item name="android:windowIsFloating">true</item>
         <!-- The front's accent, the colour the bottom bar shows the open tab in
              (Ink.ACCENT), for cursors and anything else the framework tints. -->
-        <item name="android:colorAccent">#C26BFF</item>
-        <item name="android:colorControlActivated">#C26BFF</item>
+        <item name="android:colorAccent">@color/settings_accent</item>
+        <item name="android:colorControlActivated">@color/settings_accent</item>
     </style>
 </resources>

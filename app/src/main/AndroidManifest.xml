@@ -16,19 +16,24 @@
          processor awake only until the listener returns, and switching the back on is a
          binder call and an exec after that. See PocketWatch. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- "Follows the music" (service/MusicLevel), off until he switches it on: Android's only measure of the sound
+         being played (audiofx.Visualizer on the output mix) is refused without these. Nothing is recorded or kept. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <!-- so the app may ask whether HyperOS's rear-screen app is installed (Setup.kt) -->
     <queries>
         <package android:name="com.xiaomi.subscreencenter" />
-        <!-- The 896 Store, so a new release can be updated through it (UpdateCard). -->
-        <package android:name="dev.kb896.store" />
         <!-- App Portal: the apps a person can pin, and their icons on the back. -->
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
     </queries>
-    <application
+        <!-- Notes with a place (PlaceNotes): asked for only when the first such note is made. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+<application
         android:label="${appLabel}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -52,9 +57,43 @@
           Shizuku 13.6.0). The permission itself works either way.
         -->
         <meta-data android:name="moe.shizuku.client.V3_SUPPORT" android:value="true" />
+        <!-- SettingsTheme follows the phone's light or dark mode (values / values-night). -->
+        <!-- A note's place reached (PlaceNotes): the system's own word, to this app alone. -->
+        <receiver android:name=".service.PlaceReceiver" android:exported="false" />
+        <!--
+          "Pin to back": text shared here, or picked in a text-selection menu, becomes a note on the
+          back's notes page. exported: other apps start it (Circle Search's "Pin to back", any share sheet).
+        -->
+        <activity
+            android:name=".ui.PinActivity"
+            android:exported="true"
+            android:label="Pin to back"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <!--
+              Read by Circle Search as it pins: this app CAN play the pin above an overlay (so Circle Search may stay
+              open under it). It DOES so only while "Pin to back: glass" (service/PinGlassService) is switched on in
+              the phone's Accessibility settings: without it the animation is in this activity's window, under such
+              an overlay. A caller that stays open must look at both.
+            -->
+            <meta-data android:name="dev.chicken.pin.DRAWS_OVER_OVERLAYS" android:value="true" />
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
         <activity
             android:name=".ui.MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:theme="@style/SettingsTheme">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -101,6 +140,21 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+        </service>
+
+        <!--
+          The pin's glass: one picture of the screen as a note is pinned (service/PinGlassService). It asks for no
+          events and no window content. Off until HE switches it on in Settings, Accessibility.
+        -->
+        <service
+            android:name=".service.PinGlassService"
+            android:exported="true"
+            android:label="@string/pin_glass_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/pin_glass" />
         </service>
 
         <!-- Send to back: the Quick Settings tile that moves the front app to the rear. -->
@@ -151,8 +205,40 @@
             android:directBootAware="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!--
+          Remote control's two doors (see RemoteReceiver, RemoteActivity). Exported, since they
+          are for other apps — Home Assistant, Tasker, MacroDroid — and DISABLED until the
+          user switches remote control on (RemoteStore.enabled), so a phone that never uses
+          it has nothing exported here at all. What comes through is let in by a token, not
+          by being able to reach these.
+        -->
+        <receiver
+            android:name=".remote.RemoteReceiver"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="dev.chicken.rear.COMMAND" />
+            </intent-filter>
+        </receiver>
+        <!-- VIEW + DEFAULT only: not BROWSABLE, so no web page can open one of these links. -->
+        <activity
+            android:name=".remote.RemoteActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="chickenrear" />
+            </intent-filter>
+        </activity>
 
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

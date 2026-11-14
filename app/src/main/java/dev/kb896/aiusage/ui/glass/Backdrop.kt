@@ -15,10 +15,6 @@ import android.graphics.drawable.Drawable
 import android.view.View
 import android.view.ViewGroup
 import androidx.core.view.doOnLayout
-import dev.kb896.aiusage.Panel
-import dev.kb896.aiusage.data.ConfigStore
-import dev.kb896.aiusage.data.PanelConfig
-import dev.kb896.aiusage.rear.ArtPlacement
 import dev.kb896.aiusage.rear.GlassLuminance
 import java.io.File
 
@@ -51,7 +47,6 @@ object Backdrop {
     fun install(root: View) {
         this.root = root
         root.background = BackdropDrawable()
-        animate(root)
         root.doOnLayout { build(it) }
         root.addOnLayoutChangeListener { v, l, t, r, b, ol, ot, or, ob ->
             if (r - l != or - ol || b - t != ob - ot) build(v)
@@ -74,52 +69,16 @@ object Backdrop {
         val w = root.width; val h = root.height
         if (w <= 0 || h <= 0) return
         root.getLocationOnScreen(origin)
-        // THE SILK (see Silk): the live shader is what the root draws and what every pane
-        // bends; the bitmap is a still of it, for what cannot run a shader — the
-        // brightness map the ink reads, and the switch tracks. The outgoing bitmap is
-        // dropped, never recycled: a draw already queued may still hold it.
-        Silk.size(w, h)
-        val built = Silk.still(w, h)
+        // STILL: one near-black bitmap, painted once at the window's size. It used to be
+        // the animated Silk, redrawn every frame with every pane over it; a static wallpaper
+        // costs nothing while the screen is up, and the glass over it only needs drawing
+        // again when it moves (track). The outgoing bitmap is dropped, never recycled: a
+        // draw already queued may still hold it.
+        val built = paint(w, h)
         bitmap = built
-        shader = Silk.shader
+        shader = BitmapShader(built, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
         width = w; height = h
         cells = cellsOf(built)
-    }
-
-    /** Told every frame the silk moves — the bottom bar's glass, which is not a View. */
-    val onFrame = mutableListOf<() -> Unit>()
-
-    private var lastFrameNs = 0L
-    private val frame = object : android.view.Choreographer.FrameCallback {
-        override fun doFrame(nowNs: Long) {
-            val r = root ?: return
-            if (!r.isAttachedToWindow) { lastFrameNs = 0L; return }
-            if (lastFrameNs != 0L) Silk.advance((nowNs - lastFrameNs) / 1e9f)
-            lastFrameNs = nowNs
-            r.invalidate()
-            invalidateGlass(r)
-            onFrame.forEach { it() }
-            android.view.Choreographer.getInstance().postFrameCallback(this)
-        }
-    }
-
-    /**
-     * The silk moves while the screen is up: one frame callback, stopped when the root
-     * leaves the window and started again when it comes back.
-     */
-    private fun animate(root: View) {
-        val choreographer = android.view.Choreographer.getInstance()
-        choreographer.removeFrameCallback(frame)
-        lastFrameNs = 0L
-        if (root.isAttachedToWindow) choreographer.postFrameCallback(frame)
-        root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-            override fun onViewAttachedToWindow(v: View) {
-                lastFrameNs = 0L
-                choreographer.removeFrameCallback(frame)
-                choreographer.postFrameCallback(frame)
-            }
-            override fun onViewDetachedFromWindow(v: View) { choreographer.removeFrameCallback(frame) }
-        })
     }
 
     /**
@@ -130,8 +89,6 @@ object Backdrop {
      * a stale [root] keeps the whole dead view tree — and its 13 MB of wallpaper — alive.
      */
     fun release() {
-        android.view.Choreographer.getInstance().removeFrameCallback(frame)
-        onFrame.clear()
         root = null
         bitmap = null
         shader = null
@@ -156,34 +113,44 @@ object Backdrop {
         cells = cellsOf(bitmap)
     }
 
-    /** Draw the window's wallpaper: the picture centre-cropped, or the colour as a gradient. */
     /**
-     * The wallpaper is one baked-in colour, a slate blue-grey, as a soft top-to-bottom
-     * gradient. It used to be the panel's own backdrop — the photograph you chose for
-     * the back of the phone, centre-cropped onto the front — and that read as a cheap
-     * clone of the panel rather than a surface of its own. A flat colour gives a lens
-     * nothing to bend, so the gradient; dark enough that every pane's ink comes out
-     * white. [config] and [image] are kept for the callers and the tests and ignored.
+     * The window's wallpaper: one baked-in neutral for the theme (near-black, or near-white
+     * in the light theme), as a very soft top-to-bottom gradient. It was the panel's photograph, then a slate blue-grey, then the purple
+     * Silk; all three made the settings about the background. Near-black with no hue lets
+     * the glass and the text carry the screen, and every pane's ink comes out white. The
+     * gradient is barely there: a flat colour gives a lens nothing at all to bend.
      */
-    @Suppress("UNUSED_PARAMETER")
-    fun paint(w: Int, h: Int, config: PanelConfig, image: Bitmap?): Bitmap {
+    fun paint(w: Int, h: Int): Bitmap {
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
-        val stops = gradientStops(SLATE)
+        val stops = gradientStops(ground())
         p.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), stops[0], stops[1], Shader.TileMode.CLAMP)
         canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
         return out
     }
 
-    /** The front screen's wallpaper colour: slate, blue-grey. */
-    const val SLATE = 0xFF475569.toInt()
+    /** The front screen's wallpaper colour in the dark theme: near-black, no hue. */
+    const val GRAPHITE = 0xFF0E0E10.toInt()
 
-    /** Top and bottom of the flat-colour gradient. A flat colour gives a lens nothing to bend. */
-    fun gradientStops(colour: Int): IntArray = intArrayOf(
-        Ink.mix(colour, 0xFFFFFFFF.toInt(), 0.08f),
-        Ink.mix(colour, 0xFF000000.toInt(), 0.12f),
-    )
+    /** And in the light theme: near-white, no hue. */
+    const val PAPER = 0xFFF2F2F4.toInt()
+
+    /** The wallpaper colour for the theme the screen is in (Ink.dark). */
+    fun ground(): Int = if (Ink.dark) GRAPHITE else PAPER
+
+    /**
+     * Top and bottom of the wallpaper's gradient: a touch lighter above, a touch darker
+     * below. A light ground is taken down far less: a quarter toward black would grey it.
+     */
+    fun gradientStops(colour: Int, dark: Boolean = Ink.dark): IntArray =
+        if (dark) intArrayOf(
+            Ink.mix(colour, 0xFFFFFFFF.toInt(), 0.03f),
+            Ink.mix(colour, 0xFF000000.toInt(), 0.25f),
+        ) else intArrayOf(
+            Ink.mix(colour, 0xFFFFFFFF.toInt(), 0.4f),
+            Ink.mix(colour, 0xFF000000.toInt(), 0.03f),
+        )
 
     /** Decode near the window's size, never at a photograph's own. Null if unreadable. */
     fun decodeNear(path: String, w: Int, h: Int): Bitmap? {
@@ -247,9 +214,9 @@ class BackdropDrawable : Drawable() {
         val b = Backdrop.bitmap
         val live = Backdrop.shader
         when {
-            b == null -> { paint.color = Panel.Palette.BG; canvas.drawRect(bounds, paint) }
-            // The silk, live, in the root's own coordinates: panes move the shared shader
-            // to their place as they draw, so it is put back here first.
+            b == null -> { paint.color = Backdrop.ground(); canvas.drawRect(bounds, paint) }
+            // The wallpaper's shader, in the root's own coordinates: panes move the shared
+            // shader to their place as they draw, so it is put back here first.
             live != null && canvas.isHardwareAccelerated -> {
                 live.setLocalMatrix(null)
                 paint.shader = live

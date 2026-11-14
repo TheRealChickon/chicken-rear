@@ -28,6 +28,15 @@ class UsageRepository(
     private val profileApi: ProfileApi? = null,
     private val profiles: ProfileStore? = null,
     private val history: UsageHistory? = null,
+    /**
+     * ChatGPT (Account.CHATGPT): its own usage reader and its own sign-in's refresh, and where the id of the
+     * ChatGPT account is kept (the usage request needs it; a refresh may say it anew). Null: that account is
+     * never fetched. ITS TOKEN GOES TO OPENAI ONLY: nothing of Claude's (usage, profile) is ever asked with it.
+     */
+    private val chatApi: ChatGptUsageApi? = null,
+    private val chatOauth: dev.kb896.aiusage.auth.ChatGptOAuth? = null,
+    private val chatAccountId: () -> String? = { null },
+    private val onChatAccountId: (String) -> Unit = { },
 ) {
     /** Set by the poll service so a completed refresh can be remembered across restarts. */
     var onFetchCompleted: (() -> Unit)? = null
@@ -143,7 +152,7 @@ class UsageRepository(
 
         val usable = if (stored.accessExpired(now)) {
             try {
-                oauth.refresh(stored.refreshToken).also { store.save(account, it) }
+                refreshFor(account, stored)
             } catch (e: Exception) {
                 Log.w(TAG, "${account.slug}: token refresh failed: ${e.message}")
                 CallLog.record(account, "refresh failed: ${e.message}")
@@ -152,12 +161,13 @@ class UsageRepository(
         } else stored
 
         return try {
-            val snapshot = api.fetch(usable.accessToken)
+            val snapshot = fetchFor(account, usable)
             CallLog.record(account, "ok")
             backoffUntil.remove(account)
             backoffStep.remove(account)
+            // The plan tier is Claude's profile, asked with Claude's token: never for ChatGPT.
             AccountStatus(account, Health.OK, snapshot,
-                planTier(account, usable.accessToken), moodFor(account, snapshot))
+                if (account == Account.CHATGPT) null else planTier(account, usable.accessToken), moodFor(account, snapshot))
         } catch (e: UsageApi.Failure) {
             CallLog.record(account, e.message ?: e.kind.name)
             if (e.kind == UsageApi.Kind.RATE_LIMITED) applyBackoff(account, e.retryAfterSec)
@@ -174,6 +184,28 @@ class UsageRepository(
         }
     }
 
+
+    /** A new access token for [account] from its own sign-in's side, stored at once (ChatGPT's refresh tokens are good once). */
+    private fun refreshFor(account: Account, stored: dev.kb896.aiusage.auth.TokenRecord): dev.kb896.aiusage.auth.TokenRecord {
+        if (account != Account.CHATGPT) return oauth.refresh(stored.refreshToken).also { store.save(account, it) }
+        val signed = (chatOauth ?: throw IllegalStateException("no ChatGPT sign-in here")).refresh(stored.refreshToken)
+        store.save(account, signed.record)
+        signed.accountId?.let(onChatAccountId)
+        return signed.record
+    }
+
+    /** The usage of [account] from its own service. ChatGPT's token turned away is refreshed once and asked again. */
+    private fun fetchFor(account: Account, usable: dev.kb896.aiusage.auth.TokenRecord): UsageSnapshot {
+        if (account != Account.CHATGPT) return api.fetch(usable.accessToken)
+        val chat = chatApi ?: throw UsageApi.Failure(UsageApi.Kind.SERVER, "chatgpt usage: not set up")
+        return try {
+            chat.fetch(usable.accessToken, chatAccountId())
+        } catch (e: UsageApi.Failure) {
+            if (e.kind != UsageApi.Kind.UNAUTHORIZED) throw e
+            val again = try { refreshFor(account, usable) } catch (_: Exception) { throw e }
+            chat.fetch(again.accessToken, chatAccountId())
+        }
+    }
 
     /**
      * Honours Retry-After when the server sends one, otherwise doubles from 5 minutes

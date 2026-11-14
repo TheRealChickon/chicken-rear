@@ -75,6 +75,11 @@ class VideoPlayback(private val onFrame: () -> Unit, private val onLost: () -> U
     private var legIn = 0L
     private var legOut = 0L
 
+    /** Runs still to come after the one playing, for a Linear clip asked to play more than once. */
+    private var repeatsLeft = 0
+    private var onceIn = 0L
+    private var onceOut = 0L
+
     /** What to show: the live frame, or the still while there is none. */
     val shown: Bitmap? get() = frame ?: still
 
@@ -144,6 +149,7 @@ class VideoPlayback(private val onFrame: () -> Unit, private val onLost: () -> U
     fun loop(restart: Boolean, easeIn: Long = 0L, easeOut: Long = 0L) {
         val f = fwd ?: return
         pingPong = false
+        repeatsLeft = 0
         if (restart) fadeOut()
         if (active !== f) {
             // Was going backwards: on forward from the same frame.
@@ -161,14 +167,21 @@ class VideoPlayback(private val onFrame: () -> Unit, private val onLost: () -> U
     fun freeze() {
         val d = active ?: return
         pingPong = false
+        repeatsLeft = 0
         if (frame == null && still == null) d.command(Mode.FIRST, restart = true, easeIn = 0L, easeOut = 0L)
         else { d.command(Mode.IDLE, restart = false, easeIn = 0L, easeOut = 0L); still = snapshot() }
     }
 
-    /** One run from the start, fading in from the frame it stopped on, eased if asked. */
-    fun playOnce(easeIn: Long, easeOut: Long) {
+    /**
+     * A run from the start, fading in from the frame it stopped on, eased if asked — [passes]
+     * times over, each from the start, resting on the last one's last frame.
+     */
+    fun playOnce(easeIn: Long, easeOut: Long, passes: Int = 1) {
         val f = fwd ?: return
         pingPong = false
+        repeatsLeft = (passes - 1).coerceAtLeast(0)
+        onceIn = easeIn
+        onceOut = easeOut
         fadeOut()
         switchTo(f)
         f.leg(0L, easeIn, easeOut)
@@ -184,6 +197,7 @@ class VideoPlayback(private val onFrame: () -> Unit, private val onLost: () -> U
         val f = fwd ?: return
         val r = rev ?: return
         pingPong = false
+        repeatsLeft = 0
         val to = if (forward) f else r
         if (active === to && to.inLeg) return                 // already on its way there
         val at = position()
@@ -207,6 +221,7 @@ class VideoPlayback(private val onFrame: () -> Unit, private val onLost: () -> U
         val r = rev ?: return
         legIn = easeIn
         legOut = easeOut
+        repeatsLeft = 0
         if (pingPong && !restart && active?.inLeg == true) return
         pingPong = true
         if (restart) {
@@ -227,6 +242,12 @@ class VideoPlayback(private val onFrame: () -> Unit, private val onLost: () -> U
     /** A run reached its end: turn round or rest, the next way made ready. See VideoState.afterLeg. */
     private fun legEnded(d: Decoder) {
         if (d !== active) return
+        // A Linear clip asked for more than once: from the start again, until they are spent.
+        if (!pingPong && repeatsLeft > 0 && d === fwd) {
+            repeatsLeft--
+            d.leg(0L, onceIn, onceOut)
+            return
+        }
         val other = (if (d === fwd) rev else fwd) ?: return
         val next = VideoState.afterLeg(pingPong)
         if (next.turn) {
@@ -273,6 +294,7 @@ class VideoPlayback(private val onFrame: () -> Unit, private val onLost: () -> U
         rev = null
         active = null
         pingPong = false
+        repeatsLeft = 0
         awaitingRun = false
         frame = null
         previous = null

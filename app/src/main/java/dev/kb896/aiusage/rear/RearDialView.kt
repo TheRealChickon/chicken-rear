@@ -1132,6 +1132,28 @@ class RearDialView(context: Context) : View(context) {
             syncTilt()
         }
     private var aodReturnPage = PAGE_READOUT
+
+    /**
+     * A fixed dimmed page — [aod]'s dim and freeze, but its own page: the clock, the date and
+     * the battery on black, whatever always-on's own switches and kept background say. Shows
+     * only while [aod] is on. The table's dim no longer uses it (RearActivity dims the window
+     * and keeps the page animated, RearPosture); camera mode still clears it.
+     */
+    var tableDim: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+
+    /** What the dimmed page's switches are now: the table's fixed page, or always-on's own. */
+    private val dimClock: Boolean get() = tableDim || config.aodClock
+    private val dimDate: Boolean get() = tableDim || config.aodDate
+    private val dimWeather: Boolean get() = !tableDim && config.aodWeather
+    private val dimBackdrop: Float get() = if (tableDim) 0f else config.aodBackdrop.coerceIn(0f, 1f)
+    /** The battery: always-on's switch, the table's page, and on a charger always (the lasting charging line). */
+    private val dimBattery: Boolean get() = tableDim || config.aodBattery || pluggedIn
+
     /** Until when a clock figure is rolling over; the always-on freeze waits for it. */
     private var clockRollUntil = 0L
     private var aodSince = 0L
@@ -1329,7 +1351,9 @@ class RearDialView(context: Context) : View(context) {
             val ink = colorFor("battery:info", config.infoBatteryTint)
             extras.color = (ink and 0x00FFFFFF) or ((0xFF * battery).toInt().coerceIn(0, 255) shl 24)
             canvas.drawText(figure, x, base, extras)
-            drawBatteryGlyph(canvas, x + figW + AOD_BATTERY_GAP / 2f, base - ih * 0.85f, ih, pct)
+            // The bolt for a charger in, also when the battery is held short of full and says
+            // "not charging": plugged is what the dimmed page's charging line is about.
+            drawBatteryGlyph(canvas, x + figW + AOD_BATTERY_GAP / 2f, base - ih * 0.85f, ih, pct, charging = pluggedIn || charging())
         }
 
         if (weather > 0.004f) {
@@ -1645,10 +1669,16 @@ class RearDialView(context: Context) : View(context) {
         // The charger going in. ACTION_POWER_CONNECTED rather than watching
         // ACTION_BATTERY_CHANGED for a status flip: the former fires once on the event,
         // the latter fires whenever the level or temperature moves and would have to be
-        // filtered back down to the same thing.
+        // filtered back down to the same thing. The cell plays on that one alone; the
+        // others keep the lasting charging line of always-on and the table's dim true
+        // (pluggedIn): out again, and every change of the level — filtered there.
         ContextCompat.registerReceiver(
             context, powerReceiver,
-            android.content.IntentFilter(android.content.Intent.ACTION_POWER_CONNECTED),
+            android.content.IntentFilter().apply {
+                addAction(android.content.Intent.ACTION_POWER_CONNECTED)
+                addAction(android.content.Intent.ACTION_POWER_DISCONNECTED)
+                addAction(android.content.Intent.ACTION_BATTERY_CHANGED)
+            },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         // GRAVITY, not the accelerometer. The accelerometer carries the hand's own
@@ -1668,8 +1698,45 @@ class RearDialView(context: Context) : View(context) {
 
     private val powerReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(c: android.content.Context?, i: android.content.Intent?) {
-            showCharging()
+            when (i?.action) {
+                android.content.Intent.ACTION_POWER_CONNECTED -> { showCharging(); powerSeen(plugged = true, level = shownLevel) }
+                android.content.Intent.ACTION_POWER_DISCONNECTED -> powerSeen(plugged = false, level = shownLevel)
+                android.content.Intent.ACTION_BATTERY_CHANGED -> {
+                    val level = i.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
+                    val scale = i.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1)
+                    powerSeen(
+                        plugged = i.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) != 0,
+                        level = if (level < 0 || scale <= 0) -1 else level * 100 / scale,
+                    )
+                }
+            }
         }
+    }
+
+    /**
+     * A charger in, as last heard (ACTION_BATTERY_CHANGED's plugged, and the plug events).
+     * In always-on and the table's dim the battery line shows with its charging glyph for as
+     * long as this is true, whatever always-on's Battery switch says.
+     */
+    var pluggedIn: Boolean = false
+        private set
+    private var shownLevel = -1
+
+    /** Told whenever [pluggedIn] changes: the table's limit runs only on the battery. */
+    var onPlugged: ((Boolean) -> Unit)? = null
+
+    /**
+     * ACTION_BATTERY_CHANGED comes for the temperature and the voltage too, every few seconds
+     * on a charger: only a change of the plug or the level is a frame, and only one a dimmed
+     * page shows — always-on otherwise draws once a minute, and the line would sit stale.
+     */
+    private fun powerSeen(plugged: Boolean, level: Int) {
+        val plugChanged = plugged != pluggedIn
+        if (!plugChanged && level == shownLevel) return
+        pluggedIn = plugged
+        shownLevel = level
+        if (plugChanged) onPlugged?.invoke(plugged)
+        if (aod && displayAwake) invalidate()
     }
 
     /** The gravity vector, as the sensor reports it. See chargeTilt for the axes. */
@@ -2798,7 +2865,7 @@ class RearDialView(context: Context) : View(context) {
             val alpha = animateTo("bg:alpha", 255f)
             // always-on rests on true black: an OLED spends nothing on it
             val hue = androidx.core.graphics.ColorUtils.blendARGB(
-                colorFor("bg", config.background or (0xFF shl 24)), 0xFF000000.toInt(), aodFade(frameNowMs),
+                colorFor("bg", config.background or (0xFF shl 24)), 0xFF000000.toInt(), backdropFade(frameNowMs),
             )
             val ground = (hue and 0x00FFFFFF) or (alpha.toInt().coerceIn(0, 255) shl 24)
 
@@ -4396,7 +4463,7 @@ class RearDialView(context: Context) : View(context) {
                 noticeEdgeTaken = false
                 noticeEdgeX = event.x
                 noticeEdgeY = event.y
-                noticeEdge = !aod && onlyAccount == null && config.showNotifications &&
+                noticeEdge = !aod && onlyAccount == null && (config.showNotifications || config.remoteCards) &&
                     NoticeShade.startsPull(event.x, event.y, Panel.CUTOUT_RIGHT.toFloat())
             }
             android.view.MotionEvent.ACTION_MOVE -> {
@@ -5002,6 +5069,7 @@ class RearDialView(context: Context) : View(context) {
         // Worth keeping the display up for: the shell's banner is on its way (ShellNotices), on
         // any page. The panel draws no strip of its own any more; this is only the list's store.
         keepAwakeFor()
+        if (config.video.playOnNotice) replayVideo()
         invalidate()
     }
 
@@ -6818,19 +6886,21 @@ class RearDialView(context: Context) : View(context) {
         }
     }
 
+    // The battery's sticky word. Asked for through runCatching: drawn off-window in the shell's process (the
+    // back's usage page) the system refuses the question, and the readout is drawn without it.
+    private fun batteryIntent(): android.content.Intent? = runCatching {
+        context.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+    }.getOrNull()
+
     private fun charging(): Boolean {
-        val intent = context.registerReceiver(
-            null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)
-        ) ?: return false
+        val intent = batteryIntent() ?: return false
         val status = intent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
         return status == android.os.BatteryManager.BATTERY_STATUS_CHARGING ||
             status == android.os.BatteryManager.BATTERY_STATUS_FULL
     }
 
     private fun batteryPercent(): Int {
-        val intent = context.registerReceiver(
-            null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)
-        ) ?: return -1
+        val intent = batteryIntent() ?: return -1
         val level = intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
         val scale = intent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1)
         return if (level < 0 || scale <= 0) -1 else level * 100 / scale
@@ -7034,6 +7104,22 @@ class RearDialView(context: Context) : View(context) {
         if (leavingAod) pager.goTo(m.page, SystemClock.uptimeMillis(), AOD_FADE_MS.toFloat())
         else if (!aod && pager.page != m.page) pager.goTo(m.page, SystemClock.uptimeMillis())
         invalidate()
+    }
+
+    /**
+     * A page asked for by name (remote control, through the app): gone to, as a swipe would
+     * have. False when there is no such page now (NamedPage). In always-on the clock page is
+     * what shows whatever is asked, so the page asked for is where the swipe will return to.
+     */
+    fun goToNamed(name: String): Boolean {
+        val target = NamedPage.resolve(
+            name, pager.page, pager.pages, readoutGone,
+            clock = PAGE_NOTICES, usage = PAGE_READOUT, media = mediaPage,
+        ) ?: return false
+        if (aod) { aodReturnPage = target; return true }
+        if (pager.page != target) pager.goTo(target, SystemClock.uptimeMillis())
+        invalidate()
+        return true
     }
 
     /** Whether the media page was wanted last frame, and whether that has been seen at all yet. */
@@ -8243,7 +8329,8 @@ class RearDialView(context: Context) : View(context) {
             now.get(java.util.Calendar.HOUR_OF_DAY),
             now.get(java.util.Calendar.MINUTE),
             now.get(java.util.Calendar.SECOND),
-            twelve = config.twelveHour(android.text.format.DateFormat.is24HourFormat(context)),
+            // The phone's own choice, where it can be asked (not from the shell's process: twenty-four hours there).
+            twelve = config.twelveHour(runCatching { android.text.format.DateFormat.is24HourFormat(context) }.getOrDefault(true)),
         )
         val figures = clockFigures.figures
         // AM/PM COMES AND GOES AS THE SECONDS DO (the owner, 2026-11-09): a grow, then a shrink
@@ -8330,7 +8417,7 @@ class RearDialView(context: Context) : View(context) {
         // corner row would have carried it (PanelConfig.infoBatteryOn).
         val noReadout = onlyAccount == null && readoutGone
         val batteryOn = if (config.infoBatteryOn(noReadout)) 1f else 0f
-        val batteryKeep = batteryOn + ((if (config.aodBattery) 1f else 0f) - batteryOn) * aodFade(frameNowMs)
+        val batteryKeep = batteryOn + ((if (dimBattery) 1f else 0f) - batteryOn) * aodFade(frameNowMs)
 
         extras.color = (ink and 0x00FFFFFF) or (0xFF shl 24)
         // MADE OF GLASS, the way the charge figure is: the panel is bent through the
@@ -8348,7 +8435,7 @@ class RearDialView(context: Context) : View(context) {
         // mode comes and goes, as the date and weather lines do (PanelConfig.infoClockOn,
         // aodClock).
         val clockOn = if (config.infoClockOn) 1f else 0f
-        val clockKeep = clockOn + ((if (config.aodClock) 1f else 0f) - clockOn) * aodFade(frameNowMs)
+        val clockKeep = clockOn + ((if (dimClock) 1f else 0f) - clockOn) * aodFade(frameNowMs)
         // Each face's own glass, handing over to the goo between them (ClockGoo).
         val digitsKeep = clockKeep * ClockGoo.digitalShown(faceT)
         val pillsKeep = clockKeep * ClockGoo.analogShown(faceT)
@@ -8481,9 +8568,9 @@ class RearDialView(context: Context) : View(context) {
         // always-on, so neither pops. The weather on the glass is not this line's.
         val aodNow = aodFade(frameNowMs)
         val dateOn = if (config.infoDateOn) 1f else 0f
-        val dateAll = dateOn + ((if (config.aodDate) 1f else 0f) - dateOn) * aodNow
+        val dateAll = dateOn + ((if (dimDate) 1f else 0f) - dateOn) * aodNow
         val weatherOn = if (config.showWeatherLine) 1f else 0f
-        val weatherAll = weatherOn + ((if (config.aodWeather) 1f else 0f) - weatherOn) * aodNow
+        val weatherAll = weatherOn + ((if (dimWeather) 1f else 0f) - weatherOn) * aodNow
         // The analog face has its own column for them, right of the dial; these are the digital face's.
         // Aside — over and under — for the dial and for the clock on end alike.
         drawClockLines(canvas, cx, now, maxOf(analog, vertical), batteryKeep, dateAll, weatherAll, aodNow)
@@ -9019,7 +9106,7 @@ class RearDialView(context: Context) : View(context) {
 
     /** What is on the front now (Match the front notifications): cards whose notification left go. */
     fun keepNotices(active: Set<String>, everything: Boolean = false) {
-        pending.removeAll { everything || it.key.isNotEmpty() && it.key !in active }
+        pending.removeAll { everything || it.key.isNotEmpty() && it.key !in active && !dev.kb896.aiusage.data.NoticeMatch.remote(it.key) }
         val keep = if (everything) history.map { false } else dev.kb896.aiusage.data.NoticeMatch.keep(history.map { it.key }, active)
         if (keep.all { it }) return
         val kept = history.filterIndexed { i, _ -> keep[i] }
@@ -11052,7 +11139,8 @@ class RearDialView(context: Context) : View(context) {
             drawCustomArt(canvas, custom, region)
             return
         }
-        ray.setTint(Panel.Palette.PERSONAL)
+        // The first account's own colour (the stock one where none is chosen, as it always was).
+        ray.setTint(config.styleFor(0).accent ?: Panel.Palette.PERSONAL)
         ray.setBounds(region.left.toInt(), region.top.toInt(),
             region.right.toInt(), region.bottom.toInt())
         ray.draw(canvas)
@@ -11418,7 +11506,7 @@ class RearDialView(context: Context) : View(context) {
             VideoAction.FREEZE -> video.freeze()
             VideoAction.LOOP -> video.loop(restart = false, passIn, passOut)
             VideoAction.RESTART_LOOP -> video.loop(restart = true, passIn, passOut)
-            VideoAction.PLAY_ONCE -> video.playOnce(easeIn, easeOut)
+            VideoAction.PLAY_ONCE -> video.playOnce(easeIn, easeOut, v.playPasses)
             VideoAction.TO_END -> video.toEnd(easeIn, easeOut)
             VideoAction.TO_START -> video.toStart(easeIn, easeOut)
             VideoAction.PING_PONG -> video.pingPong(restart = false, passIn, passOut)
@@ -11427,6 +11515,35 @@ class RearDialView(context: Context) : View(context) {
         }
         invalidate()
     }
+
+    /**
+     * The video played again, as a wake plays it: asked for by the table, a notification or a
+     * command, each where the clip's settings say so. Only a Linear clip has a run to play —
+     * the others are already going round — and only on a panel that would play one now
+     * (VideoState: not in always-on, dimmed or behind the slider, where it holds its frame).
+     */
+    fun replayVideo() {
+        if (config.effectiveBackdrop != dev.kb896.aiusage.data.BackdropKind.VIDEO) return
+        if (config.video.playable != dev.kb896.aiusage.data.VideoPlayMode.LINEAR) return
+        syncVideo(fresh = true)
+    }
+
+    /**
+     * The phone is lying on its face (RearActivity's gravity watch): the clip plays again if it
+     * is set to. Apart from [tableGlow], which is the margins' lights and has its own switch.
+     */
+    var onTable: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (value && config.video.playOnTable) replayVideo()
+        }
+
+    /**
+     * Always-on's fade as the BACKGROUND takes it: all the way to black as it always did, or
+     * only part of the way when some of the background is kept there (PanelConfig.aodBackdrop).
+     */
+    private fun backdropFade(now: Long): Float = aodFade(now) * (1f - dimBackdrop)
 
     private val videoPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
@@ -11438,7 +11555,7 @@ class RearDialView(context: Context) : View(context) {
     private fun drawVideoBackdrop(canvas: Canvas) {
         val frame = video.shown ?: return
         if (!canvas.isHardwareAccelerated) return
-        val fade = aodFade(frameNowMs)
+        val fade = backdropFade(frameNowMs)
         if (fade >= 0.999f) return
         panelRect.set(0f, 0f, Panel.WIDTH.toFloat(), Panel.HEIGHT.toFloat())
         val now = SystemClock.uptimeMillis()
@@ -11631,7 +11748,7 @@ class RearDialView(context: Context) : View(context) {
         // passed through the colour behind on its way to black — pink, under a picture with
         // no pink in it. The picture keeps its opacity and its colours go to black at the
         // ground's pace, so the two fade as the one picture they are.
-        val fade = aodFade(frameNowMs)
+        val fade = backdropFade(frameNowMs)
         if (fade >= 0.999f) return
         val opacity = config.backdrop.opacity.coerceIn(0f, 1f)
         canvas.save()
@@ -12513,10 +12630,11 @@ class RearDialView(context: Context) : View(context) {
         private const val LOCK_BAND_SLOP = 60f
 
         /**
-         * The colour the instruction is revealed in under the indicator: the app's accent,
-         * as the front shows it.
+         * The colour the instruction is revealed in under the indicator: the back's own
+         * violet. It used to borrow the front's accent; the front went neutral and the
+         * back keeps its look, so the value is written here.
          */
-        private const val LOCK_REVEAL = dev.kb896.aiusage.ui.glass.Ink.ACCENT
+        private const val LOCK_REVEAL = 0xFFC26BFF.toInt()
 
         /** Slack around a faded corner glyph, covering its margin and the drift. */
         private const val FADE_PAD = 60f

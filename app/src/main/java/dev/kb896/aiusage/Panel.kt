@@ -11,7 +11,16 @@ object Panel {
      */
     const val XIAOMI_REAR_APP = "com.xiaomi.subscreencenter"
 
-    const val DISPLAY_ID = 1
+    /**
+     * The rear display. 1 on the phones this is for, always — and in a debug build alone, whatever
+     * `debug.chickenrear.display` says, so an emulator's simulated second display (which comes up
+     * as 2) can stand in for it: `adb shell setprop debug.chickenrear.display 2`. A release build
+     * never reads the property.
+     */
+    val DISPLAY_ID: Int = if (!BuildConfig.DEBUG) 1 else runCatching {
+        Class.forName("android.os.SystemProperties").getMethod("getInt", String::class.java, Int::class.javaPrimitiveType)
+            .invoke(null, "debug.chickenrear.display", 1) as Int
+    }.getOrDefault(1).takeIf { it > 0 } ?: 1
     const val WIDTH = 904
     const val HEIGHT = 572
     /** Camera cutout bounding box is x in [0, CUTOUT_RIGHT). Display is LIVE inside it. */

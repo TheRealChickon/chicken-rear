@@ -31,6 +31,15 @@ class RearTouches(private val maxX: Int, private val maxY: Int) {
     private var moved = false
     private var rawX = -1
     private var rawY = -1
+    // Each slot's last place (the kernel only re-sends an axis that changed), for a second finger that takes over.
+    private val slotX = IntArray(SLOTS) { -1 }
+    private val slotY = IntArray(SLOTS) { -1 }
+    /** A second finger has landed while the first is down: its slot, or -1. */
+    private var second = -1
+    private var downAt = 0L
+    private var downX = 0f
+    private var downY = 0f
+    private var strayed = false
 
     /** The events this line completes, in order: none for most lines. */
     fun feed(line: String, nowMs: Long): List<Event> {
@@ -47,9 +56,9 @@ class RearTouches(private val maxX: Int, private val maxY: Int) {
                 if (slot == primary) lifted = true
             } else if (primary < 0) {
                 primary = slot; landed = true
-            }
-            ABS_MT_POSITION_X -> if (slot == primary) { rawX = value; moved = true }
-            ABS_MT_POSITION_Y -> if (slot == primary) { rawY = value; moved = true }
+            } else if (slot != primary) second = slot
+            ABS_MT_POSITION_X -> { if (slot in 0 until SLOTS) slotX[slot] = value; if (slot == primary) { rawX = value; moved = true } }
+            ABS_MT_POSITION_Y -> { if (slot in 0 until SLOTS) slotY[slot] = value; if (slot == primary) { rawY = value; moved = true } }
         }
         return emptyList()
     }
@@ -63,6 +72,23 @@ class RearTouches(private val maxX: Int, private val maxY: Int) {
         }
         val x = rawX * Panel.WIDTH / (maxX + 1f)
         val y = rawY * Panel.HEIGHT / (maxY + 1f)
+        // A SECOND FINGER WHILE THE FIRST ONLY RESTS (the hand that holds the phone has a finger on this screen: down
+        // for longer than any tap or swipe and not moved): the resting one is let go and the new one is THE finger,
+        // or no stroke was ever seen while he held the phone (the review's 16). A first finger that is doing
+        // something keeps the back to itself, as before.
+        val other = second
+        second = -1
+        if (other in 0 until SLOTS && primary >= 0 && !landed && !lifted && !strayed && nowMs - downAt > REST_MS && slotX[other] >= 0 && slotY[other] >= 0) {
+            primary = other
+            rawX = slotX[other]; rawY = slotY[other]
+            val nx = rawX * Panel.WIDTH / (maxX + 1f)
+            val ny = rawY * Panel.HEIGHT / (maxY + 1f)
+            downAt = nowMs; downX = nx; downY = ny; strayed = false
+            moved = false
+            return listOf(Up(x, y, nowMs), Down(nx, ny, nowMs))
+        }
+        if (landed) { downAt = nowMs; downX = x; downY = y; strayed = false }
+        else if (moved && (kotlin.math.abs(x - downX) >= REST_SLOP || kotlin.math.abs(y - downY) >= REST_SLOP)) strayed = true
         val e: List<Event> = when {
             landed && lifted -> listOf(Down(x, y, nowMs), Up(x, y, nowMs))
             landed -> listOf(Down(x, y, nowMs))
@@ -76,6 +102,10 @@ class RearTouches(private val maxX: Int, private val maxY: Int) {
     }
 
     private companion object {
+        const val SLOTS = 10
+        /** A finger down this long without moving [REST_SLOP] is resting: no tap (SceneTouch.TAP_MS) or swipe (SWIPE_MS) can come of it. */
+        const val REST_MS = 700L
+        const val REST_SLOP = 16f
         const val EV_SYN = 0x00
         const val SYN_REPORT = 0x00
         const val EV_ABS = 0x03

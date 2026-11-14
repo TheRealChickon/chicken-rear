@@ -37,7 +37,7 @@ object SettingsRows {
     private fun rowLabel(context: Context, text: String) = TextView(context).apply {
         this.text = text
         textSize = ROW_SP
-        setTextColor(Panel.Palette.FG)
+        setTextColor(dev.kb896.aiusage.ui.glass.Ink.fg())
         UiType.dress(this)
     }
 
@@ -72,15 +72,15 @@ object SettingsRows {
     }
 
     /**
-     * A line of explanation under a control, in the same dim type as a row's own label.
-     *
-     * For a switch that is on but cannot do anything yet — the setting is not wrong, so
-     * it is not an error, and disabling the row would hide the feature from the person
-     * who most needs to find it. Saying why is the whole content.
+     * One short line under a control, smaller and dimmer than a title (CardTitle.note), for
+     * where a setting is genuinely unclear. Kept rare: the rows should say what they do.
      */
     fun note(parent: LinearLayout, text: String): TextView {
-        val view = label(parent.context, text)
-        parent.addView(view, rowParams(dp(parent.context, 6)))
+        val view = TextView(parent.context).apply {
+            this.text = text
+            dev.kb896.aiusage.ui.glass.CardTitle.note(this)
+        }
+        parent.addView(view, rowParams(dp(parent.context, 4)))
         return view
     }
 
@@ -211,8 +211,8 @@ object SettingsRows {
             textSize = 14f
             maxLines = 1
             if (maxChars > 0) filters = TitleLimits.filter(maxChars)
-            setTextColor(Panel.Palette.FG)
-            setHintTextColor(Panel.Palette.DIM)
+            setTextColor(dev.kb896.aiusage.ui.glass.Ink.fg())
+            setHintTextColor(dev.kb896.aiusage.ui.glass.Ink.dim())
             typeface = UiType.of(context)
             doAfterTextChanged { onChange(it?.toString().orEmpty().trim()) }
         }, rowParams(dp(context, 2)))
@@ -324,8 +324,8 @@ object SettingsRows {
             textSize = 14f
             maxLines = 1
             filters = TitleLimits.filter(maxChars)
-            setTextColor(Panel.Palette.FG)
-            setHintTextColor(Panel.Palette.DIM)
+            setTextColor(dev.kb896.aiusage.ui.glass.Ink.fg())
+            setHintTextColor(dev.kb896.aiusage.ui.glass.Ink.dim())
             typeface = UiType.of(context)
             doAfterTextChanged { onChange(it?.toString().orEmpty().trim()) }
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -372,7 +372,7 @@ object SettingsRows {
         GlassButton(context).apply {
             text = named(name, value)
             textSize = ROW_SP
-            setTextColor(Panel.Palette.FG)
+            setTextColor(dev.kb896.aiusage.ui.glass.Ink.fg())
             typeface = UiType.of(context)
             iconEnd(this, icon)
             setOnClickListener { onClick() }
@@ -386,6 +386,9 @@ object SettingsRows {
         val context = button.context
         val unseen = context.getDrawable(icon)!!.mutate().apply { alpha = 0 }
         button.setCompoundDrawablesRelativeWithIntrinsicBounds(unseen, null, context.getDrawable(icon), null)
+        // The icons are drawn white (some with a white tint of their own): inked for the theme,
+        // or they vanish on the light one's white card.
+        button.compoundDrawableTintList = android.content.res.ColorStateList.valueOf(dev.kb896.aiusage.ui.glass.Ink.icon())
     }
 
     /** As [navigation], but hands back the button for callers that must relabel it. */
@@ -402,7 +405,7 @@ object SettingsRows {
         return (if (glass(context)) GlassButton(context) else android.widget.Button(context)).apply {
             text = name
             textSize = 14f
-            setTextColor(Panel.Palette.FG)
+            setTextColor(dev.kb896.aiusage.ui.glass.Ink.fg())
             typeface = UiType.of(context)
             icon?.let { iconEnd(this, it) }
             setOnClickListener { onClick() }
@@ -418,8 +421,8 @@ object SettingsRows {
      * it sounds at this size: two or three rows are reordered in one tap either way, and
      * a tap target is reachable one-handed where a long-press-and-drag is not.
      *
-     * @param canMoveUp false for the first row, whose handle is then inert rather than
-     *   absent — a row that loses its control changes width and the column jumps
+     * @param canMoveUp false for the first row, whose handle is then invisible rather than
+     *   gone — a row that loses its control changes width and the column jumps
      */
     fun reorderable(
         parent: LinearLayout,
@@ -436,14 +439,21 @@ object SettingsRows {
             gravity = Gravity.CENTER_VERTICAL
         }
         row.addView(opener(context, name, null, R.drawable.ic_person, onClick), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        // Disabled and dimmed on the first row rather than absent: see canMoveUp.
-        row.addView(GlassIconButton(context).apply {
+        // Unobtrusive: a small dim arrow with no glass of its own, still a 40dp target. On the
+        // first row it is invisible rather than absent, so both rows keep one width.
+        row.addView(android.widget.ImageButton(context).apply {
             setImageResource(R.drawable.ic_arrow_up)
+            imageTintList = android.content.res.ColorStateList.valueOf(Ink.secondary(0f))
+            background = null
+            scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+            val pad = dp(context, 10)
+            setPadding(pad, pad, pad, pad)
             contentDescription = "Move $name up"
             isEnabled = canMoveUp
-            alpha = if (canMoveUp) 1f else 0.35f
+            visibility = if (canMoveUp) View.VISIBLE else View.INVISIBLE
+            alpha = 0.7f
             setOnClickListener { onMoveUp() }
-        }, LinearLayout.LayoutParams(dp(context, 44), dp(context, 44)).apply { marginStart = dp(context, 10) })
+        }, LinearLayout.LayoutParams(dp(context, 40), dp(context, 40)).apply { marginStart = dp(context, 4) })
         parent.addView(row, rowParams(dp(context, 8)))
     }
 
@@ -469,7 +479,7 @@ object SettingsRows {
                 text = name
                 textSize = ROW_SP
                 isChecked = initial
-                setTextColor(Panel.Palette.FG)
+                setTextColor(dev.kb896.aiusage.ui.glass.Ink.fg())
                 typeface = UiType.of(context)
                 // Boxy and green, matching the sliders and the panel. The platform's pill
                 // and circle are the only rounded things in an app made of rectangles.

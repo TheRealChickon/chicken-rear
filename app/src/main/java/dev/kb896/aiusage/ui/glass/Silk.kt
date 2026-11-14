@@ -1,20 +1,17 @@
 package dev.kb896.aiusage.ui.glass
 
-import android.graphics.Bitmap
 import android.graphics.RuntimeShader
 import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * The front screen's background: "Silk", from Vue Bits (vue-bits.dev/backgrounds/silk,
- * DavidHDev, after React Bits), its fragment shader translated to AGSL line for line,
- * with the settings it was chosen at: speed 3.3, scale 1.3, noise intensity 3, rotation 45°,
- * colour #5B21B6.
+ * "Silk", from Vue Bits (vue-bits.dev/backgrounds/silk, DavidHDev, after React Bits), its
+ * fragment shader translated to AGSL line for line, with the settings it was chosen at:
+ * speed 3.3, scale 1.3, noise intensity 3, rotation 45°, colour #5B21B6.
  *
- * One shader for every place the background is seen: the root draws it, and every pane of
- * glass refracts it (Backdrop.shader), so the glass bends the silk as it moves rather than
- * a still copy of it. Time runs as the original's does — a tenth of a second of shader
- * time per second — and only while the settings screen is on screen (Backdrop.install).
+ * One of the back's shader backgrounds (RearDialView makes its own with [create] and keeps
+ * its own time). It was the front screen's background too, until the settings went to a
+ * still near-black (Backdrop.paint).
  *
  * The original's plane spans the canvas with UVs 0..1, y up; here the canvas is the root,
  * in pixels, y down, so the UV is taken from the coordinate and flipped. gl_FragCoord in
@@ -74,15 +71,9 @@ half4 main(float2 coord) {
     return half4(clamp(col.rgb, 0.0, 1.0), 1.0);
 }"""
 
-    /** Shader time, in the original's units. */
-    var time = 0f; private set
-
-    val shader: RuntimeShader by lazy { create() }
-
     /**
-     * A silk of its own, at the same settings, for a canvas that keeps its own time — the
-     * panel's background on the back, which must not move the front's (both live in one
-     * process when the preview draws the panel).
+     * A silk at the chosen settings, for a canvas that keeps its own time: the panel's
+     * background on the back.
      */
     fun create(): RuntimeShader =
         RuntimeShader(SRC).apply {
@@ -111,50 +102,12 @@ half4 main(float2 coord) {
         shader.setFloatUniform("rotation", Math.toRadians(rotationDeg.toDouble()).toFloat())
     }
 
-    fun size(w: Int, h: Int) { shader.setFloatUniform("size", w.toFloat(), h.toFloat()) }
-
-    /** Advances by [dtSeconds] of wall time: the original's `uTime += 0.1 * deltaTime`. */
-    fun advance(dtSeconds: Float) {
-        time += 0.1f * dtSeconds
-        shader.setFloatUniform("time", time)
-    }
-
-    /**
-     * The silk at the current time, worked out on the CPU at a quarter of the size and
-     * scaled up: what the brightness map and the switch tracks read, which cannot run an
-     * AGSL shader. The grain is left out and its average taken off instead.
-     */
-    fun still(w: Int, h: Int): Bitmap {
-        val sw = (w / 4).coerceAtLeast(1); val sh = (h / 4).coerceAtLeast(1)
-        val px = IntArray(sw * sh)
-        val r = ((COLOR shr 16) and 0xFF) / 255f
-        val g = ((COLOR shr 8) and 0xFF) / 255f
-        val b = (COLOR and 0xFF) / 255f
-        val grain = 0.5f / 15f * NOISE
-        val c = cos(ROTATION); val s = sin(ROTATION)
-        val tOffset = SPEED * time
-        for (y in 0 until sh) for (x in 0 until sw) {
-            val u = (x + 0.5f) / sw * SCALE
-            val v = (1f - (y + 0.5f) / sh) * SCALE
-            // column-major mat2(c, -s, s, c) * (u, v)
-            val tx = (c * u + s * v) * SCALE
-            var ty = (-s * u + c * v) * SCALE
-            ty += 0.03f * sin(8f * tx - tOffset)
-            val pattern = 0.6f + 0.4f * sin(5f * (tx + ty + cos(3f * tx + 5f * ty) + 0.02f * tOffset) +
-                sin(20f * (tx + ty - 0.1f * tOffset)))
-            fun ch(k: Float) = ((k * pattern - grain).coerceIn(0f, 1f) * 255f).toInt()
-            px[y * sw + x] = (0xFF shl 24) or (ch(r) shl 16) or (ch(g) shl 8) or ch(b)
-        }
-        val small = Bitmap.createBitmap(px, sw, sh, Bitmap.Config.ARGB_8888)
-        return Bitmap.createScaledBitmap(small, w, h, true)
-    }
-
     /**
      * The silk's brightness in [side]×[side] cells at shader time 0, row by row, worked out
-     * on the CPU as [still] is: what the back's glass reads when the silk is behind it.
+     * on the CPU: what the back's glass reads when the silk is behind it.
      * Rec.709, as GlassLuminance.of weighs a colour.
      */
-    /** The brightness map at a [look]: the back's chosen one; the front's own by default. */
+    /** The brightness map at a [look]: the back's chosen one; the original settings by default. */
     fun cells(
         side: Int, color: Int = COLOR, color2: Int = 0xFF000000.toInt(),
         scale: Float = SCALE, rotationDeg: Int = 45,

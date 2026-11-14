@@ -43,4 +43,14 @@ class ShellLayerTest {
         assertTrue(ShellLayer.Z_SHEET > ShellLayer.Z_BLOCKER)
         assertEquals(Int.MAX_VALUE, ShellLayer.Z_FRAME)
     }
+
+    @Test fun `the banner over the charge over the wake, all over the blocker`() {
+        assertTrue(ShellLayer.Z_BANNER > ShellLayer.Z_CHARGE)
+        assertTrue(ShellLayer.Z_CHARGE > ShellLayer.Z_WAKE)
+        assertTrue(ShellLayer.Z_WAKE > ShellLayer.Z_BLOCKER)
+        assertTrue(ShellLayer.Z_BLOCKER > ShellLayer.Z_COVER)
+        assertTrue(ShellLayer.Z_COVER > ShellLayer.Z_CHEVRON)
+        assertTrue(ShellLayer.Z_CHEVRON > ShellLayer.Z_STRIP)
+        assertTrue(ShellLayer.Z_STRIP > ShellLayer.Z_APP)
+    }
 }

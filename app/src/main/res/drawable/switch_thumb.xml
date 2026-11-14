@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Square thumb, like the sliders'. Green when on, track-grey when off, so a toggle reads
+  Square thumb, like the sliders'. The accent when on, track-grey when off, so a toggle reads
   at a glance from the same distance a bar does.
 
   A rounded thumb here would be the one control that came from somewhere else: everything
@@ -9,7 +9,7 @@
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_checked="true">
         <shape android:shape="rectangle">
-            <solid android:color="#FFB14CFF" />
+            <solid android:color="@color/settings_accent" />
             <size android:width="22dp" android:height="22dp" />
         </shape>
     </item>

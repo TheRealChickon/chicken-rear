@@ -4,7 +4,17 @@ import dev.kb896.aiusage.Panel
 
 enum class Account(val slug: String, val label: String, val accent: Int) {
     PERSONAL("personal", "PERSONAL", Panel.Palette.PERSONAL),
-    WORK("work", "WORK", Panel.Palette.WORK);
+    WORK("work", "WORK", Panel.Palette.WORK),
+    /**
+     * ChatGPT, by its own sign-in (auth/ChatGptOAuth): its plan's Codex limits (data/ChatGptUsageApi). Last, so
+     * the two Claude accounts keep their places wherever an account is known by its number.
+     */
+    CHATGPT("chatgpt", "CHATGPT", 0xFFE9E4D8.toInt());
+
+    /** The app whose account this is, by its package: its real icon says which is which where two stand together. */
+    val app: String get() = if (this == CHATGPT) "com.openai.chatgpt" else "com.anthropic.claude"
+    /** As a person reads it. */
+    val title: String get() = if (this == CHATGPT) "ChatGPT" else label.lowercase().replaceFirstChar { it.uppercase() }
 
     companion object { fun fromSlug(s: String?) = entries.firstOrNull { it.slug == s } }
 }

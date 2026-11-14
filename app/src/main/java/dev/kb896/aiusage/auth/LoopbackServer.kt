@@ -13,7 +13,18 @@ import java.net.URLDecoder
  * listens on 127.0.0.1, never on the phone's Wi-Fi interface. Anything else
  * on the LAN cannot reach it or hand it a spoofed authorization code.
  */
-class LoopbackServer(private val port: Int = 54545) {
+class LoopbackServer(
+    private val port: Int = 54545,
+    /** The redirect this listens for, as the sign-in's side must be told it. */
+    private val redirect: String = "http://localhost:$port/callback",
+    /**
+     * The state may come back with something added after it (ChatGPT's side appends a note about its own
+     * onboarding to the otherwise exact state; its Codex client strips that too). The state itself must
+     * still be there, whole and first.
+     */
+    private val stateMayGrow: Boolean = false,
+    private val doneText: String = "Signed in. Return to Magic Rear.",
+) {
 
     /**
      * Waits for one browser redirect and returns its `code` query parameter.
@@ -44,8 +55,10 @@ class LoopbackServer(private val port: Int = 54545) {
                     if (k.isEmpty()) null else k to URLDecoder.decode(v, "UTF-8")
                 }.toMap()
 
-                val ok = params["state"] == expectedState && !params["code"].isNullOrEmpty()
-                val body = if (ok) "Signed in. Return to Magic Rear." else "Sign-in failed."
+                val state = params["state"]
+                val stateOk = state == expectedState || (stateMayGrow && state != null && state.startsWith(expectedState))
+                val ok = stateOk && !params["code"].isNullOrEmpty()
+                val body = if (ok) doneText else "Sign-in failed."
                 try {
                     s.getOutputStream().writer().apply {
                         write("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n$body")
@@ -59,5 +72,10 @@ class LoopbackServer(private val port: Int = 54545) {
         }
     }
 
-    fun redirectUri(): String = "http://localhost:$port/callback"
+    fun redirectUri(): String = redirect
+
+    companion object {
+        /** Whether [port] can be listened on now (nothing else of this phone has it). */
+        fun free(port: Int): Boolean = try { ServerSocket(port, 0, InetAddress.getLoopbackAddress()).close(); true } catch (_: Exception) { false }
+    }
 }

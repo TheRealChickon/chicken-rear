@@ -102,10 +102,20 @@ class GlassSlider @JvmOverloads constructor(
         // it. Same formula as GlassSwitch's thumb.
         paint.color = 0xFFFFFF or (((1f - press.progress) * 255).toInt() shl 24)
         canvas.drawRoundRect(x - tw / 2f, cy - ht / 2f, x + tw / 2f, cy + ht / 2f, ht / 2f, ht / 2f, paint)
+        // A white thumb on a white card has no edge of its own: the light theme gives it a hairline.
+        if (!Ink.dark) {
+            val edge = (0.75f * density).coerceAtLeast(1f)
+            paint.style = Paint.Style.STROKE; paint.strokeWidth = edge; paint.color = THUMB_EDGE_LIGHT
+            canvas.drawRoundRect(x - tw / 2f + edge / 2f, cy - ht / 2f + edge / 2f,
+                x + tw / 2f - edge / 2f, cy + ht / 2f - edge / 2f, ht / 2f, ht / 2f, paint)
+            paint.style = Paint.Style.FILL
+        }
         canvas.restore()
     }
 
     private companion object {
         const val MIN_HEIGHT_DP = 48
+        /** The thumb's hairline in the light theme: black at 15%. */
+        const val THUMB_EDGE_LIGHT = 0x26000000
     }
 }

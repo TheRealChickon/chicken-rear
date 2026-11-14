@@ -41,6 +41,13 @@ object UsageParser {
         }
         val root = parsed as? JsonObject
             ?: return UsageSnapshot(emptyList(), fetchedAt)
+        // The response's field NAMES, never its values, in a debug build's log: to learn whether it carries
+        // anything about billing (extra usage, a renewal date) that the back's usage page could show.
+        if (dev.kb896.aiusage.BuildConfig.DEBUG ) runCatching {
+            val extra = root.entries.filter { (k, v) -> v is JsonObject && (k.contains("extra", true) || k.contains("bill", true) || k.contains("credit", true) || k.contains("overage", true)) }
+                .joinToString("; ") { (k, v) -> "$k{${(v as JsonObject).keys.joinToString(",")}}" }
+            android.util.Log.i("AiUsageKeys", "usage fields: ${root.keys.joinToString(",")}${if (extra.isEmpty()) "" else " | $extra"}")
+        }
         val limits = root["limits"] as? JsonArray
             ?: return UsageSnapshot(emptyList(), fetchedAt)
 

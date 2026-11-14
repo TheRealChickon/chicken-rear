@@ -1,9 +1,13 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val forkVersion = Properties().apply { rootProject.file("version.properties").inputStream().use { load(it) } }
 
 android {
     namespace = "dev.kb896.aiusage"
@@ -13,7 +17,11 @@ android {
     buildFeatures { aidl = true; buildConfig = true; compose = true }
 
     defaultConfig {
-        applicationId = "dev.kb896.aiusage"
+        // A fork with its own identity (Chicken Rear), beside nothing: the namespace above stays the
+        // original's, as the debug build's always has. SHORT ON PURPOSE: SurfaceFlinger cuts a layer's
+        // name after 24 characters on Android 16, and the shell tells its own panel by "<package>/"
+        // at the start of one (OwnPanel) — "dev.chicken.rear.dev/" is 21.
+        applicationId = "dev.chicken.rear"
         minSdk = 34
         targetSdk = 36
         // Version comes from the release tag when CI is building one, so a published APK
@@ -29,11 +37,12 @@ android {
         // versionCode must increase for every update Android will accept, and a tag name
         // does not give a number to derive one from. CI_PIPELINE_IID is monotonic per
         // project, which is exactly the guarantee needed and nothing more.
-        versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
-        versionName = System.getenv("CI_COMMIT_TAG")?.removePrefix("v") ?: "0.9.89-dev"
+        // The fork's own numbers, in version.properties at the root: no CI writes them.
+        versionCode = forkVersion.getProperty("code").toInt()
+        versionName = forkVersion.getProperty("name")
         ndk { abiFilters += "arm64-v8a" }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        manifestPlaceholders["appLabel"] = "Magic Rear"
+        manifestPlaceholders["appLabel"] = "Chicken Rear"
     }
 
     compileOptions {
@@ -52,13 +61,20 @@ android {
      * unsigned APK refuses to install and says so; a debug-signed one installs happily
      * and is the thing we are trying not to publish.
      */
-    val releaseStore = System.getenv("KEYSTORE_PATH")
+    // The fork's key is never in git. keystore.properties (storeFile, storePassword, keyAlias, keyPassword)
+    // is read from where KEYSTORE_PROPERTIES points, else from the repository's root (.gitignore keeps it
+    // out); a store named in it is looked for beside that file. The environment still wins.
+    val keyPropsFile = System.getenv("KEYSTORE_PROPERTIES")?.let { file(it) } ?: rootProject.file("keystore.properties")
+    val keyProps = Properties().apply {
+        if (keyPropsFile.exists()) keyPropsFile.inputStream().use { load(it) }
+    }
+    val releaseStore = System.getenv("KEYSTORE_PATH") ?: keyProps.getProperty("storeFile")
     if (releaseStore != null) {
         signingConfigs.create("release") {
-            storeFile = file(releaseStore)
-            storePassword = System.getenv("KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("KEY_ALIAS")
-            keyPassword = System.getenv("KEY_PASSWORD")
+            storeFile = keyPropsFile.absoluteFile.parentFile.resolve(releaseStore).takeIf { it.exists() } ?: file(releaseStore)
+            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: keyProps.getProperty("storePassword")
+            keyAlias = System.getenv("KEY_ALIAS") ?: keyProps.getProperty("keyAlias")
+            keyPassword = System.getenv("KEY_PASSWORD") ?: keyProps.getProperty("keyPassword")
         }
     }
 
@@ -67,7 +83,7 @@ android {
             // Debug builds are their own app (dev.kb896.<app>.dev, "(dev)", a "dev" tab on the
             // icon from src/debug/res), so one installs beside the release instead of over it.
             applicationIdSuffix = ".dev"
-            manifestPlaceholders["appLabel"] = "Magic Rear (dev)"
+            manifestPlaceholders["appLabel"] = "Chicken Rear (dev)"
         }
         release {
             isMinifyEnabled = true
