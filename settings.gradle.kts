@@ -4,5 +4,5 @@ pluginManagement {
 dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
-rootProject.name = "claude-status"
+rootProject.name = "chicken-rear"
 include(":app")

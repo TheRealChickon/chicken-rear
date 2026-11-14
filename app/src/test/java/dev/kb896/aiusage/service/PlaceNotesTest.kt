@@ -22,13 +22,13 @@ import java.io.File
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class PlaceNotesTest {
 
-    private val home = Pin("Take the keys", 10, 52.5, 13.4)
+    private val home = Pin("Take the keys", 10, 12.3, -98.8)
     private val plain = Pin("Milk", 20)
 
     @Test fun `a note has a place only with both figures`() {
         assertTrue(home.placed)
         assertFalse(plain.placed)
-        assertFalse(Pin("half", 1, lat = 52.5).placed)
+        assertFalse(Pin("half", 1, lat = 12.3).placed)
     }
 
     @Test fun `arriving brings the note to the front, as if just pinned`() {

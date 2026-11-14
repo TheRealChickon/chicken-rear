@@ -19,7 +19,11 @@ import android.widget.Toast
  */
 object Privacy {
 
-    /** What this fork does with data, in its README: the Advanced page's row and the notice. */
+    /**
+     * What this fork does with data, in its README: the Advanced page's row and the notice. The
+     * repository is private, so the page opens only for someone who has access to it; the notice
+     * and the texts below say the same in the app itself.
+     */
     const val POLICY_URL = "https://github.com/TheRealChickon/chicken-rear/blob/master/README.md#privacy"
 
     /**
@@ -28,7 +32,7 @@ object Privacy {
      * that leaves this alone does not. Stored as the last version seen, not a "seen" flag,
      * so the first notice and every later one are the same mechanism.
      */
-    const val NOTICE_VERSION = 1
+    const val NOTICE_VERSION = 2
 
     /**
      * Short on purpose: what leaves the phone, what stays, and what is not there at all.
@@ -36,13 +40,21 @@ object Privacy {
      */
     const val NOTICE =
         "What leaves your phone:\n" +
-            "• Your Claude usage and plan, read from Anthropic with your own Claude account — " +
-            "and the sign-in itself, in your browser.\n" +
-            "• Only if you turn them on: the weather, from Open-Meteo (the place you type, or " +
-            "your approximate location), and lyrics, from lrclib.net (the song's name, artist, " +
-            "album and length).\n\n" +
-            "What stays on it: your sign-in tokens, encrypted. Notifications shown on the back " +
-            "are never stored or sent. Captures of the rear screen are kept in memory only.\n\n" +
+            "• Your Claude usage and plan, read from Anthropic (api.anthropic.com) with your own " +
+            "account. You sign in in your browser on claude.ai; the token comes from " +
+            "platform.claude.com.\n" +
+            "• Only if you add it: ChatGPT's Codex limits, with your own account (sign-in at " +
+            "auth.openai.com, the figures from chatgpt.com).\n" +
+            "• Only with \"Lightning when it storms\" on: the phone's approximate position, " +
+            "rounded to about a kilometre, to Open-Meteo for the weather.\n\n" +
+            "What stays on it: your sign-in tokens, encrypted; your pinned notes, and the place of " +
+            "a note you tie to one (for that the app asks for the precise position, all the time); " +
+            "the last rough position, to a tenth of a degree, for the weather; the home Wi-Fi's " +
+            "gateway and name servers, if you mark it. Notifications are shown on the back with " +
+            "their message, which people facing you can read; they are never stored or sent. " +
+            "\"Follows the music\" measures how loud the sound is and records nothing. With the " +
+            "glass service on, a pin takes one picture of the screen, kept in memory for the " +
+            "animation only. Captures of the rear screen are kept in memory only.\n\n" +
             "No ads, no analytics, no trackers."
 
     /**
@@ -53,7 +65,7 @@ object Privacy {
     const val SIGN_IN =
         "Either way, the account's token is kept on this phone, encrypted, and used only to " +
             "read its usage and profile (plan, name, email) from Anthropic. The browser " +
-            "sign-in happens on claude.ai."
+            "sign-in happens on claude.ai, and the token is fetched from platform.claude.com."
 
     /**
      * Its own preferences file, not the panel config: "Reset every setting" puts the config
@@ -106,23 +118,24 @@ object Privacy {
     enum class Access(val title: String, val text: String) {
         NOTIFICATIONS(
             "Allow notification access?",
-            "With notification access the back can show other apps' notifications and control " +
-                "what is playing. It shows a notification's app and title — the message text " +
-                "only if you turn that on — and the back faces away from you, so people behind " +
-                "you can read it; with \"Sync with front notifications\" on, swiping a card away " +
-                "on the back clears it on the phone too. Notifications are never stored or sent " +
-                "off the phone; what is playing leaves it only for lyrics, if you turn them on.",
+            "With notification access the back shows other apps' notifications and the pages " +
+                "for what is playing, calls and timers. A new message takes the whole back with " +
+                "its app, sender and text (\"Show the message\" turns the text off), and the back " +
+                "faces away from you, so people in front of you can read it. Throwing a page " +
+                "away on the back clears that notification on the phone too. Notifications are " +
+                "never stored or sent off the phone.",
         ),
         SHIZUKU(
             "About Shizuku",
             "Shizuku lets this app run a helper with Android's shell (adb) rights, which the " +
-                "rear display needs. The helper puts the panel and the apps you pin on the " +
-                "back and moves or closes them there, reads the rear touchscreen, captures the " +
-                "rear screen in memory for the loading cover and the camera strip's colour, " +
-                "reads which app is in front (for \"Send to back\"), sets the rear's brightness " +
-                "and density, turns Wi-Fi, Bluetooth and mobile data on or off when you tap them " +
-                "on the back, and hides Xiaomi's rear-screen app if you ask. It never captures " +
-                "the front screen, saves no captures and makes no network connections.",
+                "rear display needs. The helper draws the back's pages on layers over Xiaomi's " +
+                "rear screen (which keeps running underneath), reads the rear touchscreen, the " +
+                "motion sensor and the system log (which app is on the back), captures the rear " +
+                "screen in memory for its cover, opens apps and Xiaomi's Camera on the back, " +
+                "sends the phone's dialer and clock the commands Xiaomi's own rear pages send, " +
+                "sets the rear's brightness, dims the front while the phone lies face down, and " +
+                "grants this app notification access when you ask. It never captures the front " +
+                "screen, saves no captures and makes no network connections.",
         ),
         BATTERY(
             "No battery restrictions",
@@ -138,9 +151,11 @@ object Privacy {
         ),
         LOCATION(
             "Use the phone's location?",
-            "For the weather, the phone's approximate location is read before each update — " +
-                "every 5 minutes while the panel on the back is awake — and sent to Open-Meteo " +
-                "for the forecast. It is not saved, and precise location is never asked for.",
+            "For \"Lightning when it storms\", the phone's approximate position is read before " +
+                "each update, every 5 minutes while the back is lit, and sent to Open-Meteo " +
+                "rounded to about a kilometre; the last one is kept on the phone to a tenth of " +
+                "a degree. A note tied to a place needs the precise position, all the time: its " +
+                "place stays on the phone, and Android tells the app when you arrive there.",
         ),
         TILE(
             "Add the \"Send to back\" tile?",

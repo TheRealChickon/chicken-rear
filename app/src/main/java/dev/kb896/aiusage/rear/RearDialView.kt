@@ -149,26 +149,9 @@ class RearDialView(context: Context) : View(context) {
     }
     private val barTrack = Paint().apply { color = Panel.Palette.TRACK }
     private val barFill = Paint()
-    private val ray = resources.getDrawable(R.drawable.acrnm_ray, null)
-
-    /**
-     * The record, decoded once.
-     *
-     * Not scaled on the way in: inScaled would resample it for the device's density, and
-     * this is drawn to a radius the panel works out for itself rather than to anything
-     * measured in dp. The file is cropped to the disc, so the bitmap's edge IS the
-     * record's edge and it can be drawn straight into the disc's own square.
-     */
-    private val recordArt: android.graphics.Bitmap? by lazy {
-        runCatching {
-            android.graphics.BitmapFactory.decodeResource(
-                resources, R.drawable.vinyl_record,
-                android.graphics.BitmapFactory.Options().apply { inScaled = false },
-            )
-        }.getOrNull()
-    }
-
-    private val recordRect = android.graphics.RectF()
+    // The record is a plain disc and the corner mark is drawn only from the user's own image: the
+    // photograph of a record and the maker's mark that upstream drew here came with no licence to
+    // pass them on, so they are not in the app.
 
     /**
      * The shake of a running deck, in degrees.
@@ -8173,44 +8156,10 @@ class RearDialView(context: Context) : View(context) {
         )
         val discLayer = canvas.saveLayer(spindleBounds, null)
 
-        val record = recordArt
-        if (record != null) {
-            recordRect.set(
-                disc.cx - disc.radius, disc.cy - disc.radius,
-                disc.cx + disc.radius, disc.cy + disc.radius,
-            )
-            // SOLID ON THE MEDIA PAGE, SHEER ON THE READOUT, and travelling between the
-            // two with the scroll.
-            //
-            // The two pages want opposite things from it. On the readout the record is
-            // behind six bars and two rings, and a solid disc there is a hole punched in
-            // the panel — the background has to carry through it or the readout looks
-            // like it is sitting on a coaster. On the media page the record IS the page,
-            // and a sheer one looks like a picture of a record rather than the thing.
-            //
-            // `paging` is already the scroll between them, 0 at the readout and 1 at the
-            // media page, so the disc thickens as it arrives. Riding the existing value
-            // rather than tweening a second one means it cannot disagree with the scroll.
-            artPaint.alpha = (
-                VINYL_BODY_ALPHA + (255 - VINYL_BODY_ALPHA) * paging.coerceIn(0f, 1f)
-            ).toInt()
-            // THE DISC ONLY, never the label. A record's grooves are featureless and its
-            // artwork is not: a few degrees of shake reads as a running deck on the black,
-            // and as a picture being jogged on the label. The two are drawn separately
-            // here anyway, so the wobble simply stops at the edge of the disc.
-            canvas.save()
-            canvas.rotate(vinylWobble(sleeve), disc.cx, disc.cy)
-            canvas.drawBitmap(record, null, recordRect, artPaint)
-            canvas.restore()
-            artPaint.alpha = 255
-        } else {
-            // The image ships with the build, so this is not a state that should arise —
-            // but a media page with no record on it would look like the panel broke,
-            // where a plain black disc just looks like a plain black disc.
-            vinylPaint.style = Paint.Style.FILL
-            vinylPaint.color = (0x000000 or (VINYL_BODY_ALPHA shl 24))
-            canvas.drawCircle(disc.cx, disc.cy, disc.radius, vinylPaint)
-        }
+        // A plain disc, sheer like the record it stands for: the ground carries through it.
+        vinylPaint.style = Paint.Style.FILL
+        vinylPaint.color = (0x000000 or (VINYL_BODY_ALPHA shl 24))
+        canvas.drawCircle(disc.cx, disc.cy, disc.radius, vinylPaint)
 
         // The label, which is where the cover finally goes and the only part that turns.
         val label = disc.radius * MediaLayout.VINYL_LABEL
@@ -11131,19 +11080,9 @@ class RearDialView(context: Context) : View(context) {
     private var coverBitmap: android.graphics.Bitmap? = null
 
 
-    /** ACRNM maker's mark, or the user's image. White mask, tinted at draw time — never
-     *  edit the drawable. */
+    /** The user's image in the corner, or nothing: the app ships no mark of its own there. */
     private fun drawArt(canvas: Canvas, region: android.graphics.RectF) {
-        val custom = customArt()
-        if (custom != null) {
-            drawCustomArt(canvas, custom, region)
-            return
-        }
-        // The first account's own colour (the stock one where none is chosen, as it always was).
-        ray.setTint(config.styleFor(0).accent ?: Panel.Palette.PERSONAL)
-        ray.setBounds(region.left.toInt(), region.top.toInt(),
-            region.right.toInt(), region.bottom.toInt())
-        ray.draw(canvas)
+        customArt()?.let { drawCustomArt(canvas, it, region) }
     }
 
     /**
