@@ -41,7 +41,7 @@ object ClipStore {
 
     fun dir(context: Context): File? = context.getExternalFilesDir("clips")?.also { it.mkdirs() }
 
-    /** "sandevistan-kick.wake.mp4" reads "Sandevistan kick". */
+    /** "night-drive.wake.mp4" reads "Night drive". */
     fun title(file: String): String =
         file.removeSuffix(".mp4").removeSuffix(".wake").removeSuffix(".loop")
             .replace('-', ' ').replace('_', ' ').trim()

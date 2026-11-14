@@ -151,11 +151,11 @@ class SceneTouchTest {
     }
 
     @Test fun `the faces are the loop clips by name, round and round`() {
-        val faces = SceneFaces.list(arrayOf("falling.loop.mp4", "sandevistan.wake.mp4", "david-moon.loop.mp4", "falling.loop.json"))
+        val faces = SceneFaces.list(arrayOf("falling.loop.mp4", "rain.wake.mp4", "david-moon.loop.mp4", "falling.loop.json"))
         assertEquals(listOf("david-moon.loop.mp4", "falling.loop.mp4"), faces)
         assertEquals("falling.loop.mp4", SceneFaces.next(faces, "david-moon.loop.mp4"))
         assertEquals("david-moon.loop.mp4", SceneFaces.next(faces, "falling.loop.mp4"))
-        assertEquals("a face that is gone: the first", "david-moon.loop.mp4", SceneFaces.next(faces, "edgerunners.loop.mp4"))
+        assertEquals("a face that is gone: the first", "david-moon.loop.mp4", SceneFaces.next(faces, "gone.loop.mp4"))
         assertEquals("the only face stays", null, SceneFaces.next(listOf("david-moon.loop.mp4"), "david-moon.loop.mp4"))
         assertEquals(null, SceneFaces.next(SceneFaces.list(null), "x"))
     }

@@ -6,8 +6,8 @@ import org.junit.Test
 
 class ClipStoreTest {
     @Test fun `a file name reads as a title`() {
-        assertEquals("Sandevistan", ClipStore.title("sandevistan.wake.mp4"))
-        assertEquals("Sandevistan kick", ClipStore.title("sandevistan-kick.wake.mp4"))
+        assertEquals("Rain", ClipStore.title("rain.wake.mp4"))
+        assertEquals("Night drive", ClipStore.title("night-drive.wake.mp4"))
         assertEquals("Spine", ClipStore.title("spine.loop.mp4"))
         assertEquals("My own clip", ClipStore.title("my_own_clip.mp4"))
     }
