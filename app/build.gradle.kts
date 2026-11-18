@@ -40,7 +40,7 @@ android {
         // The fork's own numbers, in version.properties at the root: no CI writes them.
         versionCode = forkVersion.getProperty("code").toInt()
         versionName = forkVersion.getProperty("name")
-        ndk { abiFilters += "arm64-v8a" }
+        ndk { abiFilters += "arm64-v8a"; if (project.hasProperty("withX86")) abiFilters += "x86_64" }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders["appLabel"] = "Chicken Rear"
     }
@@ -80,13 +80,14 @@ android {
 
     buildTypes {
         debug {
-            // Debug builds are their own app (dev.kb896.<app>.dev, "(dev)", a "dev" tab on the
-            // icon from src/debug/res), so one installs beside the release instead of over it.
             applicationIdSuffix = ".dev"
-            manifestPlaceholders["appLabel"] = "Chicken Rear (dev)"
+            manifestPlaceholders["appLabel"] = "Chicken Rear"
         }
         release {
             isMinifyEnabled = true
+            // Resources nothing refers to are left out (R8 tells it what code is kept). The one name looked up at
+            // run time, status_bar_height, is the system's, not ours.
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Explicitly NOT debuggable, and explicitly not the debug key. The token
             // store is only as private as the app's uid: `run-as` on a debuggable build
@@ -101,7 +102,12 @@ android {
     // The lifecycle library's LiveData check crashes lint itself on this Kotlin (an
     // IncompatibleClassChangeError inside the detector, reading Panel.kt) and failed the
     // release build. The app has no LiveData for it to check.
-    lint { disable += "NullSafeMutableLiveData" }
+    lint {
+        disable += "NullSafeMutableLiveData"
+        // lintVitalAnalyzeRelease took about 7 minutes of CPU per release build, beside R8. Lint is run on its own
+        // when wanted (./gradlew :app:lintDebug); a release build only builds.
+        checkReleaseBuilds = false
+    }
 }
 
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
@@ -111,7 +117,6 @@ dependencies {
     // rear screen's double tap needs can be read and set (see RearActivity.takeOverDoubleTap)
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
     implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.appcompat:appcompat:1.7.0")
     // ComponentActivity + lifecycleScope — MainActivity collects a StateFlow (Task 17).
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
@@ -133,6 +138,19 @@ dependencies {
     implementation("androidx.media3:media3-transformer:1.11.1")
     implementation("androidx.media3:media3-effect:1.11.1")
     implementation("androidx.media3:media3-common:1.11.1")
+    // Pin to location (place/): Play services' geofences and fused position. No key, no account.
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+    // The prompt's map (ui/place/PlaceMap): MapLibre Native (BSD) on OpenFreeMap's keyless tiles. The OpenGL build, whose
+    // TextureView mode is a view in our window (clipped round, not under the window's blur). Its native library ships for
+    // arm64 only here (abiFilters above); -PwithX86 adds the x86_64 one for the emulator.
+    implementation("org.maplibre.gl:android-sdk-opengl:13.7.1")
+    // The camera page on the back (ui/camera): CameraX on the back cameras. Extensions only to ask whether the phone
+    // offers a portrait (bokeh) mode; without it there is no "Portrait".
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
+    implementation("androidx.camera:camera-video:1.4.2")
+    implementation("androidx.camera:camera-extensions:1.4.2")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")

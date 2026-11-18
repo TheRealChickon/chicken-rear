@@ -140,7 +140,51 @@ class StayOn(
     }
     @Volatile private var stopped = false
 
-    fun start() { handler.post(tick) }
+    fun start() {
+        // The battery and Do Not Disturb from their broadcasts, on this rule's own thread (before its first tick); the
+        // sticky battery comes back at once.
+        handler.post { listenNews() }
+        handler.post(tick)
+    }
+
+    private fun listenNews() {
+        if (stopped || newsOn) return
+        runCatching {
+            androidx.core.content.ContextCompat.registerReceiver(
+                context, news,
+                android.content.IntentFilter().apply {
+                    addAction(android.content.Intent.ACTION_BATTERY_CHANGED)
+                    addAction(android.app.NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED)
+                },
+                null, handler, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+            )?.let { battery = it }
+            newsOn = true
+        }.onFailure { Log.w(TAG, "stay: no battery / Do Not Disturb broadcasts (${it.message}): read each tick") }
+    }
+
+    private val news = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context?, intent: android.content.Intent?) {
+            when (intent?.action) {
+                android.content.Intent.ACTION_BATTERY_CHANGED -> battery = intent
+                android.app.NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED -> dndReadAt = 0L
+            }
+        }
+    }
+    private var newsOn = false
+    private var battery: android.content.Intent? = null
+    private var dnd = false
+    /** When Do Not Disturb was last read (uptimeMillis); 0 for never, or changed since. */
+    private var dndReadAt = 0L
+
+    private fun batteryNow(): android.content.Intent? =
+        battery?.takeIf { newsOn } ?: context.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+
+    private fun dndNow(now: Long): Boolean {
+        if (newsOn && dndReadAt != 0L && now - dndReadAt < DND_FRESH_MS) return dnd
+        dnd = runCatching { context.getSystemService(android.app.NotificationManager::class.java)?.currentInterruptionFilter?.let { it != android.app.NotificationManager.INTERRUPTION_FILTER_ALL && it != android.app.NotificationManager.INTERRUPTION_FILTER_UNKNOWN } }.getOrNull() == true
+        dndReadAt = now
+        return dnd
+    }
 
     /**
      * The rear display came on. While this rule has the back OFF nothing of ours lights it (the shell wakes it only
@@ -170,6 +214,7 @@ class StayOn(
             listen(false)
             if (motionArmed && motion != null) sensors.cancelTriggerSensor(onMotion, motion)
             runCatching { if (lookLock.isHeld) lookLock.release() }
+            if (newsOn) { newsOn = false; runCatching { context.unregisterReceiver(news) } }
             bridge.setStay(0, "the service stopped")
         }
         thread.quitSafely()
@@ -186,7 +231,7 @@ class StayOn(
             val words = NightRule.debugWords(context)
             val forcedWord = words.firstOrNull { it != "night" }
             val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
-            val dnd = runCatching { context.getSystemService(android.app.NotificationManager::class.java)?.currentInterruptionFilter?.let { it != android.app.NotificationManager.INTERRUPTION_FILTER_ALL && it != android.app.NotificationManager.INTERRUPTION_FILTER_UNKNOWN } }.getOrNull() == true
+            val dnd = dndNow(SystemClock.uptimeMillis())
             val night = "night" in words || NightRule.night(c.sleepAtNight, hour, dnd)
             // "camera" and "saver" are the phone in the hand with that also true.
             val forced = if (forcedWord == "camera" || forcedWord == "saver") "hand" else forcedWord
@@ -224,11 +269,13 @@ class StayOn(
             val rt = SystemClock.elapsedRealtime()
             if (using) frontOffSince = 0L else if (frontOffSince == 0L) frontOffSince = if (ticked) rt else rt - NightRule.ON_MS
             ticked = true
-            val battery = context.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+            val battery = batteryNow()
             val pct = ChargeLevel.percent(
                 battery?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1,
                 battery?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) ?: -1,
             ) ?: -1
+            // The Wi-Fi is read only for home detection (it was three binder calls a tick, twice, for a log line too).
+            val wifi = if (c.homeDetect) HomeNet.current(context) else null
             val facts = Facts(
                 enabled = enabled, inUse = using, faceDown = down, onBack = back, pocketed = pocketed,
                 manualOff = bridge.manualOff.on, recentTouch = sinceTouch in 0 until TOUCH_MS, dimFaceDown = c.stayDimFaceDown,
@@ -236,13 +283,13 @@ class StayOn(
                 battery = pct, charging = (battery?.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0,
                 faceDownForMs = if (down) minOf(now - faceDownSince, sinceTouch) else 0L,
                 quietForMs = if (using) minOf(now - inUseSince, sinceTouch) else 0L,
-                home = forcedWord == "home" || forcedWord == "homenight" || HomeNet.atHome(c, context),
+                home = forcedWord == "home" || forcedWord == "homenight" || HomeNet.atHome(c, wifi),
                 bedtime = forcedWord == "homenight" || (forcedWord != "home" && HomeNet.bedtime(hour, dnd)),
                 night = night,
                 frontOffForMs = if (using) 0L else minOf(rt - frontOffSince, sinceTouch),
             )
             // Said once per change, without the network itself: whether a Wi-Fi can be told apart here at all.
-            val homeWord = "detection ${if (c.homeDetect) "on" else "off"}, a home Wi-Fi ${if (c.homeNet.isEmpty()) "not set" else "set"}, on Wi-Fi ${if (HomeNet.current(context) != null) "yes" else "no"}, at home ${facts.home}, night ${facts.bedtime}"
+            val homeWord = "detection ${if (c.homeDetect) "on" else "off"}, a home Wi-Fi ${if (c.homeNet.isEmpty()) "not set" else "set"}, on Wi-Fi ${if (!c.homeDetect) "not read" else if (wifi != null) "yes" else "no"}, at home ${facts.home}, night ${facts.bedtime}"
             if (homeWord != lastHomeWord) { lastHomeWord = homeWord; Log.i(TAG, "home: $homeWord") }
             val (level, why) = level(facts)
             // The light around the phone is read while the back is lit and goes by it, and at no other time.
@@ -337,6 +384,8 @@ class StayOn(
             else -> null
         }
         private const val POCKET_ASK_MS = 10_000L
+        /** Do Not Disturb is read again at least this often, broadcast or not. */
+        private const val DND_FRESH_MS = 60_000L
         /** After the phone is moved while asleep: how long the posture is watched, and how often. */
         private const val LOOK_MS = 6_000L
         private const val LOOK_TICK_MS = 500L
@@ -384,14 +433,8 @@ class StayOn(
                     f.dimFaceDown && !f.recentTouch -> Level.DIM to "lying face down"
                     else -> Level.ON to "lying face down, in use"
                 }
-                // AT HOME (home detection on): off at night, when he is about to sleep. BY DAY THE FRONT BEING ON IS THE
-                // PHONE IN USE, AT HOME AS ANYWHERE: the back stays lit however long he does not touch it (it used to go
-                // off after two quiet minutes, in the middle of a video: "stay: off — at home, quiet for 2 minutes").
-                // Lying face down is decided above, as everywhere. With the front off nothing is lit but that, so by
-                // day home changes nothing now.
-                f.inUse && f.home && f.bedtime -> Level.OFF to "at home, at night"
                 f.inUse -> when {
-                    !saving -> Level.ON to (if (f.home) "in use, at home" else "in use")
+                    !saving -> Level.ON to (if (f.home && f.bedtime) "in use, at home at night" else if (f.home) "in use, at home" else "in use")
                     f.quietForMs < SAVER_STILL_MS -> Level.STILL to "in use, saving battery"
                     else -> Level.OFF to "in use, saving battery"
                 }

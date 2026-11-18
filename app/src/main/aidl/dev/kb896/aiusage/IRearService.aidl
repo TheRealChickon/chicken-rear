@@ -1,6 +1,7 @@
 package dev.kb896.aiusage;
 
 import android.os.Bundle;
+import android.os.IBinder;
 import dev.kb896.aiusage.IRearEvents;
 
 /** Runs inside Shizuku's shell-privileged process (uid 2000). */
@@ -167,8 +168,8 @@ interface IRearService {
     // keypad comes up over it, and the right code leaves it where it was.
     oneway void askBackCode() = 34;
     // The control centre's screenshot tile ([record] false), or its recording tile ([record] true:
-    // starts one, or stops the one running). The shell captures the back into this app's files and
-    // says so (IRearEvents.onCaptured).
+    // starts one, or stops the one running). The shell captures the back and hands it over
+    // (IRearEvents.onShot, onCaptured); three fingers held on the back take the same paths.
     oneway void capture(boolean record) = 35;
     // Camera mode (CameraWatch in the app): whether the rear is the camera's or a guest's right
     // now — the App Portal's guest on top, the camera this app opened there, or the camera's own
@@ -241,8 +242,7 @@ interface IRearService {
     // brightness (rear/RearLight). [source]: 0 the sensor beside the rear screen, 1 the front one (the rear one is
     // covered, or the phone has none), 2 none at all ([lux] then means nothing).
     oneway void setAmbient(float lux, int source) = 53;
-    // How loud what is playing is, 0 to 1, as the app hears it (service/MusicLevel; only with "Follows the music"
-    // on and the permission he gave for it): the music page's glows rise and fall with it. Not told: they breathe.
+    // No longer sent (since setMusicSound): kept so the number is not given to anything else. The shell does nothing with it.
     oneway void setMusicLevel(float level) = 54;
 
     // A pin of ours has just been handed to Xiaomi's own pin (rear/PinVia): "text" the pinned words, "at" the uptime
@@ -254,4 +254,33 @@ interface IRearService {
      * page leaves the back as a page does, by its slide; it is shown again by showCharge.
      */
     oneway void chargeFull() = 56;
+
+    /**
+     * OpenAI's Dots character for ChatGPT's vessel on the usage page: the binder of the app's ":dots" process
+     * (IDots, rear/dots/DotsService), or null when it cannot be had or its process went.
+     */
+    oneway void setDots(IBinder dots) = 57;
+    /**
+     * The shell's half of the health check (rear/ShellHealth, read only): a Bundle of lookedAt (long), coverMade
+     * (boolean), coverError, dialerMissing, clockMissing, xiaomiMissing (String / String[], absent while not known).
+     * [again]: look at the Xiaomi packages again first (the phone or one of them has changed). Blocks for that look.
+     * A high number of its own so that calls others add meanwhile do not collide with it.
+     */
+    Bundle health(boolean again) = 117;
+
+    // What the sound of what is playing does now, thirty times a second (service/MusicSound; only with "Follows the
+    // music" on and the permission he gave for it): { course 0..1, kick 0..1, valid 1 or 0, L, Hi, Lo } (the last
+    // three in dBFS, for the shell's log line). The music page's body (rear/MusicFace.Body) rises and pumps with it.
+    // Not told for a quarter of a second: it eases back to breathing by itself.
+    // A high number of its own (as health's 117): 57 was free when this was written, and another branch took it meanwhile.
+    oneway void setMusicSound(in float[] v) = 157;
+    // Earbuds have connected (service/EarbudsWatch): "at" (uptimeMillis the front's card began), "level" (-1: none
+    // known), "name", "picture" (Sony's picture of them, PNG, at most 360 px; absent: none). The back's moment
+    // plays from at + EarbudsMotion.BACK_AT, only on a lit back of ours with no call and no pop-up over it.
+    // A high number of its own, as 117 and 157: other branches take the next free ones.
+    oneway void earbuds(in Bundle b) = 215;
+    // The app has been handed the screenshot [name] (IRearEvents.onShot) and asks whether to save it
+    // (rear/ShotKeeper.Claim's code): 0 save it, 1 the shell has saved it itself (the app only asks the
+    // media store to look at it), 2 nothing to do (binned on the back). A high number of its own.
+    int claimShot(String name) = 311;
 }

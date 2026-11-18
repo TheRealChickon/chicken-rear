@@ -44,8 +44,19 @@ class ShellCharge(
     private val geometry: () -> RearGeometry,
     /** Whether the rear is lit (STATE_ON) now. */
     private val lit: () -> Boolean,
+    /**
+     * Whether the rear is lit by a reading of this process's under a tenth of a second old: the look at every picture
+     * (it asked the system at every one). Dark by it is read again ([lit]) before anything is done on it.
+     */
+    private val litRecently: () -> Boolean = lit,
     /** The show is over, however it ended: for RearShow and the touch watch. */
     private val onEnded: () -> Unit,
+    /**
+     * Its being IN ITS PLACE has changed ([inPlace]), on its render thread (or [close]'s): told BEFORE the frame that
+     * fades it or moves it out of its place (what is under it moves again first) and after the one that has it whole in
+     * its place. For HiddenFrames.
+     */
+    private val onPlace: (Boolean) -> Unit = {},
 ) {
     private val state = Any()
     private var level = 0f
@@ -72,6 +83,35 @@ class ShellCharge(
     /** Showing, or waiting for the rear to light to show: for the touch watch. */
     @Volatile var isUp = false
         private set
+
+    /**
+     * THE WHOLE BACK IS THIS PAGE, STILL: the page that stays (not the small one over an app), at full strength, at
+     * (0, 0), not sliding, not under a finger, not leaving, not draining. Its picture is opaque edge to edge (black,
+     * then the fluid and the figures over it), so nothing under it can be seen (HiddenFrames.inPlace).
+     */
+    @Volatile var inPlace = false
+        private set
+    private val placeLock = Any()
+
+    /** [inPlace] as it is now, told to [onPlace] when it changed. */
+    private fun placedNow(now: Boolean) = synchronized(placeLock) {
+        if (now == inPlace) return@synchronized
+        inPlace = now
+        runCatching { onPlace(now) }
+    }
+
+    /**
+     * THE PAGE THAT STAYS ON A DARK BACK WAITS FOR THE LIGHT instead of looking every 400 ms (about 9000 looks an hour all
+     * night on the charger): released by [litChanged] (the shell's display listener) and by every change of the show
+     * itself; the wait's end is only a safety net ([DARK_WAIT_MS]) for a word that never came.
+     */
+    private val darkWake = java.util.concurrent.Semaphore(0)
+
+    /** The rear's light may have changed (the display listener). Any thread. */
+    fun litChanged() = kick()
+
+    /** Whatever changed is looked at now by a render thread that waits on a dark back. */
+    private fun kick() { if (darkWake.availablePermits() == 0) darkWake.release() }
 
     /** The layer made now, hidden, so the first lit frame of a show already carries it. Any thread. */
     fun prepare() {
@@ -114,6 +154,7 @@ class ShellCharge(
             drainAt = 0L
             cutAt = 0L
             isUp = true
+            kick()
             if (thread?.isAlive != true) {
                 thread = Thread({ run() }, "rear-charge").apply { isDaemon = true; start() }
             }
@@ -133,6 +174,7 @@ class ShellCharge(
         drainAt = SystemClock.uptimeMillis()
         fillAtDrain = fillNow
         alphaAtDrain = alphaNow
+        kick()
         Log.i(TAG, "charge: unplugged — draining")
     }
 
@@ -187,6 +229,7 @@ class ShellCharge(
             leaving = true
             slide.leaveTo(PageSlide.Edge.RIGHT)
         }
+        kick()
         Log.i(TAG, "charge: swiped away")
     }
 
@@ -202,6 +245,7 @@ class ShellCharge(
         if (!isUp || cutAt != 0L) return@synchronized
         cutAt = SystemClock.uptimeMillis()
         cutMs = fadeMs.coerceAtLeast(1L)
+        kick()
         Log.i(TAG, "charge: cut short — $why")
     }
 
@@ -212,6 +256,7 @@ class ShellCharge(
     private fun stopLocked(why: String) {
         Log.i(TAG, "charge: $why")
         isUp = false
+        kick()
     }
 
     /** A snapshot of [state] for one frame. */
@@ -255,7 +300,7 @@ class ShellCharge(
                 val stays = held && !f.compact
                 if (stays && (elapsed >= t.inMs || slidIn || leaving)) alpha = 1f
                 // Sent away: out by its slide, and over when it has reached its edge (or at once on a dark back).
-                if (leaving && (slide.gone || !lit())) { why = "swiped away"; break }
+                if (leaving && (slide.gone || !(litRecently() || lit()))) { why = "swiped away"; break }
                 if (f.drainAt != 0L) {
                     val since = (now - f.drainAt).toFloat()
                     if (ChargeStyle.drained(since)) { why = "drained"; break }
@@ -268,8 +313,16 @@ class ShellCharge(
                     alpha *= left
                 }
                 synchronized(state) { fillNow = fill; alphaNow = alpha }
-                // Staying, and the back dark: nothing is drawn for nobody.
-                if (stays && elapsed > t.inMs && !lit()) { Thread.sleep(DARK_STEP_MS); continue }
+                // Staying, and the back dark: nothing is drawn for nobody, and nothing is looked at until the light
+                // comes (or the show changes): no poll of a dark back.
+                if (stays && elapsed > t.inMs && !(litRecently() || lit())) {
+                    darkWake.drainPermits()
+                    // Looked at once more after the permits are gone: a light that came between the two is not slept through.
+                    // Draining or fading out, its end is due by the clock: looked at at the old pace, so it ends in the dark as before.
+                    val most = if (f.drainAt != 0L || f.cutAt != 0L) DARK_STEP_MS else DARK_WAIT_MS
+                    if (!lit()) darkWake.tryAcquire(most, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    continue
+                }
                 val c = runCatching { surface.lockHardwareCanvas() }.getOrNull() ?: surface.lockCanvas(null)
                 try {
                     c.drawColor(0, PorterDuff.Mode.CLEAR)
@@ -283,19 +336,24 @@ class ShellCharge(
                     fluidClock += (step * fluidSpeed).toLong()
                     painter.draw(c, f, elapsed, fill, gravityX, gravityY, shownFraction, label, dim, fluidClock)
                 } finally { surface.unlockCanvasAndPost(c) }
+                // Where it is on the back: in its place, sliding, or where a finger has it.
+                val moving = slide.step(now)
+                val x = slide.x(rear.widthPx.toFloat()); val y = slide.y(rear.heightPx.toFloat())
+                // THE WHOLE BACK, STILL, IN ITS PLACE (HiddenFrames): told out of it before this frame fades it or moves
+                // it, so what is under it moves again first, and into it once its strength and its place are set.
+                val whole = wholeInPlace(stays, leaving, f.drainAt != 0L, f.cutAt != 0L, alpha, moving, x, y, slide.held, slide.goal)
+                if (!whole) placedNow(false)
                 // The whole layer's strength is SurfaceFlinger's: the scrim and the drawing fade as one.
                 if (alpha != placedAlpha || !shownOnce) {
                     SurfaceControl.Transaction().use { tx -> tx.setAlpha(sc, alpha).setVisibility(sc, alpha > 0f).apply() }
                     placedAlpha = alpha
                     shownOnce = true
                 }
-                // Where it is on the back: in its place, sliding, or where a finger has it.
-                val moving = slide.step(now)
-                val x = slide.x(rear.widthPx.toFloat()); val y = slide.y(rear.heightPx.toFloat())
                 if (x != placedX || y != placedY) {
-                    SurfaceControl.Transaction().use { tx -> ShellLayer.round(tx, sc, rear, moving = x != 0f || y != 0f); tx.setPosition(sc, x, y).apply() }
+                    SurfaceControl.Transaction().use { tx -> RearShape.place(tx, sc, rear, x, y); tx.apply() }
                     placedX = x; placedY = y
                 }
+                if (whole) placedNow(true)
                 Thread.sleep(if (moving) SLIDE_FRAME_MS else FRAME_MS)
             }
         } catch (_: InterruptedException) {
@@ -304,6 +362,8 @@ class ShellCharge(
             why = "failed: ${e.message}"
             Log.w(TAG, "charge stopped: ${e.message}")
         } finally {
+            // Out of its place before it is hidden: what is under it moves again first.
+            placedNow(false)
             // Hidden, kept: the next show finds it made.
             layer?.let { sc -> runCatching { SurfaceControl.Transaction().use { it.setVisibility(sc, false).setAlpha(sc, 0f).setPosition(sc, 0f, 0f).apply() } } }
             leaving = false
@@ -338,6 +398,7 @@ class ShellCharge(
     /** Lets go of the layer, for the shell's end. */
     fun close() {
         synchronized(state) { stopLocked("closed"); thread?.interrupt() }
+        placedNow(false)
         ShellLayer.remove(layer)
         layer = null
     }
@@ -472,13 +533,29 @@ class ShellCharge(
 
     companion object {
         private const val TAG = "AiUsageRear"
+
+        /**
+         * A frame has the page WHOLE IN ITS PLACE ([inPlace]): the page that stays ([stays]; never the small one over an
+         * app), not leaving, draining or cut short, at full strength, not moving, at (0, 0), not under a finger ([held])
+         * and staying there ([goal] 1). Pure.
+         */
+        internal fun wholeInPlace(
+            stays: Boolean, leaving: Boolean, draining: Boolean, cut: Boolean, alpha: Float,
+            moving: Boolean, x: Float, y: Float, held: Boolean, goal: Float,
+        ): Boolean = stays && !leaving && !draining && !cut && alpha >= 1f && !moving && x == 0f && y == 0f && !held && goal >= 1f
+
         /** How long a show asked for on a dark rear waits for it to light before it is dropped. */
         const val LIT_WAIT_MS = 1_500L
         private const val WAIT_STEP_MS = 30L
         private const val FRAME_MS = 16L
         /** While the page slides or is under a finger: a picture for every frame of the panel. */
         private const val SLIDE_FRAME_MS = 8L
-        /** How often the page that stays looks whether the back is lit again, while it is dark. */
+        /**
+         * The longest a page that stays waits on a dark back for the word that it is lit again (ShellCharge.litChanged)
+         * before it looks by itself: a safety net only (it looked every 400 ms).
+         */
+        private const val DARK_WAIT_MS = 10_000L
+        /** A dark page that is draining or fading out looks this often, so it ends on time (the old pace). */
         private const val DARK_STEP_MS = 400L
         /** The fluid comes to rest, and stirs again, over about this long. */
         private const val REST_MS = 1_500f

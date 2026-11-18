@@ -1,5 +1,9 @@
 package dev.kb896.aiusage.rear
 
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+
 /**
  * The colour of the camera strip (x < Panel.CUTOUT_RIGHT) beside a guest on a private display
  * (PrivateDisplay), and of whatever else of the rear the app leaves bare (a portrait app's bars):
@@ -50,6 +54,48 @@ object StripColor {
             GuestShape.Bounds(app.left, 0, app.right, minOf(app.top, bottom)),
             GuestShape.Bounds(app.left, app.bottom, app.right, bottom),
         ).filter { it.width > 0 && it.height > 0 }
+    }
+
+    fun draw(
+        c: Canvas, rear: RearGeometry, app: GuestShape.Bounds, area: GuestShape.Bounds, keyboardTop: Int?, color: Int,
+        fill: Paint = Paint(),
+    ) {
+        fill.color = color
+        fill.isAntiAlias = true
+        fill.style = Paint.Style.FILL
+        for (b in around(rear, app, keyboardTop)) c.drawRect(b.left.toFloat(), b.top.toFloat(), b.right.toFloat(), b.bottom.toFloat(), fill)
+        val radius = rear.cornerPx.toFloat()
+        val k = keyboardTop?.coerceIn(0, rear.heightPx)
+        val keyboard = k != null && k < rear.heightPx
+        // The app's box, down to a keyboard over it.
+        val appBottom = if (keyboard) minOf(app.bottom, k!!) else app.bottom
+        corners(c, app.left, app.top, app.right, appBottom, radius, top = true, bottom = !keyboard || k!! >= app.bottom, fill)
+        if (keyboard) {
+            val lens = minOf(rear.cutoutPx, app.left)
+            if (area.left > lens) c.drawRect(lens.toFloat(), k!!.toFloat(), area.left.toFloat(), rear.heightPx.toFloat(), fill)
+            if (area.right < rear.widthPx) c.drawRect(area.right.toFloat(), k!!.toFloat(), rear.widthPx.toFloat(), rear.heightPx.toFloat(), fill)
+            // The keyboard: the display's whole width as far as it shows (the lens column is the strip's), its foot round.
+            corners(c, maxOf(area.left, lens), k!!, area.right, area.bottom, radius, top = false, bottom = true, fill)
+        }
+    }
+
+    private val cornerPath = Path()
+    private val radii = FloatArray(8)
+
+    /** In [fill]: what of ([l], [t], [r], [b]) lies outside its corners rounded by [radius] ([top] ones, [bottom] ones). */
+    @Synchronized
+    private fun corners(c: Canvas, l: Int, t: Int, r: Int, b: Int, radius: Float, top: Boolean, bottom: Boolean, fill: Paint) {
+        val w = (r - l).toFloat(); val h = (b - t).toFloat()
+        if (w <= 0f || h <= 0f || radius <= 0f || (!top && !bottom)) return
+        val rad = minOf(radius, w / 2f, if (top && bottom) h / 2f else h)
+        val tr = if (top) rad else 0f; val br = if (bottom) rad else 0f
+        radii[0] = tr; radii[1] = tr; radii[2] = tr; radii[3] = tr
+        radii[4] = br; radii[5] = br; radii[6] = br; radii[7] = br
+        cornerPath.rewind()
+        cornerPath.fillType = Path.FillType.EVEN_ODD
+        cornerPath.addRect(l.toFloat(), t.toFloat(), r.toFloat(), b.toFloat(), Path.Direction.CW)
+        cornerPath.addRoundRect(l.toFloat(), t.toFloat(), r.toFloat(), b.toFloat(), radii, Path.Direction.CW)
+        c.drawPath(cornerPath, fill)
     }
 
     /** A bar narrower than this is not read for a keyboard. */

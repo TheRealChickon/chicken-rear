@@ -58,8 +58,20 @@ object PanelAwake {
             val pending = onWake
             onWake = null
             pending?.invoke()
+            for (l in wakeListeners) runCatching { l() }
         }
     }
+
+    /**
+     * Told every time the panel comes back from dark, for as long as the process lives (whenAwake's one slot is
+     * replaced by whoever asks next; these are not). The same function added twice is called once. MusicLevel is
+     * one: a song that played on while the back was dark is measured again the moment it can be seen.
+     */
+    private val wakeListeners = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
+
+    fun addWakeListener(listener: () -> Unit) { wakeListeners.add(listener) }
+
+    internal fun wakeListenerCount(): Int = wakeListeners.size
 
     /** Run [work] now if the panel can be seen, or the next time it can. */
     fun whenAwake(work: () -> Unit) {

@@ -52,18 +52,15 @@ class RearDim(private val layerStack: () -> Int, private val size: () -> Pair<In
     private fun put(a: Float) {
         if (a > 0f && layer == null) {
             val (w, h) = size()
+            // A BLACK COLOUR LAYER, NO BUFFER (ShellLayer.createColour): the same black at the same alpha over the same
+            // w x h, without a 2.3 MB picture read at every refresh while it is up (nearly always while lit indoors).
+            // Where that cannot be had, the black buffer of the display's size it always was.
             layer = runCatching {
-                val sc = ShellLayer.create(
-                    "dim", layerStack(), ShellLayer.Z_DIM, w, h,
-                    trusted = false, visible = false, alpha = 0f, format = PixelFormat.RGBA_8888,
-                )
-                // A layer with no buffer shows nothing: one black picture, once.
-                val s = Surface(sc)
-                try {
-                    val c = s.lockCanvas(null)
-                    try { c.drawColor(0xFF000000.toInt()) } finally { s.unlockCanvasAndPost(c) }
-                } finally { s.release() }
-                sc
+                ShellLayer.createColour("dim", layerStack(), ShellLayer.Z_DIM, w, h, trusted = false, visible = false, alpha = 0f)
+            }.recoverCatching { e ->
+                if (e is ShellLayer.Untrusted) throw e
+                Log.i(TAG, "dim: no colour layer (${e.message}); a black buffer ${w}x$h")
+                bufferLayer(w, h)
             }.onFailure { Log.w(TAG, "dim: no layer: ${it.message}") }.getOrNull()
         }
         val sc = layer
@@ -71,6 +68,23 @@ class RearDim(private val layerStack: () -> Int, private val size: () -> Pair<In
         if (sc == null) return
         runCatching { SurfaceControl.Transaction().use { it.setAlpha(sc, a).setVisibility(sc, a > 0.002f).apply() } }
             .onFailure { Log.w(TAG, "dim: ${it.message}") }
+    }
+
+    /** The way it was made before colour layers: a black picture of the display's size, drawn once. */
+    private fun bufferLayer(w: Int, h: Int): SurfaceControl {
+        val sc = ShellLayer.create(
+            "dim", layerStack(), ShellLayer.Z_DIM, w, h,
+            trusted = false, visible = false, alpha = 0f, format = PixelFormat.RGBA_8888,
+        )
+        // A layer with no buffer shows nothing: one black picture, once.
+        try {
+            val s = Surface(sc)
+            try {
+                val c = ShellLayer.lockPanelCanvas(s)
+                try { c.drawColor(0xFF000000.toInt()) } finally { s.unlockCanvasAndPost(c) }
+            } finally { s.release() }
+        } catch (e: Throwable) { ShellLayer.remove(sc); throw e }
+        return sc
     }
 
     fun close() {

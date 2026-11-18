@@ -29,15 +29,39 @@ class ShellCard(
     private val z: Int = ShellLayer.Z_CARD,
     private val opaque: Boolean = false,
     private val slide: Boolean = false,
+    /**
+     * Its being IN ITS PLACE has changed ([inPlace]), on [handler]'s thread: told BEFORE its layer moves out of its
+     * place (what is under it can be drawn first) and after it has come into it. For HiddenFrames.
+     */
+    private val onPlace: (Boolean) -> Unit = {},
+    /** Its slide's or fade's steps on the vsync, placed by the frame's own time (FramePacer); null: a 14 ms timer, as before. */
+    private val pacer: FramePacer? = null,
     private val paint: (android.graphics.Canvas, Float, Float) -> Unit,
 ) {
     private var layer: SurfaceControl? = null
     private var surface: Surface? = null
     private var at = 0f
     private var goal = 0f
+    /** The time (System.nanoTime) its slide or fade last stepped to; 0: not moving. */
     private var movedAt = 0L
 
     @Volatile var isUp = false
+        private set
+
+    /** Up, in its place and staying there, not under a finger: the whole back is this card (HiddenFrames.inPlace). */
+    @Volatile var inPlace = false
+        private set
+
+    /** On [handler]'s thread: [inPlace] as it is now, told to [onPlace] when it changed. */
+    private fun placedNow() {
+        val now = HiddenFrames.inPlace(isUp, at, goal, peeking)
+        if (now == inPlace) return
+        inPlace = now
+        runCatching { onPlace(now) }
+    }
+
+    /** How many times it has gone from up to away: a page whose picture moves can tell its first frame back by it. */
+    @Volatile var hides = 0
         private set
 
     /**
@@ -68,7 +92,9 @@ class ShellCard(
         if (!slide || !ensure()) return@post
         if (!isUp && !peeking) draw()
         peeking = true
-        handler.removeCallbacks(stepper)
+        // Under the finger it is not in its place: told before it moves, so what is under it is drawn first.
+        placedNow()
+        unstep()
         movedAt = 0L
         at = PageDrag.unease(inPart)
         place()
@@ -88,10 +114,14 @@ class ShellCard(
      */
     fun redraw() { if (isUp) handler.post { if (isUp) draw() } }
 
+    /** Its picture drawn again NOW, if it is up: ON [handler]'S THREAD ONLY (what was under a page drawn before that page moves). */
+    fun drawNow() { if (isUp) draw() }
+
     /** Away: by its slide or fade, or at once when not [moving]. */
     fun hide(moving: Boolean = true) {
         if (!isUp) return
         isUp = false
+        hides++
         handler.post { peeking = false; goal = 0f; if (!moving) at = 0f; step() }
     }
 
@@ -121,7 +151,7 @@ class ShellCard(
         val rear = geometry()
         val t0 = SystemClock.elapsedRealtimeNanos()
         runCatching {
-            val c = runCatching { s.lockHardwareCanvas() }.getOrNull() ?: s.lockCanvas(null)
+            val c = ShellLayer.lockPanelCanvas(s)
             try { paint(c, rear.widthPx.toFloat(), rear.heightPx.toFloat()) } finally { s.unlockCanvasAndPost(c) }
         }.onFailure { Log.w(TAG, "$name: not drawn: ${it.message}") }
         val t1 = SystemClock.elapsedRealtimeNanos()
@@ -136,18 +166,23 @@ class ShellCard(
         }
     }
 
-    private val stepper = Runnable { step() }
+    /** A step of its slide or fade: on the pacer's vsync it is placed by that frame's time, so every refresh moves it alike. */
+    private val stepper = Runnable { step(pacer?.frameNs ?: System.nanoTime()) }
 
-    private fun step() {
+    private fun unstep() { handler.removeCallbacks(stepper); pacer?.cancel(stepper) }
+
+    private fun step(now: Long = System.nanoTime()) {
         val sc = layer ?: return
-        val now = SystemClock.uptimeMillis()
         if (movedAt == 0L) movedAt = now
-        val d = (now - movedAt).toFloat() / (if (slide) ShellPage.SLIDE_MS else FADE_MS)
-        movedAt = now
+        val d = FramePace.share(movedAt, now, if (slide) ShellPage.SLIDE_MS else FADE_MS)
+        movedAt = maxOf(movedAt, now)
         at = if (goal > at) minOf(goal, at + d) else maxOf(goal, at - d)
+        // Leaving its place is told before the move, arriving in it after.
+        if (inPlace) placedNow()
         place()
-        handler.removeCallbacks(stepper)
-        if (at != goal) handler.postDelayed(stepper, 14L) else movedAt = 0L
+        if (!inPlace) placedNow()
+        unstep()
+        if (at != goal) { if (pacer != null) pacer.post(stepper, 0f) else handler.postDelayed(stepper, 14L) } else movedAt = 0L
     }
 
     private fun place() {
@@ -156,8 +191,8 @@ class ShellCard(
             SurfaceControl.Transaction().use {
                 if (slide) {
                     val rear = geometry()
-                    ShellLayer.round(it, sc, rear, moving = at < 1f)
-                    it.setPosition(sc, (1f - ShellPage.ease(at)) * rear.widthPx, 0f).setAlpha(sc, 1f).setVisibility(sc, at > 0f).apply()
+                    RearShape.place(it, sc, rear, ShellPage.xAt(ShellPage.Edge.RIGHT, at, rear.widthPx.toFloat()), 0f)
+                    it.setAlpha(sc, 1f).setVisibility(sc, at > 0f).apply()
                 }
                 else it.setAlpha(sc, at).setVisibility(sc, at > 0f).apply()
             }
@@ -165,8 +200,10 @@ class ShellCard(
     }
 
     fun close() {
-        handler.removeCallbacks(stepper)
+        unstep()
+        if (isUp) hides++
         isUp = false
+        if (inPlace) { inPlace = false; runCatching { onPlace(false) } }
         runCatching { surface?.release() }
         ShellLayer.remove(layer); layer = null; surface = null
     }

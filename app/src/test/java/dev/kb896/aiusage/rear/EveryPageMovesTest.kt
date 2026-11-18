@@ -89,7 +89,7 @@ class EveryPageMovesTest {
         // The classes that put a whole page on the back, each with the layer it makes.
         val pages = mapOf(
             "ShellPage.kt" to "the usage page and the notes",
-            "ShellCard.kt" to "the timer's, the call's and the music's page",
+            "ShellCard.kt" to "the navigation, timer, call and music pages",
             "ShellCharge.kt" to "the charging page",
             "ShellNotices.kt" to "the pop-up",
         )
@@ -101,16 +101,17 @@ class EveryPageMovesTest {
         }
         // The radius acts on a crop (the picture is a child's): the one rule sets both, and every page's placing uses it.
         val layers = src("ShellLayer.kt")
-        val rule = layers.substring(layers.indexOf("fun round(")).substringBefore("\n    }")
-        assertTrue(rule.contains("setCrop(") && rule.contains("roundCorners("))
-        assertTrue("the radius is on while it moves and off in its place", rule.contains("if (moving) pageCorner(rear) else 0f"))
+        val shape = src("RearShape.kt")
+        val rule = shape.substring(shape.indexOf("fun place(")).substringBefore("\n    }")
+        assertTrue(rule.contains("setCrop(") && rule.contains("roundCorners(") && rule.contains("cornerAt("))
         val made = layers.substring(layers.indexOf("fun create("))
         assertTrue("a layer made with a corner is given its crop", made.indexOf("setCrop(") in 0 until made.indexOf("live.add(layer)"))
-        for (file in pages.keys) assertTrue("$file rounds as it places", src(file).contains("ShellLayer.round("))
+        // Which radius, where: RearCornersTest composes every animation and holds the corners themselves.
+        for (file in pages.keys) assertTrue("$file places through the one rule", src(file).contains("RearShape.place("))
         // The notifications' pages are drawn in one picture: each is cut there when it is not in its place.
         assertTrue(src("NoticePagesArt.kt").contains("PageCorners.clear("))
         // The notes page given at its end, over black.
-        assertTrue(File(rear, "RearUserService.kt").readText().contains("PageCorners.cut("))
+        assertTrue(src("NoteTurnArt.kt").contains("PageCorners.cut("))
         // And the corner is the display's own.
         assertEquals(RearGeometry.PRO17.cornerPx.toFloat(), ShellLayer.pageCorner(RearGeometry.PRO17), 0f)
     }
@@ -119,19 +120,19 @@ class EveryPageMovesTest {
         // The live pages are made to slide.
         val service = File(rear, "RearUserService.kt").readText()
         val cards = Regex("""ShellCard\("(\w+)"[^\n]*""").findAll(service).map { it.groupValues[1] to it.value }.toList()
-        assertEquals(setOf("music", "timer", "call"), cards.map { it.first }.toSet())
+        assertEquals(setOf("music", "timer", "call", "navigation"), cards.map { it.first }.toSet())
         for ((name, line) in cards) assertTrue("$name slides", line.contains("slide = true") && line.contains("opaque = true"))
         // The charging page: sent away it leaves by its slide (PageSlide), and the fade is only the small one's over an app.
         val charge = src("ShellCharge.kt")
         val away = charge.substring(charge.indexOf("fun swipedAway()")).substringBefore("\n    }")
         assertTrue(away.contains("slide.leaveTo("))
         assertTrue("the fade is kept for the small picture over an app only", away.indexOf("cutAt =") in away.indexOf("if (compact)")..away.indexOf("} else {"))
-        assertTrue(charge.contains("slide.x(") && charge.contains("setPosition(sc, x, y)"))
+        assertTrue(charge.contains("slide.x(") && charge.contains("RearShape.place(tx, sc, rear, x, y)"))
         // It follows a finger out, as the others do.
         assertTrue(service.contains("charge.peek(it, edge)") && service.contains("charge.unpeek()"))
         // The usage page and the notes: ShellPage places by position, never by alpha.
         val page = src("ShellPage.kt")
-        assertTrue(page.contains("setPosition(sc") && !page.contains("setAlpha("))
+        assertTrue(page.contains("RearShape.place(it, sc") && !page.contains("setAlpha("))
     }
 
     @Test fun `the navigation's animations - what still changes at once, and why that is not seen moving`() {
@@ -140,8 +141,18 @@ class EveryPageMovesTest {
             RearNav.Anim.LIVE_IN, RearNav.Anim.LIVE_OUT, RearNav.Anim.USAGE_IN, RearNav.Anim.USAGE_OUT, RearNav.Anim.NOTES_IN, RearNav.Anim.NOTES_OUT,
             RearNav.Anim.NOTE_OLDER, RearNav.Anim.NOTE_NEWER, RearNav.Anim.NOTE_END_OLDER, RearNav.Anim.NOTE_END_NEWER,
             RearNav.Anim.SHADE_IN, RearNav.Anim.SHADE_OUT, RearNav.Anim.POP_IN, RearNav.Anim.POP_OUT,
+            // The face picker's: its own springs (FacePicker), the face shrinking into its card and growing back.
+            RearNav.Anim.PICKER_IN, RearNav.Anim.PICKER_OUT,
+            // A note standing at its place (Pin to location): a ShellPage up from the bottom edge and down to it, and the
+            // notes' own turn sideways (NoteTurn) along the ones standing.
+            RearNav.Anim.ARRIVAL_IN, RearNav.Anim.ARRIVAL_OUT, RearNav.Anim.ARRIVAL_OLDER, RearNav.Anim.ARRIVAL_NEWER,
+            RearNav.Anim.ARRIVAL_END_OLDER, RearNav.Anim.ARRIVAL_END_NEWER,
+            // A pop-up thrown out flies off the way the finger went; one that may not be thrown springs back (ShellNotices' banner).
+            RearNav.Anim.POP_THROWN_LEFT, RearNav.Anim.POP_THROWN_RIGHT, RearNav.Anim.POP_GIVES,
         )
-        val atOnce = RearNav.Anim.values().toSet() - slides
+        // The notes put in order: the carousel's springs (NoteCarousel; NoteCarouselTest holds that nothing jumps a frame).
+        val springs = setOf(RearNav.Anim.ARRANGE_IN, RearNav.Anim.ARRANGE_OUT, RearNav.Anim.NOTE_CARRIED, RearNav.Anim.NOTE_SWAP)
+        val atOnce = RearNav.Anim.values().toSet() - slides - springs
         // LIVE_SWAP: one live thing's page in another's place under the same finger-less moment (a timer ending under
         // music); CUT: the light going or coming, the back given to another app or taken back; NONE: nothing seen changes.
         assertEquals(setOf(RearNav.Anim.NONE, RearNav.Anim.LIVE_SWAP, RearNav.Anim.CUT), atOnce)

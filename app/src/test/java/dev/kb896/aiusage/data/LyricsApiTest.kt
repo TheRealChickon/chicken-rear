@@ -80,7 +80,11 @@ class LyricsApiTest {
         server.enqueue(
             MockResponse().setBody("""{"plainLyrics":"words words","syncedLyrics":null}"""),
         )
+        // The miss goes on to the search endpoint. Without an answer queued for it, that request waited out
+        // OkHttp's 10 s read timeout on every run.
+        server.enqueue(MockResponse().setBody("[]"))
         assertNull(api.fetch("Song", "Band", null, 0L))
+        assertEquals("the untimed sheet did not fall back to search", 2, server.requestCount)
     }
 
     @Test fun `an instrumental has nothing to show`() {

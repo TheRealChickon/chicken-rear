@@ -35,34 +35,45 @@ internal object ShellLayer {
 
     /**
      * Z among the container's children (the container itself is at the top of the rear's
-     * layer stack). The frame stays on top of everything of
-     * ours; the sheet goes under it, the sheet's blocker under the sheet, and a guest's
+     * layer stack). The display's shape lies over everything (Z_CORNERS, RearShape); the frame
+     * stays on top of everything else of ours; the sheet goes under it, the sheet's blocker under the sheet, and a guest's
      * arrival cover under them all. For touches the order between blocker and sheet does
      * not matter: the InputDispatcher checks every window above the touched one, so the
      * untrusted blocker occludes the windows below wherever it stands, and the trusted
      * sheet, frame and cover occlude nothing.
      */
-    const val Z_FRAME = Int.MAX_VALUE
+    /**
+     * THE DISPLAY'S SHAPE (RearShape): black outside the rear display's rounded corners, clear inside, over everything
+     * of ours, so nothing we draw is ever seen outside them. Alone at the very top.
+     */
+    const val Z_CORNERS = Int.MAX_VALUE
+    const val Z_FRAME = Int.MAX_VALUE - 1
     /** The dim by hand (RearDim): over everything of ours. With the frame's height: the two are never both up. */
-    const val Z_DIM = Int.MAX_VALUE
-    const val Z_SHEET = Int.MAX_VALUE - 1
+    const val Z_DIM = Int.MAX_VALUE - 1
+    const val Z_SHEET = Int.MAX_VALUE - 2
     /**
      * The control centre and the notifications' list over a guest (ShellOverlay): under the sheet, so
      * the back's code asked for over them (a switch, a notification) comes up on top and they wait
      * under it, still open. At one height with the sheet they stood in no set order.
      */
-    const val Z_PANES = Int.MAX_VALUE - 2
-    const val Z_BANNER = Int.MAX_VALUE - 3
+    const val Z_PANES = Int.MAX_VALUE - 3
+    /**
+     * The rim's light when the notifications are pulled with nothing waiting (ShellEmptyRim): in the notifications'
+     * own place (they and it are never up together), over every page of ours and the pop-up's place, under the dim by
+     * hand (which scales it like everything else) and the display's shape. Trusted: no touch.
+     */
+    const val Z_EMPTY_RIM = Z_PANES
+    const val Z_BANNER = Int.MAX_VALUE - 4
     /**
      * The charging animation over Xiaomi's screen or a guest (ShellCharge): under a banner, which
      * cuts it short (RearShow), over every app and the blocker. Trusted, so it takes no touch.
      */
-    const val Z_CHARGE = Int.MAX_VALUE - 4
+    const val Z_CHARGE = Int.MAX_VALUE - 5
     /**
      * The wake animation over Xiaomi's screen (ShellWake): under the charge and the banner, which
      * cut it short (RearShow). Trusted, so it takes no touch.
      */
-    const val Z_WAKE = Int.MAX_VALUE - 5
+    const val Z_WAKE = Int.MAX_VALUE - 6
     /**
      * The scene over Xiaomi's screen (ShellScene): the clip and its clock, one opaque layer. Under
      * the wake, the charge and the banner, which show over it. Trusted: no touch.
@@ -71,34 +82,36 @@ internal object ShellLayer {
      * A card over the scene (ShellCard: what is playing). It shares the pages' place: the shell takes a
      * card away before a page comes up, so the two are never there together.
      */
-    const val Z_CARD = Int.MAX_VALUE - 6
+    const val Z_CARD = Int.MAX_VALUE - 7
     /** The usage page (ShellUsage): the back's second page, over the scene it is swiped in from, under banners and lists. */
-    const val Z_USAGE = Int.MAX_VALUE - 6
+    const val Z_USAGE = Int.MAX_VALUE - 7
     /** What is playing, as the whole back (MusicFace): over the scene it stands in for, under the cards and the pages. */
     /** A call as the whole back (CallFace): over what is playing, under the cards and the pages. */
-    const val Z_LIVE = Int.MAX_VALUE - 7
-    const val Z_MUSIC = Int.MAX_VALUE - 8
+    const val Z_LIVE = Int.MAX_VALUE - 8
+    const val Z_MUSIC = Int.MAX_VALUE - 9
     /**
      * The charging page (ShellCharge), which stays for as long as the charger is in: over the scene it stands in
      * for, under what is playing, a call, a timer and the pages, which all show over it.
      */
-    const val Z_CHARGE_PAGE = Int.MAX_VALUE - 9
-    const val Z_SCENE = Int.MAX_VALUE - 10
-    const val Z_BLOCKER = Int.MAX_VALUE - 11
+    const val Z_CHARGE_PAGE = Int.MAX_VALUE - 10
+    const val Z_PICKER = Int.MAX_VALUE - 11
+    /** The face: the moon's scene (ShellScene) or a Xiaomi face (MamlHost), one at a time but for a cross-fade. */
+    const val Z_SCENE = Int.MAX_VALUE - 12
+    const val Z_BLOCKER = Int.MAX_VALUE - 13
     /**
      * The cover (RearCover): black over Xiaomi's rear screen whenever a face of ours is what the back
      * is for. Under the scene, the pages, banners and lists; over every app's window. It shares the
      * blocker's place: the blocker is a clear picture, and whichever of the two is on top shows the same.
      */
-    const val Z_BASE = Int.MAX_VALUE - 11
+    const val Z_BASE = Int.MAX_VALUE - 13
     /** A guest's arrival (GuestCover): over every app, under the sheet, so a pull meanwhile still opens over it. */
-    const val Z_COVER = Int.MAX_VALUE - 12
+    const val Z_COVER = Int.MAX_VALUE - 14
     /** The Back chevron over a guest on a private display (BackChevron): over its picture, under the cover. */
-    const val Z_CHEVRON = Int.MAX_VALUE - 13
+    const val Z_CHEVRON = Int.MAX_VALUE - 15
     /** The camera strip beside a guest kept right of the cameras (CameraStrip): over its picture, under the chevron. */
-    const val Z_STRIP = Int.MAX_VALUE - 14
+    const val Z_STRIP = Int.MAX_VALUE - 16
     /** The picture of a guest on a private display (PrivateDisplay): over every app, under the strip beside it. */
-    const val Z_APP = Int.MAX_VALUE - 15
+    const val Z_APP = Int.MAX_VALUE - 17
 
     /** How long [removeAll] waits for a capture holding layers ([lease]) before it lets them go anyway. */
     private const val LEASE_WAIT_MS = 200L
@@ -167,6 +180,8 @@ internal object ShellLayer {
             }
         } catch (e: Throwable) {
             runCatching { c.release() }
+            // The rear's layer stack is read again for the next layer (RearStack keeps it per process).
+            RearStack.forget()
             throw e
         }
         containers[layerStack] = c
@@ -219,17 +234,6 @@ internal object ShellLayer {
     /** The corner every page of the back is cut to: the rear display's own radius, in its pixels. */
     fun pageCorner(rear: RearGeometry): Float = rear.cornerPx.toFloat()
 
-    /**
-     * EVERY PAGE THAT IS NOT IN ITS PLACE HAS ALL FOUR OF THE DISPLAY'S CORNERS, whichever edge it comes from or leaves
-     * by, under a finger too: put into the transaction that places it. In its place its corners are the display's
-     * own, and the radius is taken off (a rounded layer cannot be handed to the display's own composer, which costs
-     * power for as long as it shows).
-     */
-    fun round(t: SurfaceControl.Transaction, layer: SurfaceControl, rear: RearGeometry, moving: Boolean) {
-        t.setCrop(layer, android.graphics.Rect(0, 0, rear.widthPx, rear.heightPx))
-        ShellOverlay.roundCorners(t, layer, if (moving) pageCorner(rear) else 0f)
-    }
-
     fun create(
         name: String, layerStack: Int, z: Int,
         // No default: the 17 Pro's 904x572 was one, and on a bigger rear it left a strip
@@ -258,14 +262,109 @@ internal object ShellLayer {
                 t.setLayer(layer, z).setVisibility(layer, visible).apply()
             }
             live.add(layer)
+            // The first layer of ours on the back brings the display's shape over everything (RearShape).
+            RearShape.made(layerStack)
             return layer
         } catch (e: Throwable) {
             // Off the container too, not only our handle dropped: a released child is still
             // its child, in SurfaceFlinger's tree, until the container goes.
             remove(layer)
+            RearStack.forget()
             throw e
         }
     }
+
+    fun lockPanelCanvas(surface: android.view.Surface): android.graphics.Canvas =
+        runCatching { surface.lockHardwareCanvas() }.getOrNull() ?: surface.lockCanvas(null)
+
+    /** A colour layer could not be had here ([createColour]); the caller falls back to a buffer of its display's size. */
+    class NoColour(why: String) : Exception(why)
+
+    /** Black, for [createColour]. */
+    val BLACK = floatArrayOf(0f, 0f, 0f)
+
+    /**
+     * Its existence makes [createColour] refuse, so the dims go back to a black buffer of their display's size: the
+     * way back on the phone without an install (`touch` it, then a new shell process). Read once per layer made.
+     */
+    const val COLOUR_OFF_FILE = "/data/local/tmp/chicken-rear-colour-off"
+
+    @Volatile private var colourSaid = false
+
+    /**
+     * A layer named [name] that is ONE COLOUR ([rgb], black unless said) and HAS NO BUFFER: SurfaceFlinger and the
+     * display hardware fill it without reading any memory (the hidden Builder.setColorLayer / setEffectLayer, the
+     * kind WindowManager's own dim behind a dialog is). It looks exactly like a buffer of that colour at the same
+     * alpha, and costs neither the buffer nor its reading at every refresh. Cropped to [width] x [height] from the
+     * top left, the footprint a buffer of that size had. Otherwise as [create]: a child of this process's
+     * container, [trusted] or not (fail closed: [Untrusted]), at [z], [alpha], shown when [visible], one transaction.
+     * Throws [NoColour] when this firmware has no such layer or it has been switched off ([COLOUR_OFF_FILE]);
+     * nothing is left behind either way.
+     */
+    fun createColour(
+        name: String, layerStack: Int, z: Int, width: Int, height: Int,
+        trusted: Boolean, visible: Boolean = true, alpha: Float = 1f, rgb: FloatArray = BLACK,
+    ): SurfaceControl {
+        check(!closed) { "the shell's layers are closed: the process is ending" }
+        if (runCatching { java.io.File(COLOUR_OFF_FILE).exists() }.getOrDefault(false)) throw NoColour("switched off by $COLOUR_OFF_FILE")
+        val kind = colourBuilder ?: throw NoColour("no setColorLayer or setEffectLayer on this firmware")
+        val paint = colourSetter
+        if (!colourUsable(kind.second, paint != null, rgb)) throw NoColour("no setColor on this firmware, and ${kind.first.name} gives no fill of its own")
+        // No buffer size: setColorLayer / setEffectLayer unset it themselves, and a size would make it a buffer layer.
+        val b = SurfaceControl.Builder().setName(name).setParent(container(layerStack))
+        try { kind.first.invoke(b) } catch (e: Throwable) {
+            val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+            throw NoColour("${kind.first.name}: ${cause.javaClass.simpleName}: ${cause.message}")
+        }
+        val layer = b.build()
+        try {
+            SurfaceControl.Transaction().use { t ->
+                if (trusted) trust(t, layer)?.let { throw Untrusted(it) }
+                // The colour is set whenever it can be, also where the builder fills black by itself.
+                val painted = paint != null && runCatching { paint.invoke(t, layer, rgb) }.isSuccess
+                if (!painted && !colourUsable(kind.second, false, rgb)) throw NoColour("setColor refused")
+                if (alpha < 1f) t.setAlpha(layer, alpha)
+                t.setCrop(layer, android.graphics.Rect(0, 0, width, height))
+                t.setLayer(layer, z).setVisibility(layer, visible).apply()
+            }
+            live.add(layer)
+            RearShape.made(layerStack)
+            if (!colourSaid) { colourSaid = true; android.util.Log.i("AiUsageRear", "layers: colour layers by ${kind.first.name}, no buffer (first: $name ${width}x$height)") }
+            return layer
+        } catch (e: Throwable) {
+            remove(layer)
+            RearStack.forget()
+            throw e
+        }
+    }
+
+    /** The builder's call that makes a colour layer, and whether it fills black by itself; null for none. Looked up once. */
+    private val colourBuilder: Pair<java.lang.reflect.Method, Boolean>? by lazy { colourBuilderCall(SurfaceControl.Builder::class.java) }
+    private val colourSetter: java.lang.reflect.Method? by lazy { colourCall(SurfaceControl.Transaction::class.java, SurfaceControl::class.java) }
+
+    /**
+     * On [builderClass], the call that makes a colour layer: setColorLayer (an effect layer filled black from the
+     * start) where there is one, else setEffectLayer (filled by nothing until it is given a colour); with whether it
+     * fills black by itself. Null for neither. A parameter so a test can hand it stand-ins.
+     */
+    fun colourBuilderCall(builderClass: Class<*>): Pair<java.lang.reflect.Method, Boolean>? {
+        fun find(n: String) = runCatching { builderClass.getMethod(n) }.getOrNull()
+        find("setColorLayer")?.let { return it to true }
+        find("setEffectLayer")?.let { return it to false }
+        return null
+    }
+
+    /** The hidden Transaction.setColor(layer, float[3]) on [txClass]; null for none. [layerClass] as in [trustedOverlayCall]. */
+    fun colourCall(txClass: Class<*>, layerClass: Class<*>): java.lang.reflect.Method? =
+        runCatching { txClass.getMethod("setColor", layerClass, FloatArray::class.java) }.getOrNull()
+
+    /**
+     * Whether a colour layer shows [rgb]: it can be given its colour ([canSetColour]), or it is black anyway
+     * ([fillsBlack]) and black is what is wanted. Otherwise it would show nothing, and a dim that does not dim is
+     * worse than a buffer. Pure.
+     */
+    fun colourUsable(fillsBlack: Boolean, canSetColour: Boolean, rgb: FloatArray): Boolean =
+        canSetColour || (fillsBlack && rgb.size == 3 && rgb.all { it == 0f })
 
     /**
      * Takes [layer] off the screen and lets it go: hidden, at alpha 0 and reparented to null

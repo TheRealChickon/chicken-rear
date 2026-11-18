@@ -60,6 +60,9 @@ object PinGl {
 
         fun swap() { if (surface != EGL14.EGL_NO_SURFACE) EGL14.eglSwapBuffers(display, surface) }
 
+        /** This context current on the calling thread again (another may have been made current there meanwhile). */
+        fun current(): Boolean = surface != EGL14.EGL_NO_SURFACE && EGL14.eglMakeCurrent(display, surface, surface, context)
+
         fun release() {
             if (display != EGL14.EGL_NO_DISPLAY) {
                 runCatching { EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT) }

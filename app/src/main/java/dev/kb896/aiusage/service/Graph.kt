@@ -14,6 +14,7 @@ import dev.kb896.aiusage.data.StatePayload
 import dev.kb896.aiusage.rear.DpiEdits
 import dev.kb896.aiusage.rear.ShizukuBridge
 import dev.kb896.aiusage.ui.PortalGuide
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 
 /**
@@ -33,8 +34,9 @@ class Graph private constructor(context: Context) {
     var chatAccountId: String?
         get() = chatPrefs.getString("account_id", null)
         set(value) { chatPrefs.edit().apply { if (value == null) remove("account_id") else putString("account_id", value) }.apply() }
+    private val oauth = OAuthClient(http)
     val repository = UsageRepository(
-        UsageApi(http), OAuthClient(http), store,
+        UsageApi(http), oauth, store,
         ProfileApi(http), ProfileStore(context.applicationContext),
         UsageHistory(context.applicationContext),
         chatApi = dev.kb896.aiusage.data.ChatGptUsageApi(http), chatOauth = chatOauth,
@@ -82,6 +84,27 @@ class Graph private constructor(context: Context) {
             PlaceNotes.forget(context.applicationContext, at)
             if (!b.calibrating) b.update(StatePayload.encode(repository.state.value, next, WeatherPoll.latest))
         }
+        b.onFaceChosen = { key, seq ->
+            val store = ConfigStore(context.applicationContext)
+            val config = store.load()
+            // An older choice than the one kept (the settings' tap after it) is not taken back.
+            if (seq > config.faceSeq || key != config.face && seq == 0L) {
+                val next = config.copy(face = key, faceSeq = maxOf(seq, config.faceSeq))
+                store.save(next)
+                if (!b.calibrating) b.update(StatePayload.encode(repository.state.value, next, WeatherPoll.latest))
+            }
+        }
+        b.onFacesChanged = { for (l in b.facesListeners) runCatching { l() } }
+        // The notes put in order on the back: kept on the list as it is now (a note pinned since stays in front).
+        b.onPinsOrdered = { order ->
+            val store = ConfigStore(context.applicationContext)
+            val config = store.load()
+            val next = config.copy(pins = dev.kb896.aiusage.data.PinOrder.applyPins(config.pins, order))
+            if (next != config) store.save(next)
+            if (!b.calibrating) b.update(StatePayload.encode(repository.state.value, next, WeatherPoll.latest))
+        }
+        // "Not now" on a note standing at its place: it waits for his next visit (place/Places).
+        b.onArrivalLater = { at -> dev.kb896.aiusage.place.Places.later(context.applicationContext, at) }
         b.onFacePicked = { file ->
             val store = ConfigStore(context.applicationContext)
             val next = store.load().copy(sceneLoop = file)
@@ -104,6 +127,67 @@ class Graph private constructor(context: Context) {
         }
     }
 
+    private val main = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
+
+    /**
+     * The browser sign-ins, the app's and not a screen's (auth/SignIns says why): the listener the browser comes
+     * back to, the exchange, the stored tokens, and what the settings row says of it. What it does is in the log
+     * under [SIGN_IN_TAG], a line a step, never with a code or a token.
+     */
+    val signIns: dev.kb896.aiusage.auth.SignIns = run {
+        val app = context.applicationContext
+        val chatGpt = dev.kb896.aiusage.auth.SignIns.Flow(
+            service = "ChatGPT",
+            // The two ports OpenAI's side accepts for this client, and its path: not ours to change.
+            ports = listOf(dev.kb896.aiusage.auth.ChatGptOAuth.PORT, dev.kb896.aiusage.auth.ChatGptOAuth.FALLBACK_PORT),
+            redirect = { port -> dev.kb896.aiusage.auth.ChatGptOAuth.redirectUri(port) },
+            stateMayGrow = true,
+            authorizeUrl = { challenge, redirectUri -> chatOauth.authorizeUrl(challenge, redirectUri) },
+            exchange = { code, challenge, redirectUri ->
+                val signed = chatOauth.exchange(code, challenge.verifier, redirectUri)
+                store.save(dev.kb896.aiusage.data.Account.CHATGPT, signed.record)
+                chatAccountId = signed.accountId
+            },
+        )
+        fun claude(account: dev.kb896.aiusage.data.Account) = dev.kb896.aiusage.auth.SignIns.Flow(
+            service = "Claude",
+            ports = listOf(CLAUDE_PORT),
+            redirect = { port -> "http://localhost:$port/callback" },
+            stateMayGrow = false,
+            authorizeUrl = { challenge, redirectUri -> oauth.authorizeUrl(challenge, redirectUri) },
+            exchange = { code, challenge, redirectUri -> store.save(account, oauth.exchange(code, challenge.verifier, redirectUri, challenge.state)) },
+        )
+        val prefs = app.getSharedPreferences("signin", Context.MODE_PRIVATE)
+        dev.kb896.aiusage.auth.SignIns(
+            flow = { account -> if (account == dev.kb896.aiusage.data.Account.CHATGPT) chatGpt else claude(account) },
+            // Asked for while the settings are in front (his tap, or the back's button having just started them),
+            // which is when Android lets an app start an activity; a new task, since this is not an activity.
+            openBrowser = { url ->
+                try {
+                    app.startActivity(
+                        android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                    true
+                } catch (_: android.content.ActivityNotFoundException) { false }
+            },
+            // Fresh figures at once, past the repository's floor between fetches: someone has just signed in and is looking.
+            signedIn = {
+                main.launch {
+                    runCatching { repository.refresh(force = true) }
+                    bridge.update(payload(ConfigStore(app).load()))
+                }
+            },
+            notes = object : dev.kb896.aiusage.auth.SignIns.Notes {
+                override fun get(key: String): String? = prefs.getString(key, null)
+                override fun put(key: String, value: String?) = prefs.edit().apply { if (value == null) remove(key) else putString(key, value) }.apply()
+            },
+            appName = runCatching { app.applicationInfo.loadLabel(app.packageManager).toString() }.getOrDefault("Chicken Rear"),
+            backLink = dev.kb896.aiusage.ui.SignInReturnActivity.link(app),
+            log = { line -> android.util.Log.i(SIGN_IN_TAG, line) },
+        )
+    }
+
     /**
      * Everything the back is drawn from, as it stands: the usage this process holds, [config],
      * the last weather. One place builds it, so what is added to the payload reaches every push.
@@ -112,6 +196,10 @@ class Graph private constructor(context: Context) {
         StatePayload.encode(repository.state.value, config, WeatherPoll.latest)
 
     companion object {
+        /** `logcat -d -s AiUsageSignIn:I` is a sign-in from the tap to its end. */
+        const val SIGN_IN_TAG = "AiUsageSignIn"
+        /** Claude's redirect: `http://localhost:54545/callback`. */
+        private const val CLAUDE_PORT = 54545
         @Volatile private var instance: Graph? = null
         fun of(context: Context): Graph =
             instance ?: synchronized(this) { instance ?: Graph(context).also { instance = it } }

@@ -58,11 +58,11 @@ import java.io.File
 enum class PreviewMode(val label: String) {
     IDLE("Idle"), WAKE("Wake"), CHARGING("Charging"), ALERT("Message"),
     // The back's other pages, each drawn here by the back's own painter, with made-up data where it needs any.
-    MUSIC("Music"), TIMER("Timer"), CALL("Call"), USAGE("Usage"), NOTES("Notes"),
+    MUSIC("Music"), NAVIGATION("Navigation"), TIMER("Timer"), CALL("Call"), USAGE("Usage"), NOTES("Notes"),
 }
 
 /** The preview's live pages: on the back they sit between home and the usage page (rear/PageRow). */
-val PREVIEW_LIVE = setOf(PreviewMode.MUSIC, PreviewMode.TIMER, PreviewMode.CALL, PreviewMode.CHARGING)
+val PREVIEW_LIVE = setOf(PreviewMode.MUSIC, PreviewMode.NAVIGATION, PreviewMode.TIMER, PreviewMode.CALL, PreviewMode.CHARGING)
 
 /**
  * Where a swipe on the preview leads, as the same swipe does on the back. Across: one step along the row
@@ -107,10 +107,23 @@ data class PreviewState(
     val xiaomi: Bitmap?,
     /** The usage page as the back would show it now (the accounts'); null with nobody signed in (made-up usage then). */
     val usage: dev.kb896.aiusage.rear.UsageFace.Model? = null,
-    /** The newest pinned note, or null for none. */
+    /** The switch "Five-hour limits", for the made-up usage too. */
+    val usageFiveHours: Boolean = false,
+    /** Which of OpenAI's Dots stands in ChatGPT's vessel (PanelConfig.chatGptDot). */
+    val chatGptDot: String = "blue_beret",
+    /**
+     * The first pinned note in his order (the newest unless he put them in order on the back) that the back's notes page
+     * lists (a note for a place only while the phone is there: place/Here.onBack), or null for none.
+     */
     val note: String? = null,
+    /** That note's picture, if it is a picture's (its file's name, data/PinImage): the preview shows it as the back does. */
+    val noteImage: String? = null,
     /** How much of its numbers the back's picture keeps (rear/RearLight.gain): its brightness, as the settings have it for a lit room. */
     val gain: Float = 1f,
+    /** "Fluid size" (PanelConfig.musicFloor): the music page's body never under this share of its floor's range (MusicBody.floorPx). */
+    val musicFloor: Int = dev.kb896.aiusage.data.PanelConfig.MUSIC_FLOOR,
+    /** "Message style" (PanelConfig.messageStyle): the message shown as the full page or as the message island. */
+    val messageStyle: dev.kb896.aiusage.data.MessageStyle = dev.kb896.aiusage.data.MessageStyle.FULL,
 )
 
 private const val REAR_W = 976f
@@ -187,11 +200,15 @@ fun RearPreview(state: PreviewState, mode: PreviewMode, modifier: Modifier = Mod
                 }
             }
 
-            // The scene: the wake clip once, then the loop under the clock.
-            val wake = state.wakePath?.takeIf { state.sceneOn && File(it).canRead() }
-            val loop = state.loopPath?.takeIf { state.sceneOn && File(it).canRead() }
+            // The scene: the wake clip once, then the loop under the clock. The dust face is a key, not a file: drawn by
+            // the same engine (its GLES 3 part), with no wake clip before it, as on the back.
+            val dust = state.loopPath == dev.kb896.aiusage.rear.FaceCatalog.DUST
+            val wake = state.wakePath?.takeIf { state.sceneOn && !dust && File(it).canRead() }
+            val loop = state.loopPath?.takeIf { state.sceneOn && (dust || File(it).canRead()) }
+            // The message island's tint of the live face, as on the back: the preview's engine reads it at each picture.
+            val veil = remember { dev.kb896.aiusage.rear.NoticeVeil() }
             if (wake != null || loop != null) {
-                ScenePlayer(wake, loop, withWake = mode == PreviewMode.WAKE, state.look, state.depth, Modifier.fillMaxSize()) {
+                ScenePlayer(wake, loop, withWake = mode == PreviewMode.WAKE, state.look, state.depth, Modifier.fillMaxSize(), veil) {
                     if (mode == PreviewMode.WAKE) ended()
                 }
             } else {
@@ -199,7 +216,10 @@ fun RearPreview(state: PreviewState, mode: PreviewMode, modifier: Modifier = Mod
             }
 
             if (mode == PreviewMode.CHARGING) ChargeShow(state, onEnded = { ended() })
-            if (mode == PreviewMode.ALERT) Banner(state, onEnded = { ended() })
+            if (mode == PreviewMode.ALERT) {
+                if (state.messageStyle == dev.kb896.aiusage.data.MessageStyle.FULL) Banner(state, onEnded = { ended() })
+                else IslandBanner(state, veil, faceTints = loop != null, onEnded = { ended() })
+            }
             if (mode in LIVE_PAGES) LivePage(mode, state)
 
             // The back's brightness, as the dim layer puts it on there: over the picture and every page.
@@ -211,7 +231,7 @@ fun RearPreview(state: PreviewState, mode: PreviewMode, modifier: Modifier = Mod
     }
 }
 
-private val LIVE_PAGES = setOf(PreviewMode.MUSIC, PreviewMode.TIMER, PreviewMode.CALL, PreviewMode.USAGE, PreviewMode.NOTES)
+private val LIVE_PAGES = setOf(PreviewMode.MUSIC, PreviewMode.NAVIGATION, PreviewMode.TIMER, PreviewMode.CALL, PreviewMode.USAGE, PreviewMode.NOTES)
 
 /**
  * One of the back's pages, drawn frame by frame by the back's own painter (MusicFace, TimerFace, CallFace,
@@ -227,17 +247,33 @@ private fun LivePage(mode: PreviewMode, state: PreviewState) {
     var flippedAt by remember(mode) { mutableLongStateOf(0L) }
     var on by remember(mode) { mutableStateOf(true) }          // playing, running, ringing
     var speaker by remember(mode) { mutableStateOf(false) }
-    val glow = remember(mode) { dev.kb896.aiusage.rear.MusicFace.Glow() }
+    // The page's own body, with no sound told to it: its made-up spectrum moves it calmly, as on the back with no level.
+    val body = remember(mode) { dev.kb896.aiusage.rear.MusicFace.Body() }
     // A player that is on this phone, for the music page's cover place (a made-up track has no cover).
     val player: Bitmap? = remember {
         listOf("com.spotify.music", "com.google.android.apps.youtube.music", "com.apple.android.music", "com.miui.player")
             .firstNotNullOfOrNull { pkg -> runCatching { context.packageManager.getApplicationIcon(pkg).toBitmap(256, 256, Bitmap.Config.ARGB_8888) }.getOrNull() }
     }
+    val navigationIcon = remember {
+        runCatching { context.packageManager.getApplicationIcon("com.google.android.apps.maps").toBitmap(128, 128, Bitmap.Config.ARGB_8888) }.getOrNull()
+    }
+    val navigation = remember(navigationIcon) { dev.kb896.aiusage.rear.NavFace.demo(appIcon = navigationIcon) }
     val palette = remember(player) { dev.kb896.aiusage.rear.MusicFace.palette(dev.kb896.aiusage.rear.MusicFace.seed(player)) }
     val timerArt = remember { runCatching { dev.kb896.aiusage.rear.XiaomiArt.load("timer", dev.kb896.aiusage.rear.TimerFace.ART) }.getOrDefault(emptyMap()) }
     val callArt = remember { runCatching { dev.kb896.aiusage.rear.XiaomiArt.load("phone", dev.kb896.aiusage.rear.CallFace.ART) }.getOrDefault(emptyMap()) }
     val timerLeft = remember(mode) { longArrayOf(272_000L, 0L) }      // what is left, and when it last set off (uptime)
-    LaunchedEffect(mode) { while (true) withFrameMillis { frame = it } }
+    LaunchedEffect(mode) {
+        if (mode != PreviewMode.NAVIGATION) while (true) withFrameMillis { frame = it }
+    }
+    // OpenAI's Dots character, as the back has it in ChatGPT's vessel (rear/dots), only while the usage page is shown here.
+    val dotNow = androidx.compose.runtime.rememberUpdatedState(state.chatGptDot)
+    val dots = remember(mode == PreviewMode.USAGE) { if (mode == PreviewMode.USAGE) dev.kb896.aiusage.rear.dots.DotsLink.preview { dotNow.value } else null }
+    androidx.compose.runtime.DisposableEffect(dots) { onDispose { dots?.second?.invoke() } }
+    val appIcons = remember(context, mode) { HashMap<String, Bitmap?>() }
+    // The first note's picture, if it is a picture's, read off the main thread (its place empty until then).
+    val notePicture by androidx.compose.runtime.produceState<Bitmap?>(null, state.noteImage) {
+        value = state.noteImage?.let { n -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { dev.kb896.aiusage.data.PinImageFiles.read(context, n) } }
+    }
     Canvas(
         Modifier.fillMaxSize().pointerInput(mode) {
             detectTapGestures { at ->
@@ -266,10 +302,15 @@ private fun LivePage(mode: PreviewMode, state: PreviewState) {
             drawIntoCanvas { cv ->
                 val c = cv.nativeCanvas
                 when (mode) {
-                    PreviewMode.MUSIC -> dev.kb896.aiusage.rear.MusicFace.draw(
-                        c, REAR_W, REAR_H, "A song, as it plays", "The artist", on, null, palette, glow.at(up, on),
-                        sinceFlip = if (flippedAt == 0L) Long.MAX_VALUE else up - flippedAt, playerIcon = player,
-                    )
+                    PreviewMode.MUSIC -> {
+                        // The setting as it is now: a change glides here as it does on the back.
+                        body.floor = state.musicFloor
+                        dev.kb896.aiusage.rear.MusicFace.draw(
+                            c, REAR_W, REAR_H, "A song, as it plays", "The artist", on, null, palette, body.step(up, on),
+                            sinceFlip = if (flippedAt == 0L) Long.MAX_VALUE else up - flippedAt, playerIcon = player,
+                        )
+                    }
+                    PreviewMode.NAVIGATION -> dev.kb896.aiusage.rear.NavFace.draw(c, REAR_W, REAR_H, navigation)
                     PreviewMode.TIMER -> {
                         val left = if (on) (timerLeft[0] - (up - maxOf(timerLeft[1], began))).coerceAtLeast(0L) else timerLeft[0]
                         dev.kb896.aiusage.rear.TimerFace.draw(c, REAR_W, REAR_H, dev.kb896.aiusage.rear.TimerFace.Model("preview", "", "Timer", wall + left, left, 600_000L, paused = !on, over = false), wall, timerArt)
@@ -279,8 +320,13 @@ private fun LivePage(mode: PreviewMode, state: PreviewState) {
                         dev.kb896.aiusage.rear.CallFace.Model("preview", "", "A caller", "Incoming call", ringing = on, since = if (on) 0L else wall - (up - flippedAt), speaker = speaker, headset = false),
                         wall, callArt, sinceChange = if (flippedAt == 0L) Long.MAX_VALUE else up - flippedAt, ringAt = wall - (up - began),
                     )
-                    PreviewMode.USAGE -> dev.kb896.aiusage.rear.UsageFace.draw(c, REAR_W, REAR_H, state.usage ?: dev.kb896.aiusage.rear.UsageFace.demo(wall), wall, up - began, timerArt[dev.kb896.aiusage.rear.TimerFace.ART_WATER])
-                    PreviewMode.NOTES -> dev.kb896.aiusage.rear.PinFace.draw(c, REAR_W, REAR_H, state.note.orEmpty(), "", 0, if (state.note == null) 0 else 1)
+                    PreviewMode.USAGE -> dev.kb896.aiusage.rear.UsageFace.draw(
+                        c, REAR_W, REAR_H, state.usage ?: dev.kb896.aiusage.rear.UsageFace.demo(wall, state.usageFiveHours), wall, up - began, timerArt[dev.kb896.aiusage.rear.TimerFace.ART_WATER],
+                        icon = { pkg -> appIcons.getOrPut(pkg) { runCatching { context.packageManager.getApplicationIcon(pkg).toBitmap(96, 96, Bitmap.Config.ARGB_8888) }.getOrNull() } },
+                        dots = dots?.first,
+                    )
+                    PreviewMode.NOTES -> dev.kb896.aiusage.rear.PinFace.draw(c, REAR_W, REAR_H, state.note.orEmpty(), "", 0, if (state.note == null) 0 else 1,
+                        image = state.noteImage, picture = notePicture)
                     else -> Unit
                 }
             }
@@ -309,10 +355,11 @@ private fun DrawScope.lenses() {
 @Composable
 private fun ScenePlayer(
     wake: String?, loop: String?, withWake: Boolean, look: SceneFace.Look, depth: Boolean,
-    modifier: Modifier, onWakeOver: () -> Unit,
+    modifier: Modifier, veil: dev.kb896.aiusage.rear.NoticeVeil? = null, onWakeOver: () -> Unit,
 ) {
     val over by rememberUpdatedState(onWakeOver)
     val holder = remember { EngineHolder() }
+    holder.veil = veil
     DisposableEffect(Unit) { onDispose { holder.release() } }
     holder.look(look, depth)
     LaunchedEffect(wake, loop, withWake) { holder.play(if (withWake) wake else null, loop, withWake) { over() } }
@@ -343,6 +390,8 @@ private class EngineHolder {
     private var onWakeOver: () -> Unit = {}
     private var look = SceneFace.Look()
     private var depth = true
+    /** The message island's tint (the preview's island): given to each engine made. */
+    var veil: dev.kb896.aiusage.rear.NoticeVeil? = null
     private var run: Run? = null
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
 
@@ -377,12 +426,12 @@ private class EngineHolder {
         playingLoop = l
         lateinit var mine: Run
         mine = Run(Thread({
-            val engine = SceneEngine(s, width, height, width * LENS_W / REAR_W).also { it.look = look; it.depth = depth; it.moonClip = loop?.endsWith(dev.kb896.aiusage.rear.ShellScene.MOON_CLIP) == true; it.weather = dev.kb896.aiusage.service.WeatherPoll.latest?.condition }
+            val engine = SceneEngine(s, width, height, width * LENS_W / REAR_W, gles3 = l == dev.kb896.aiusage.rear.FaceCatalog.DUST).also { it.look = look; it.depth = depth; it.moonClip = loop?.endsWith(dev.kb896.aiusage.rear.ShellScene.MOON_CLIP) == true; it.weather = dev.kb896.aiusage.service.WeatherPoll.latest?.condition; it.veil = veil }
             mine.engine = engine
             runCatching {
                 engine.play(w, l, object : SceneEngine.Control {
                     override val why = "the preview moved on"
-                    override fun strength(): Float? = if (mine.stop) null else 1f
+                    override fun strength(): Float = if (mine.stop) SceneEngine.STOP else 1f
                     override fun onLoop() { main.post { if (run === mine) onWakeOver() } }
                 })
             }.onSuccess { why -> if (why == "played") main.post { if (run === mine) onWakeOver() } }
@@ -464,6 +513,49 @@ private fun Banner(state: PreviewState, onEnded: () -> Unit) {
         }
     }
 }
+
+/**
+ * THE MESSAGE ISLAND as the back draws it (rear/IslandArt, rear/MessageIsland), over the preview's live face: the pill drops
+ * in with Xiaomi's light round it, grows into the page, holds a little shorter than on the back, folds back and sinks away.
+ * "Island · Tint": the preview's own engine takes the app's colour under the page ([veil]), as the back's does.
+ */
+@Composable
+private fun IslandBanner(state: PreviewState, veil: dev.kb896.aiusage.rear.NoticeVeil, faceTints: Boolean, onEnded: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val from = remember { SAMPLE_FROM.firstOrNull { pkg -> runCatching { context.packageManager.getApplicationInfo(pkg, 0) }.isSuccess } }
+    val icon: Bitmap? = remember {
+        from?.let { runCatching { context.packageManager.getApplicationIcon(it).toBitmap(96, 96, Bitmap.Config.ARGB_8888) }.getOrNull() }
+    }
+    val color = remember { from?.let { dev.kb896.aiusage.service.BackNotices.iconColor(context, it) } ?: 0 }
+    val art = remember { dev.kb896.aiusage.rear.IslandArt() }
+    val frame = remember { dev.kb896.aiusage.rear.MessageIsland.Frame() }
+    var startedAt by remember { mutableLongStateOf(0L) }
+    var now by remember { mutableLongStateOf(0L) }
+    val total = dev.kb896.aiusage.rear.MessageIsland.total(ISLAND_HOLD_MS)
+    LaunchedEffect(state.messageStyle, state.noticeText) {
+        val look = when {
+            state.messageStyle == dev.kb896.aiusage.data.MessageStyle.SWEEP -> dev.kb896.aiusage.rear.MessageIsland.Look.SWEEP
+            faceTints -> dev.kb896.aiusage.rear.MessageIsland.Look.TINT_OVER_FACE
+            else -> dev.kb896.aiusage.rear.MessageIsland.Look.TINT_OWN
+        }
+        if (state.noticeText) art.set("Lucy", "I'm at the station", color, icon, look) else art.set("", "New notification", color, icon, look)
+        val start = android.os.SystemClock.uptimeMillis()
+        veil.begin(color, start, art.pillW, ISLAND_HOLD_MS, tints = look === dev.kb896.aiusage.rear.MessageIsland.Look.TINT_OVER_FACE)
+        startedAt = start; now = start
+        while (now - start < total) withFrameMillis { now = android.os.SystemClock.uptimeMillis() }
+        veil.end(android.os.SystemClock.uptimeMillis())
+        onEnded()
+    }
+    DisposableEffect(Unit) { onDispose { veil.end(android.os.SystemClock.uptimeMillis()) } }
+    Canvas(Modifier.fillMaxSize()) {
+        if (startedAt == 0L) return@Canvas
+        dev.kb896.aiusage.rear.MessageIsland.at((now - startedAt).toFloat(), art.pillW, frame, ISLAND_HOLD_MS.toFloat(), sweeps = art.look.sweep)
+        drawIntoCanvas { c -> art.draw(c.nativeCanvas, size.width, size.height, frame) }
+    }
+}
+
+/** The island's page held in the preview: shorter than on the back, so the whole of it is seen in a few seconds. */
+private const val ISLAND_HOLD_MS = 2_500L
 
 /** The preview's message is shown as from the first of these that is installed. */
 private val SAMPLE_FROM = listOf("com.whatsapp", "org.telegram.messenger")

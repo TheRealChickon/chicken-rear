@@ -302,10 +302,12 @@ object MascotLive {
 
         /**
          * At [now], for [used] (each limit's level, the five hours first) and [mood]; [opened]: when the
-         * page came up (the same clock, ms).
+         * page came up (the same clock, ms). A drop in any of [used] is a window starting again.
          */
-        fun at(used: List<Float>, mood: String, now: Long, opened: Long): Pose {
-            val want = matters(used)
+        fun at(used: List<Float>, mood: String, now: Long, opened: Long, vessels: List<Float>? = null): Pose {
+            // [vessels]: each meter's highest level, in the meters' order, where the page has them so (one meter
+            // holding the week and the models, with no five hours beside it): the one that matters is among those.
+            val want = matters(vessels ?: used)
             if (at < 0) {
                 at = want; from = want; spot = 0.30f + 0.40f * chance(0); cheered = false
                 start(Doing.LAND, opened, LAND_MS)

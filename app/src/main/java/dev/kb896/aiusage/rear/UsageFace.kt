@@ -10,55 +10,36 @@ import dev.kb896.aiusage.data.DashboardState
 import dev.kb896.aiusage.data.Health
 import dev.kb896.aiusage.data.MascotMood
 import dev.kb896.aiusage.data.WindowKind
+import dev.kb896.aiusage.rear.dots.DotsActor
+import dev.kb896.aiusage.rear.dots.DotsFeed
 
 /**
- * The usage page on the back: one swipe left of the moon. The whole panel, in the manner of the
- * back's other live pages (the timer's fluid, Xiaomi's own rear pages), not a table.
- *
- * THE RULES IT WAS MADE BY, each kept:
- * - no title, name, plan or mark; fluid, the full panel, in keeping with the other pages.
- * - calm; no percent and no usage figure: the fill says how full; the only figures are when each
- *   window starts again.
- * - no rings round the lenses; the mascot acts on the data; one weekly vessel with a level per
- *   colour; no words at all.
- * - the calm is the fluid's; the mascot is
- *   alive (rear/MascotLive): he blinks, looks about, walks his meter on his legs, hops with a
- *   squash, and plays upstream's cycles (at work, the flag, asleep, confetti) with rests between.
- *
- * WHAT IS ON IT, per account (one account the whole panel right of the lenses, two a half each):
- * - THE FIVE HOURS: a tall vessel with the back's fluid (rear/Fluid) as high as they are used.
- * - THE WEEK: one vessel with TWO LEVELS (or more) in it: all models in the neutral fluid
- *   ([ALL]), and each model that has a week of its own in its own colour ([MODELS]: Fable in a
- *   warm amber, since the mascot's own terracotta would hide the mascot in front of it). They are
- *   parts of different limits, so they are not stacked: the higher stands behind, the lower in
- *   front, each with its own surface.
- * - in each vessel's head, in the timer page's type: WHEN IT STARTS AGAIN ("1h37m", "2d14h"); a
- *   model whose week starts again at another time has its own time under it, in its colour.
- * - THE CLAUDE MASCOT (upstream's figure and cycles, in Claude's own colour), ALIVE and acting on
- *   the data (rear/MascotLive.Actor): he stands on the fluid of whichever vessel matters now (the
- *   one nearest its limit) and is never frozen: awake he breathes, blinks, looks about, shifts his
- *   weight and every few seconds walks along the vessel; at work he lifts his dumbbells, near the
- *   limit he waves the flag and paces, spent he sleeps; he hops to another vessel when that one
- *   comes to matter more, and throws confetti when a window starts again.
- * No rings, no title, no names, no percent, no clock, no battery. True black. BILLING is not on
- * it: what the app fetches has no billing figure yet.
- *
- * With nobody signed in: one button, "Sign in", which opens the sign-in on the front ([onSignIn]).
- *
- * [model], [until], [tanks] are plain, so a test holds them. In rear pixels of a 976x596
- * panel; to scale on any other.
+ * The rear usage page. Each account shows its weekly usage by default, with an optional
+ * five-hour vessel. Model-specific limits share the weekly vessel at their own levels.
+ * Reset times appear above the fluid. Claude's mascot follows the fullest vessel.
+ * ChatGPT uses its installed app icon, with the optional Dots animation when available.
+ * With no connected accounts, a single button opens sign-in on the front screen.
  */
 object UsageFace {
 
     /** One limit: how much of it is used (0..1), how long until it resets (in words, "" for none); [model]: a model's own week, by its name. */
-    data class Limit(val name: String, val used: Float, val until: String, val model: Boolean = false)
+    data class Limit(
+        val name: String, val used: Float, val until: String, val model: Boolean = false,
+        /** The five hours (shown only with the switch "Five-hour limits"). */
+        val five: Boolean = false,
+    )
 
     /** One account: its five hours first, then the week of all models, then each model's own week. [mood]: what its mascot has earned (MascotMood). */
     data class Column(
         val name: String, val limits: List<Limit>, val note: String = "", val mood: String = MascotMood.SLEEP,
-        /** The app the account is of, by its package (Account.app): where accounts of two apps stand together, each has its app's real icon. */
+        /** The app the account is of, by its package (Account.app): used to select the account's artwork. */
         val app: String = "",
-    )
+    ) {
+        /** The five hours stand in a vessel of their own, beside the week. */
+        val split: Boolean get() = limits.size > 1 && limits[0].five
+        /** ChatGPT's account: uses the artwork available from the installed ChatGPT app. */
+        val chatGpt: Boolean get() = app == Account.CHATGPT.app
+    }
 
     /** The whole page: its accounts, or [empty] alone when nobody is signed in. [demo] marks made-up figures. */
     data class Model(val columns: List<Column>, val empty: String = "", val demo: Boolean = false)
@@ -75,18 +56,24 @@ object UsageFace {
         }
     }
 
-    /** The page for [state] at [now]. [names]: an account's own name where the user gave it one (kept, not shown). */
-    fun model(state: DashboardState, now: Long, names: (Account) -> String? = { null }): Model {
+    /**
+     * The page for [state] at [now]. [names]: an account's custom name (kept for the model, not drawn).
+     * [fiveHours]: the switch "Five-hour limits"; off (the default), an account is its week alone. An account that
+     * has no week at all (a plan with five hours only) shows its five hours all the same, rather than an empty
+     * vessel that says it is waiting.
+     */
+    fun model(state: DashboardState, now: Long, names: (Account) -> String? = { null }, fiveHours: Boolean = false): Model {
         val columns = state.statuses.filter { it.connected }.take(2).map { s ->
             val name = names(s.account)?.takeIf { it.isNotBlank() } ?: s.account.label.lowercase().replaceFirstChar { it.uppercase() }
             val windows = s.snapshot?.windows.orEmpty()
-            val limits = listOfNotNull(
-                windows.firstOrNull { it.kind == WindowKind.SESSION }?.let { Limit("5 h", it.utilization.coerceIn(0f, 1f), until(it.resetsAt, now)) },
+            val session = windows.firstOrNull { it.kind == WindowKind.SESSION }?.let { Limit("5 h", it.utilization.coerceIn(0f, 1f), until(it.resetsAt, now), five = true) }
+            val weeks = listOfNotNull(
                 windows.firstOrNull { it.kind == WindowKind.WEEKLY_ALL }?.let { Limit("Week", it.utilization.coerceIn(0f, 1f), until(it.resetsAt, now)) },
             ) + windows.filter { it.kind == WindowKind.WEEKLY_SCOPED }.map {
                 // A model's own week ("Fable 7d"): known by the model alone, and shown by its colour.
                 Limit(it.label.substringBefore(' ').ifBlank { "Model" }, it.utilization.coerceIn(0f, 1f), until(it.resetsAt, now), model = true)
             }
+            val limits = if (fiveHours || weeks.isEmpty()) listOfNotNull(session) + weeks else weeks
             val note = when {
                 s.health == Health.AUTH -> "Sign in again in the app"
                 limits.isEmpty() && s.health == Health.ERROR -> "No answer yet"
@@ -99,11 +86,11 @@ object UsageFace {
     }
 
     /** Made-up figures, for a look at the page with nobody signed in (debug, or the settings' demo mode). */
-    fun demo(now: Long): Model = Model(
+    fun demo(now: Long, fiveHours: Boolean = false): Model = Model(
         listOf(
-            Column("Personal", listOf(Limit("5 h", 0.42f, until(now + 134 * 60_000L, now)), Limit("Week", 0.71f, until(now + (3 * 24 + 4) * 3_600_000L, now)), Limit("Fable", 0.18f, until(now + (3 * 24 + 4) * 3_600_000L, now), model = true)), mood = MascotMood.WALK),
-            Column("Work", listOf(Limit("5 h", 0.08f, until(now + 281 * 60_000L, now)), Limit("Week", 0.23f, until(now + (5 * 24 + 11) * 3_600_000L, now))), mood = MascotMood.SLEEP),
-        ),
+            Column("Personal", listOf(Limit("5 h", 0.42f, until(now + 134 * 60_000L, now), five = true), Limit("Week", 0.71f, until(now + (3 * 24 + 4) * 3_600_000L, now)), Limit("Fable", 0.18f, until(now + (3 * 24 + 4) * 3_600_000L, now), model = true)), mood = MascotMood.WALK),
+            Column("Work", listOf(Limit("5 h", 0.08f, until(now + 281 * 60_000L, now), five = true), Limit("Week", 0.23f, until(now + (5 * 24 + 11) * 3_600_000L, now))), mood = MascotMood.SLEEP),
+        ).map { if (fiveHours) it else it.copy(limits = it.limits.filter { l -> !l.five }) },
         demo = true,
     )
 
@@ -114,19 +101,28 @@ object UsageFace {
     /** A model's own week, by the order the models come in: Fable's warm amber first; no purple among them. */
     val MODELS = intArrayOf(0xFFF2A93B.toInt(), 0xFF6FC3B2.toInt(), 0xFFE58B8B.toInt())
 
-    /** The fluid's colour for limit [index] of an account (0 the five hours, 1 the week, 2 and up the models). */
+    /** The fluid's colour for limit [index] of an account that has its five hours (0 the five hours, 1 the week, 2 and up the models). */
     fun color(index: Int): Int = if (index <= 1) ALL else MODELS[(index - 2) % MODELS.size]
+
+    /** The fluid's colour for limit [i] of [col], whichever limits it has: the neutral for its own windows, each model its colour in turn. */
+    fun color(col: Column, i: Int): Int {
+        if (!col.limits[i].model) return ALL
+        return MODELS[col.limits.take(i).count { it.model } % MODELS.size]
+    }
 
     // ---- where everything stands ----
 
     /**
-     * One vessel: whose (account), [which] of its two (0 the five hours, 1 the week), the limits
+     * One vessel: whose (account), [which] of its two (0 the five hours, 1 the week, its levels), the limits
      * that stand in it (their indices in the account's list), its shape, and its head: the top of
      * the vessel, where its time stands.
      */
     class Tank(val account: Int, val which: Int, val limits: List<Int>, val vessel: RectF, val reading: RectF)
 
-    /** The vessels of [m] on a 976x596 panel: per account the five hours, wider, and the week. */
+    /**
+     * The vessels of [m] on a 976x596 panel: per account ONE, the week with its models' levels (one account the whole
+     * panel right of the lenses, two a half each); with the five hours on, the five hours, wider, beside the week.
+     */
     fun tanks(m: Model): List<Tank> {
         val out = ArrayList<Tank>()
         val n = m.columns.size
@@ -135,11 +131,11 @@ object UsageFace {
         for ((a, col) in m.columns.withIndex()) {
             if (col.limits.isEmpty()) continue
             val left = LEFT + a * (share + ACCOUNT_GAP)
-            val week = (1 until col.limits.size).toList()
-            if (week.isEmpty()) {
-                out += Tank(a, 0, listOf(0), RectF(left, TOP, left + share, BOTTOM), RectF(left, TOP, left + share, TOP + HEAD))
+            if (!col.split) {
+                out += Tank(a, if (col.limits[0].five) 0 else 1, col.limits.indices.toList(), RectF(left, TOP, left + share, BOTTOM), RectF(left, TOP, left + share, TOP + HEAD))
                 continue
             }
+            val week = (1 until col.limits.size).toList()
             val w0 = (share - TANK_GAP) * 0.56f
             out += Tank(a, 0, listOf(0), RectF(left, TOP, left + w0, BOTTOM), RectF(left, TOP, left + w0, TOP + HEAD))
             out += Tank(a, 1, week, RectF(left + w0 + TANK_GAP, TOP, left + share, BOTTOM), RectF(left + w0 + TANK_GAP, TOP, left + share, TOP + HEAD))
@@ -150,6 +146,22 @@ object UsageFace {
     /** The mascot's height in a vessel [w] wide. */
     fun mascotHeight(w: Float): Float = (w * 0.42f).coerceIn(48f, 118f)
 
+    /** The side of OpenAI's Dots character's square (its own picture has room round the figure) in a vessel [w] wide. */
+    fun dotSide(w: Float): Float = minOf(mascotHeight(w) * 1.3f, w - 16f, BOTTOM - TOP - HEAD - 16f)
+
+    /**
+     * Where ChatGPT's Dots character stands in [t]: a square of [dotSide], across the middle, its foot a little into
+     * the fluid at [surface]; never up in the vessel's head, never out of the vessel.
+     */
+    fun dotBox(t: Tank, surface: Float): RectF {
+        val side = dotSide(t.vessel.width())
+        val floor = TOP + HEAD + 8f
+        var bottom = (surface + side * DOT_SINK).coerceAtMost(t.vessel.bottom - 4f)
+        if (bottom - side < floor) bottom = floor + side
+        val cx = t.vessel.centerX()
+        return RectF(cx - side / 2f, bottom - side, cx + side / 2f, bottom)
+    }
+
     /** Whether a tap at [x], [y] (rear pixels of a 976x596 panel) is on the empty page's one button. */
     fun onSignIn(x: Float, y: Float): Boolean {
         val cx = (LEFT + RIGHT) / 2f
@@ -159,6 +171,8 @@ object UsageFace {
     // ---- the mascot, alive (MascotLive) ----
 
     private val actors = HashMap<Int, MascotLive.Actor>()
+    private val dotActors = HashMap<Int, DotsActor>()
+    private val vesselPath = android.graphics.Path()
     /** Where the middle of each drawn cycle's figure is across its box (0..1), from its first drawing: the figure, not its dumbbells or flag, stands on the spot. */
     private val middles = HashMap<String, Float>()
     private fun middle(clip: MascotFrames.Clip): Float = middles.getOrPut(clip.name) {
@@ -199,6 +213,8 @@ object UsageFace {
         c: Canvas, w: Float, h: Float, m: Model, now: Long = System.currentTimeMillis(), sinceShown: Long = Long.MAX_VALUE, water: Bitmap? = null,
         /** An app's real icon by its package, or null where it cannot be had (then nothing stands in for it). */
         icon: (String) -> Bitmap? = { null },
+        /** OpenAI's Dots character as the ChatGPT app's own renderer draws it (rear/dots), or null to use the app icon. */
+        dots: DotsFeed? = null,
     ) {
         val u = h / 596f
         val f = faces()
@@ -208,20 +224,18 @@ object UsageFace {
             c.drawText(s, x * u, y * u, text)
         }
         if (m.columns.isEmpty()) {
-            // Nobody signed in: ONE button. A tap on it opens the sign-in on the front screen; the approval is the user's.
+            // Nobody signed in: ONE button. A tap opens sign-in on the front screen.
             val cx = (LEFT + RIGHT) / 2f
             fill.color = INK; fill.alpha = 240
             rect.set((cx - SIGN_W / 2f) * u, SIGN_TOP * u, (cx + SIGN_W / 2f) * u, (SIGN_TOP + SIGN_H) * u)
             c.drawRoundRect(rect, SIGN_H * u / 2f, SIGN_H * u / 2f, fill)
             text.typeface = f[1]; text.textSize = 34f * u; text.color = INK_BLACK; text.alpha = 255; text.textAlign = Paint.Align.CENTER
             c.drawText(m.empty, cx * u, (SIGN_TOP + SIGN_H / 2f + 12f) * u, text)
-            // Its one line under it, large enough to read at arm's length (it was 20 px and faint). Button and line
-            // together stand about the middle of what he sees (NoticePop.CENTRE, MIDDLE).
             say("Opens on the front screen", cx, SIGN_TOP + SIGN_H + 50f, 30f, 0, INK, 170, Paint.Align.CENTER)
             return
         }
         // A page that has just come up again starts its mascots afresh.
-        if (sinceShown < shownFor) for (a in actors.values) a.reset()
+        if (sinceShown < shownFor) { for (a in actors.values) a.reset(); for (a in dotActors.values) a.reset() }
         shownFor = sinceShown
         val grow = ease(sinceShown.coerceAtLeast(0L) / RISE_MS)
         val opened = now - sinceShown.coerceIn(0L, 86_400_000L)
@@ -242,7 +256,7 @@ object UsageFace {
                 val level = col.limits[i].used * grow
                 val surface = v.bottom - level * v.height()
                 top = minOf(top, surface)
-                if (level > 0.002f) Fluid.draw(c, rect, radius, surface * u, now, water, u, tint = color(i), driftMs = DRIFT_MS)
+                if (level > 0.002f) Fluid.draw(c, rect, radius, surface * u, now, water, u, tint = color(col, i), driftMs = DRIFT_MS)
             }
             surfaces[t] = top
 
@@ -258,15 +272,15 @@ object UsageFace {
             for (i in t.limits.drop(1)) {
                 val other = col.limits[i]
                 if (other.until.isEmpty() || other.until == first.until) continue
-                say(other.until, head.centerX(), base + line * big * 0.74f, big * 0.62f, 2, if (onFluid) INK_BLACK else color(i), 240, Paint.Align.CENTER)
+                say(other.until, head.centerX(), base + line * big * 0.74f, big * 0.62f, 2, if (onFluid) INK_BLACK else color(col, i), 240, Paint.Align.CENTER)
                 line++
             }
         }
 
-        // WHOSE IS WHOSE, where two apps' accounts stand together (Claude and ChatGPT): each account's first vessel has its
-        // app's own icon, small, in the corner of its head. Never a name, never a drawn stand-in; one app alone needs none.
+        // Keep the Claude app mark in the header when both providers are present.
         if (m.columns.map { it.app }.filter { it.isNotEmpty() }.distinct().size > 1) {
             for ((a, col) in m.columns.withIndex()) {
+                if (col.chatGpt) continue
                 val bmp = icon(col.app) ?: continue
                 val t = boxes.firstOrNull { it.account == a } ?: continue
                 rect.set((t.vessel.left + MARK_INSET) * u, (t.vessel.top + MARK_INSET) * u, (t.vessel.left + MARK_INSET + MARK) * u, (t.vessel.top + MARK_INSET + MARK) * u)
@@ -276,10 +290,35 @@ object UsageFace {
         }
 
         // The mascots: one per account, on the vessel that matters, alive (MascotLive): standing, walking the vessel, hopping to another, or in one of upstream's cycles.
+        // ChatGPT uses the installed icon when the optional Dots animation has no frame.
         for ((a, col) in m.columns.withIndex()) {
             val mine = boxes.filter { it.account == a }
             if (mine.isEmpty()) continue
-            val pose = actors.getOrPut(a) { MascotLive.Actor(a) }.at(col.limits.map { it.used }, col.mood, now, opened)
+            val levels = mine.map { t -> t.limits.maxOf { col.limits[it].used } }
+            if (col.chatGpt) {
+                val frame = dots?.let {
+                    val act = dotActors.getOrPut(a) { DotsActor(a) }.at(col.limits.map { it.used }, col.mood, now, opened)
+                    if (act.signature) it.signature()
+                    it.calm(act.calm)
+                    it.picture()
+                }
+                val pic = frame ?: icon(col.app) ?: continue
+                // In the vessel nearest its limit (the week, where the five hours are not shown).
+                val t = mine[levels.indices.maxByOrNull { levels[it] + it * 0.0001f } ?: 0]
+                val box = dotBox(t, surfaces[t] ?: t.vessel.bottom)
+                val v = t.vessel
+                val radius = minOf(v.width() / 2f, 44f) * u
+                c.save()
+                vesselPath.reset(); vesselPath.addRoundRect(v.left * u, v.top * u, v.right * u, v.bottom * u, radius, radius, android.graphics.Path.Direction.CW)
+                c.clipPath(vesselPath)
+                c.clipRect(v.left * u, (TOP + HEAD + 8f) * u, v.right * u, v.bottom * u)
+                rect.set(box.left * u, box.top * u, box.right * u, box.bottom * u)
+                markPaint.alpha = 255
+                c.drawBitmap(pic, null, rect, markPaint)
+                c.restore()
+                continue
+            }
+            val pose = actors.getOrPut(a) { MascotLive.Actor(a) }.at(col.limits.map { it.used }, col.mood, now, opened, levels)
             val fromTank = mine.getOrNull(pose.vessel) ?: mine[0]
             val toTank = mine.getOrNull(pose.to) ?: fromTank
             val k = pose.along
@@ -340,6 +379,8 @@ object UsageFace {
     private const val ACCOUNT_GAP = 30f
     private const val RISE_MS = 900f
     private const val HOP_HEIGHT = 70f
+    /** How far the Dots character's square stands down into the fluid, of its side (its picture has room under the figure). */
+    private const val DOT_SINK = 0.10f
     private const val JUMP_HEIGHT = 46f
     private const val SIGN_W = 300f
     private const val SIGN_H = 84f

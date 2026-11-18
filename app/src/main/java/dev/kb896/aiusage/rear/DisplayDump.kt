@@ -8,7 +8,7 @@ package dev.kb896.aiusage.rear
  * Read from the logical display's own dump (LogicalDisplay.dumpLocked on Android 16):
  *
  *     mDisplayId=1
- *     mPrimaryDisplayDevice=Built-in Screen(local:4630946949513469332)
+ *     mPrimaryDisplayDevice=Built-in Screen(local:4000000000000004332)
  *
  * "local:" is how a built-in panel's unique id is spelled, and what follows it is the
  * physical id. It is read off the phone rather than written down because it belongs to

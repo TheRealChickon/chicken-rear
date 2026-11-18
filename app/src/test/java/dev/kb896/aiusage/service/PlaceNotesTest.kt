@@ -31,12 +31,15 @@ class PlaceNotesTest {
         assertFalse(Pin("half", 1, lat = 12.3).placed)
     }
 
-    @Test fun `arriving brings the note to the front, as if just pinned`() {
+    @Test fun `arriving makes the note stand on the back, as a page of its own and not as news on the notes page`() {
+        // SPEC (Pin to location, section 5): the arrival is a state, the note's arrivedAt; it is no longer moved to the
+        // front as if just pinned (which played the notes page's arrival for it).
         val next = PlaceNotes.arrived(listOf(plain, home), at = 10, now = 500)!!
-        assertEquals(listOf("Take the keys", "Milk"), next.map { it.text })
-        assertEquals("the back shows what is newest", 500L, next.first().freshAt)
-        assertEquals("and it is still the same note, for its bin and its watch", 10L, next.first().at)
-        assertEquals(20L, next.last().freshAt)
+        assertEquals(listOf("Milk", "Take the keys"), next.map { it.text })
+        assertEquals(500L, next.last().arrivedAt)
+        assertEquals("and it is still the same note, for its bin and its watch", 10L, next.last().at)
+        assertEquals("not news for the notes page", 10L, next.last().freshAt)
+        assertEquals(0L, next.first().arrivedAt)
     }
 
     @Test fun `an arrival for a note that is gone, or has no place, is nothing`() {

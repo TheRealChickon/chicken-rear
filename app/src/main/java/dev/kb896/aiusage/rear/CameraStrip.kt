@@ -10,7 +10,7 @@ import android.view.SurfaceControl
  * The camera strip (x < RearGeometry.cutoutPx) beside a guest on a private display
  * (PrivateDisplay): a layer of the shell's own over it, so whatever lies under the strip — our
  * panel, always, on these — does not show there. It covers the bars of an app narrower than its
- * display too (StripColor.around), black in the app's picture, clear over the app. In the guest's own background
+ * display too (StripColor.around), black in the app's picture, clear over the app, whose corners it rounds (StripColor.draw). In the guest's own background
  * colour where it has one, black where not (StripColor), read off the guest's leftmost
  * columns by [sample]: once as it is shown (the caller samples before the reveal, so it
  * arrives right), then at StripColor.Pace's pace while it is up, the rear lit ([dark] false) and
@@ -43,6 +43,8 @@ class CameraStrip(
     @Volatile private var failedAt = 0L
     /** Where the app stands (GuestShape.appOnRear); null, the whole area. */
     @Volatile private var app: GuestShape.Bounds? = null
+    /** The app's display on the rear (PrivateDisplay.area): a keyboard is its width. Null, the whole width right of the lenses. */
+    @Volatile private var area: GuestShape.Bounds? = null
     /** The colour it is going to. */
     @Volatile private var target = BLACK
 
@@ -76,7 +78,7 @@ class CameraStrip(
     fun hide() = fade.hide(now())
 
     /** Around [app] from the next frame (GuestShape.appOnRear), or the whole area for null. Any thread. */
-    fun follow(app: GuestShape.Bounds?) { this.app = app }
+    fun follow(app: GuestShape.Bounds?, area: GuestShape.Bounds? = null) { this.area = area; this.app = app }
 
     /** Something on the rear may have changed (a touch, a new guest): sample quickly again (StripColor.Pace). Any thread. */
     fun poke() { poked = true; pokedAt = now() }
@@ -107,7 +109,7 @@ class CameraStrip(
             currentLayer = sc
             val ease = StripColor.Ease()
             var drawn: Int? = null
-            var drawnAround: List<GuestShape.Bounds>? = null
+            var drawnAround: Triple<GuestShape.Bounds, GuestShape.Bounds, Int?>? = null
             val paint = Paint()
             var alpha = -1f
             val pace = StripColor.Pace()
@@ -140,13 +142,14 @@ class CameraStrip(
                     nextKeyboard = now() + if (now - pokedAt < KEYBOARD_QUICK_FOR_MS) KEYBOARD_QUICK_MS else KEYBOARD_SLOW_MS
                 }
                 val color = ease.at(target, now)
-                val around = StripColor.around(rear, app ?: GuestShape.appArea(rear), keyboardTop)
+                val box = area ?: GuestShape.appArea(rear)
+                val around = Triple(app ?: box, box, keyboardTop)
                 if (color != drawn || around != drawnAround) {
-                    val c = surface.lockCanvas(null)
+                    val c = ShellLayer.lockPanelCanvas(surface)
                     try {
                         c.drawColor(0, PorterDuff.Mode.CLEAR)
-                        paint.color = color
-                        for (b in around) c.drawRect(b.left.toFloat(), b.top.toFloat(), b.right.toFloat(), b.bottom.toFloat(), paint)
+                        // Round the app's corners too (StripColor.draw).
+                        StripColor.draw(c, rear, around.first, around.second, around.third, color, paint)
                     } finally { surface.unlockCanvasAndPost(c) }
                     drawn = color
                     drawnAround = around

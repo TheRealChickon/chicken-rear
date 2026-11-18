@@ -9,10 +9,10 @@ class SurfaceDumpTest {
     // Physical display ids as SurfaceFlinger prints them. The 17 Pro's rear id is the one
     // measured on the phone; the Pro Max's two are invented, and differ from the Pro's
     // where it matters — the rear one does not end in 332.
-    private val proMain = "4619827259835644672"
-    private val proRear = "4630946949513469332"
-    private val maxMain = "4619827260271452928"
-    private val maxRear = "4630947037102180609"
+    private val proMain = "4000000000000005672"
+    private val proRear = "4000000000000004332"
+    private val maxMain = "4000000000000001928"
+    private val maxRear = "4000000000000002609"
 
     private val rule = "-".repeat(80)
 

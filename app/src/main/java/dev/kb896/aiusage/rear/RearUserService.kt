@@ -16,12 +16,21 @@ import kotlin.system.exitProcess
 
 class RearUserService : IRearService.Stub {
 
-    @Suppress("unused") constructor()
+    @Suppress("unused") constructor() { shapeTheBack(); autostart.start(); searchOffline.start() }
     /**
      * Shizuku 13+ hands a Context of our package here: the shell sheet reads the panel's
      * font through its Resources (see ShellFont).
      */
-    @Suppress("unused") constructor(context: Context) { this.context = context; watchFrontLock() }
+    @Suppress("unused") constructor(context: Context) { this.context = context; watchFrontLock(); shapeTheBack(); autostart.start(); searchOffline.start() }
+
+    /**
+     * LAST in either constructor, once every field is set and the context is here (the rear's size is read through
+     * it): the display's shape over everything of ours (RearShape), kept by its own thread from now on. The back's
+     * stack read afresh as the pages read it (rearLayerStack), not the guests' one read (coverStack); the back's size
+     * as the pages have it. (Asked from the init block, a layer made by the cover's thread before this object was whole
+     * met fields not yet set, and the mask waited for the next layer to be made.)
+     */
+    private fun shapeTheBack() = RearShape.shapeTheBack({ rearLayerStack() }, { geometry })
 
     private var context: Context? = null
 
@@ -78,7 +87,8 @@ class RearUserService : IRearService.Stub {
     init {
         // FIRST: the back covered, before a single setting is known, if a face of ours was what it showed
         // when this process last ran. A restart (an update, a crash) must not show Xiaomi's screen meanwhile.
-        if (java.io.File(COVER_HINT_FILE).exists()) Thread({
+        // (A missing or old hint file means cover too: RearCover.Hint.)
+        if (RearCover.Hint.read(COVER_HINT_FILE).face) Thread({
             repeat(40) {
                 if (runCatching { cover.set(true, "from the last run"); cover.isUp }.getOrDefault(false)) return@Thread
                 try { Thread.sleep(50L) } catch (_: InterruptedException) { return@Thread }
@@ -92,6 +102,9 @@ class RearUserService : IRearService.Stub {
             runCatching { ShellLayer.removeAll() }
             previous?.uncaughtException(t, e)
         }
+        // A picture's note on every notes page of this process (the page, its turn and carousel, an arrival, the landing,
+        // the veil over Xiaomi's pin) takes its picture from here: in memory, or its place empty while it is read (NotePictures).
+        PinFace.pictures = { name -> notePictures.get(name) }
     }
 
     override fun destroy() {
@@ -363,7 +376,7 @@ class RearUserService : IRearService.Stub {
      */
     override fun cameraOnRear(displayId: Int): Boolean {
         if (displayId < 0) return false
-        if (guestOnTop() || cameraUp()) return true
+        if (guestOnTop() || cameraUp() || (displayId == rearDisplay() && RearCameraRoute.isOurs(rearFocus))) return true
         val focused = FocusDump.focusedPackage(exec("dumpsys window displays | grep -E 'mDisplayId=|mFocusedApp='"), displayId)
         if (focused == CAMERA_PACKAGE) return true
         return rearTopPackage() == CAMERA_PACKAGE
@@ -405,7 +418,7 @@ class RearUserService : IRearService.Stub {
      * decides whether the extra focus dump is worth taking.
      */
     private fun cameraHasRear(displayId: Int): Boolean {
-        if (cameraUp()) return true
+        if (cameraUp() || (companion && CameraExit.isCamera(rearFocus))) return true
         if (rearTopPackage() == CAMERA_PACKAGE) return true
         if (!(cameraInUse && android.os.SystemClock.elapsedRealtime() - cameraInUseAt < BAND_WATCH_MS)) return false
         return FocusDump.focusedPackage(exec("dumpsys window displays | grep -E 'mDisplayId=|mFocusedApp='"), displayId) == CAMERA_PACKAGE
@@ -466,10 +479,20 @@ class RearUserService : IRearService.Stub {
      * be read (no Context — Shizuku before 13 — or no such display), which PlaceLight takes
      * as dark.
      */
-    private fun rearLit(displayId: Int): Boolean? = runCatching {
-        context?.getSystemService(android.hardware.display.DisplayManager::class.java)
-            ?.getDisplay(displayId)?.state?.let { it == android.view.Display.STATE_ON }
-    }.getOrNull()
+    private fun rearLit(displayId: Int): Boolean? = displayStates.fresh(displayId)?.let { it == android.view.Display.STATE_ON }
+
+    /**
+     * Every read of a display's state in this process, kept with its time (DisplayStates): the scene's and the charging
+     * page's look at every picture takes the last one while it is under [LIGHT_LOOK_MS] old.
+     */
+    private val displayStates by lazy {
+        DisplayStates({ id ->
+            runCatching { context?.getSystemService(android.hardware.display.DisplayManager::class.java)?.getDisplay(id)?.state }.getOrNull()
+        }, android.os.SystemClock::uptimeMillis)
+    }
+
+    /** Whether the rear is lit by a reading under [LIGHT_LOOK_MS] old (read now if there is none): for a look at every picture. */
+    private fun rearLitRecently(): Boolean = displayStates.recent(rearDisplay(), LIGHT_LOOK_MS) == android.view.Display.STATE_ON
 
     /** show() and ensureOnRear() both place; two at once moved the same task twice and the second threw. */
     private val placing = Any()
@@ -608,12 +631,15 @@ class RearUserService : IRearService.Stub {
      * The panel is not dismissed first: the camera stacks on top of it, and closing the
      * camera reveals it again. That is measured behaviour, not an assumption.
      */
-    override fun openCamera(displayId: Int): Boolean {
+    override fun openCamera(displayId: Int): Boolean = openCamera(displayId, fromMoon = false)
+
+    private fun openCamera(displayId: Int, fromMoon: Boolean): Boolean {
         if (displayId < 0) return false
         // The back is the camera's from here: a sheet up would sit over it with its blocker.
         closeSheetNow("the camera is opening")
         // Which would come up on the rear under a private display's layer.
         guest?.takeIf { it.onPrivate }?.let { if (markOnTop(it.task, false)) guestBehind(it.pkg) }
+        if (fromMoon && openOwnCamera(displayId)) return true
         val out = exec("am start --display $displayId -f $CAMERA_FLAGS -n $CAMERA_COMPONENT")
         val ok = !out.contains("Error", ignoreCase = true)
         if (!ok) Log.w(TAG, "camera launch refused: ${out.take(200)}")
@@ -626,6 +652,40 @@ class RearUserService : IRearService.Stub {
             syncTouchWatch()
         }
         return ok
+    }
+
+    /** PanelConfig.cameraOwnRear, from the last payload. */
+    @Volatile private var cameraOwnRear = true
+
+    private fun openOwnCamera(displayId: Int): Boolean {
+        val granted = runCatching {
+            context?.packageManager?.checkPermission(android.Manifest.permission.CAMERA, PKG) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }.getOrDefault(false)
+        val locked = runCatching {
+            context?.getSystemService(android.app.KeyguardManager::class.java)?.let { it.isKeyguardLocked || it.isDeviceLocked }
+        }.getOrNull() ?: keyguardShowing()
+        val (route, why) = RearCameraRoute.route(cameraOwnRear, granted, locked, displayId)
+        if (route != RearCameraRoute.Route.OURS) {
+            Log.i(TAG, "camera: Xiaomi's Camera — $why")
+            return false
+        }
+        val asked = android.os.SystemClock.uptimeMillis()
+        val out = exec("am start $NO_SLIDE --display $displayId -n ${RearCameraRoute.COMPONENT}")
+        if (!RearCameraRoute.accepted(out)) {
+            Log.w(TAG, "camera: our camera page was refused (${out.take(160)}) — Xiaomi's Camera")
+            return false
+        }
+        while (android.os.SystemClock.uptimeMillis() - asked < RearCameraRoute.LAUNCH_WAIT_MS) {
+            try { Thread.sleep(RearCameraRoute.LAUNCH_LOOK_MS) } catch (_: InterruptedException) { return false }
+            val top = RearCover.focusOf(exec(RearCover.READ), displayId)
+            if (RearCameraRoute.arrived(top)) {
+                Log.i(TAG, "camera: our camera page is on the back (${android.os.SystemClock.uptimeMillis() - asked} ms)")
+                if (top != rearFocus) holdHandler.post { runCatching { readRearFocus() } }
+                return true
+            }
+        }
+        Log.w(TAG, "camera: our camera page did not come up on the back within ${RearCameraRoute.LAUNCH_WAIT_MS} ms — Xiaomi's Camera")
+        return false
     }
 
     /**
@@ -1062,7 +1122,7 @@ class RearUserService : IRearService.Stub {
         // A guest the back's lock covers shows nothing of itself, its frame neither.
         if (lockVeiled) { chromeHide(); return }
         frame.follow(if (guest?.keptRight == true) privateApp else null)
-        strip.follow(privateApp)
+        strip.follow(privateApp, privateArea())
         frame.show()
         if (guest?.keptRight == true) strip.show(null) else strip.hide()
     }
@@ -1099,6 +1159,9 @@ class RearUserService : IRearService.Stub {
         portalApps = PortalAppsSnapshot.fromBundle(apps)
         shellSheet?.apps(portalApps)
         repage()
+        // The cover's allowlist is these apps (RearCover.meant), the guard's through the hint file. Not before the
+        // cover has been decided once: a new process gets these first, before its settings, and must not say "0".
+        if (coverHintWritten) runCatching { syncCover("the apps on the back changed") }
     }
 
     /** The portal grid's size (PanelConfig.portalGrid), from the last payload. */
@@ -1135,12 +1198,8 @@ class RearUserService : IRearService.Stub {
         }
     }
 
-    /** The rear display's layer stack, from dumpsys display; 1 on the 17 Pro, as measured. */
-    private fun rearLayerStack(): Int {
-        val dump = exec("dumpsys display | grep -iE 'mDisplayId=${Panel.DISPLAY_ID}|layerStack' | head -40")
-        return Regex("""mDisplayId=${Panel.DISPLAY_ID}\b[\s\S]*?[lL]ayerStack[ =](\d+)""").find(dump)
-            ?.groupValues?.get(1)?.toIntOrNull() ?: Panel.DISPLAY_ID
-    }
+    /** The rear display's layer stack, from dumpsys display, once per process (RearStack); 1 on the 17 Pro, as measured. */
+    private fun rearLayerStack(): Int = RearStack.of(::exec)
 
     /**
      * The frame follows the config's colour, and the guest's density the config's DPI: a
@@ -1154,6 +1213,8 @@ class RearUserService : IRearService.Stub {
             usageState = decoded.state
             usageNames = config.accounts.map { it.label }
             usageDemo = config.demoMode
+            usageFiveHours = config.usageFiveHours
+            usageDot = config.chatGptDot
             usage.changed()
             onPins(config.pins)
             frame.style(config.portalFrameColor)
@@ -1176,14 +1237,18 @@ class RearUserService : IRearService.Stub {
             val sky = decoded.weather?.takeIf { it.isFresh(System.currentTimeMillis()) }?.condition
             if (sky != scene.weather) Log.i(TAG, "scene: the clouds go by the weather, now ${sky ?: "not known"}")
             scene.weather = sky
+            if (scene.dustMoves != config.dustMovesWithPhone) Log.i(TAG, "dust: moves with the phone ${if (config.dustMovesWithPhone) "on" else "off"} (settings)")
+            scene.dustMoves = config.dustMovesWithPhone
             sceneWake = config.sceneWake
-            val loopWas = sceneLoop
+            val loopWas = faceLoopPath()
             sceneLoop = config.sceneLoop
+            facesStart()
+            faceFromPayload(config.face, config.faceSeq)
             // Another loop picked while the scene is up: the back shows the new one now, not at the next wake.
-            if (loopWas != sceneLoop && scene.isUp && scene.looping) {
-                val next = clipPath(sceneLoop)
-                if (next == null) scene.dismiss(ShellScene.FADE_OUT_MS, "no loop is chosen any more")
-                else runCatching { popWaiter.execute { scene.play(null, next, android.os.SystemClock.uptimeMillis(), waitForLight = false) } }
+            val loopNow = faceLoopPath()
+            if (loopWas != loopNow && scene.isUp && scene.looping) {
+                if (loopNow == null) scene.dismiss(ShellScene.FADE_OUT_MS, "no loop is chosen any more")
+                else runCatching { popWaiter.execute { scene.play(null, loopNow, android.os.SystemClock.uptimeMillis(), waitForLight = false) } }
             }
             sceneLook = sceneLook.copy(
                 clock = config.sceneClock, style = config.sceneClockStyle, date = config.sceneDate,
@@ -1193,7 +1258,7 @@ class RearUserService : IRearService.Stub {
             scene.depth = config.sceneDepth
             // The settings may be what a waiting stay lacked (which clips): looked at now.
             if (stay > 0) runCatching { holdHandler.removeCallbacks(stayTick); holdHandler.post(stayTick) }
-            cameraKeepRear = config.cameraKeepRear
+            cameraOwnRear = config.cameraOwnRear
             shellSheet?.frameColor(config.portalFrameColor)
             frame.allow(config.portalBorder)
             val shownPkg = guest?.pkg
@@ -1216,14 +1281,33 @@ class RearUserService : IRearService.Stub {
             // the front's notifications mirrored or not: they are asked for one by one.
             noticesOn = config.showNotifications || config.remoteCards
             noticesPop = config.noticesOverApps
+            emptyPullXiaomi = config.emptyPullXiaomi
+            if (messageStyle != config.messageStyle && config.messageStyle != dev.kb896.aiusage.data.MessageStyle.FULL) notices.prepareIsland()
+            messageStyle = config.messageStyle
+            // What three fingers held on the back do (ThreeFingersAct).
+            threeFingers = config.threeFingers
+            // "Fluid size": the music page's body glides to it; a page that stands still (paused) is drawn until it is on it
+            // (musicFrame), and a covered one is on it at once.
+            if (musicBody.floor != config.musicFloor.coerceIn(0, 100)) {
+                musicBody.floor = config.musicFloor
+                musicFloorAt = android.os.SystemClock.uptimeMillis()
+                if (media != null) runCatching { musicHandler.post { if (musicFace.isUp) musicFrame() } }
+            }
+            // "Navigation on the back": off, a route has no page (it is not live to the navigation); on, it is again.
+            if (navigationOn != config.navigationOn) {
+                navigationOn = config.navigationOn
+                syncMediaCard()
+            }
             val wasCompanion = companion
             companion = config.companion
             moreApps = config.moreApps
+            // The phone's own search kept off the internet (SearchOffline): applied as this process hears it is wanted.
+            searchOffline.wanted(config.searchOffline)
             // A wake of the app's own can light a back switched off by hand: the double tap is read for its latch.
             latchWanted = (noticesOn && config.noticeWake) || (config.chargeAnim && config.chargeWhenDark) || (config.stayOn && config.sceneOn)
             if (wasCompanion != companion) Log.i(TAG, if (companion) "companion mode — Xiaomi's rear screen is the base" else "replace mode — the panel has the rear")
             syncCompanionListening()
-            syncCameraStandbyWatch()
+            syncRearFocusWatch()
             // The banner's face loaded ahead, off this binder thread: the first banner on a new
             // shell, or with More apps off (no touch watch to make the sheet), has it in hand.
             if (companion && noticesOn && !noticeFaceReady()) runCatching { popWaiter.execute { ensureNoticeFace() } }
@@ -1716,7 +1800,7 @@ class RearUserService : IRearService.Stub {
         // Over the whole rear the frame keeps to the glass right of the lenses, as for an app on
         // the rear itself: the app's own rectangle there runs under them.
         frame.follow(if (g.wide) null else rect)
-        strip.follow(rect)
+        strip.follow(rect, privateArea())
         strip.poke()
         Log.i(TAG, "portal: ${g.pkg} stands at x ${rect.left}–${rect.right}, y ${rect.top}–${rect.bottom} — $why")
     }
@@ -2349,7 +2433,7 @@ class RearUserService : IRearService.Stub {
      */
     private fun stripFor() {
         syncAppRect("it drew")
-        strip.follow(privateApp)
+        strip.follow(privateApp, privateArea())
         if (guest?.keptRight == true) strip.show(stripColor()) else strip.hide()
     }
 
@@ -2785,6 +2869,9 @@ class RearUserService : IRearService.Stub {
             // And the capture, once, so the first cover is taken in this process, not by screencap.
             RearCapture.warm(rearDisplay())
             val touches = RearTouches(maxX, maxY)
+            // Every finger, for three held together (ThreeHold): the same lines.
+            val three = ThreeHold(maxX, maxY)
+            threeHold = three
             // The same lines, every finger, for a guest on a private display. After the first
             // finger's gestures, so that a pull claimed on this very frame is not forwarded.
             val rear = geometry
@@ -2798,18 +2885,32 @@ class RearUserService : IRearService.Stub {
             // One line at a time from either source: the touchscreen, or in a debug build the
             // demo's made-up finger (DemoTouchFeed), which shares this watch's state.
             val feedLock = Any()
-            fun take(line: String) = synchronized(feedLock) {
+            fun take(line: String, madeUp: Boolean) = synchronized(feedLock) {
                 val now = android.os.SystemClock.uptimeMillis()
-                for (e in touches.feed(line, now)) {
+                // A made-up finger's line: the stroke it is part of never throws out a notification of his (madeUpFinger).
+                if (madeUp) madeUpLineAt = now
+                val got = touches.feed(line, now)
+                // A second finger down with the first (RearTouches.crowded): no single-finger gesture of it, from right
+                // after its landing (a Down in this same frame) and before anything else of it.
+                val crowdAt = if (touches.crowdBegan) RearTouches.crowdIndex(got) else -1
+                got.forEachIndexed { i, e ->
+                    if (i == crowdAt) fingersCrowded()
                     events++
+                    if (e is RearTouches.Down) fingerDownAt = e.atMs
                     onRearTouch(e, gestures)
+                }
+                if (crowdAt == got.size) fingersCrowded()
+                when (val held = three.feed(line, now)) {
+                    is ThreeHold.Out.Arm -> runCatching { holdHandler.removeCallbacks(threeCheck); holdHandler.postDelayed(threeCheck, held.atMs - now + THREE_CHECK_LATE_MS) }
+                    is ThreeHold.Out.Fire -> onThreeFingers(held)
+                    null -> Unit
                 }
                 forwardOut(forward.feed(line, now, ::forwardOpen))
             }
-            if (BuildConfig.DEBUG) DemoTouchFeed.attach(proc) { take(it) }
+            if (BuildConfig.DEBUG) DemoTouchFeed.attach(proc) { take(it, madeUp = true) }
             try {
                 proc.inputStream.bufferedReader().useLines { lines ->
-                    for (line in lines) take(line)
+                    for (line in lines) take(line, madeUp = false)
                 }
                 forwardOut(forward.cancel(android.os.SystemClock.uptimeMillis()))
             } catch (_: java.io.IOException) {
@@ -3082,6 +3183,16 @@ class RearUserService : IRearService.Stub {
         return null
     }
 
+    /** When the last finger landed, and when a made-up finger's line (a debug build's DemoTouchFeed) last came: uptime ms, 0 for never. */
+    @Volatile private var fingerDownAt = 0L
+    @Volatile private var madeUpLineAt = 0L
+
+    /**
+     * The finger of the last stroke was MADE UP (rear-touch.py, the regression: DemoTouchFeed), wholly or in part: a line
+     * of the made-up feed came since it landed. Its throws never reach the phone (NoticeThrow.toPhone).
+     */
+    private fun madeUpFinger(): Boolean = NoticeThrow.madeUp(madeUpLineAt, fingerDownAt)
+
     /** One touch, on the reader thread. */
     /** When the rear touchscreen last reported anything (elapsedRealtime); 0 before the first. */
     @Volatile private var lastRearTouchAt = 0L
@@ -3156,8 +3267,11 @@ class RearUserService : IRearService.Stub {
 
     private fun sceneTouchMode(e: RearTouches.Event, from: EdgeGestures): SceneTouch.Mode = when {
         !faceWanted() || !cover.isUp -> SceneTouch.Mode.NONE
+        // The picker's finger is the picker's (PickerTouch); none of the readers here makes anything of it.
+        pickerHasFinger() -> SceneTouch.Mode.PICKER
         notices.isUp || guest?.onTop == true -> SceneTouch.Mode.NONE
         usage.isUp -> SceneTouch.Mode.USAGE
+        arrivalPage.isUp -> SceneTouch.Mode.ARRIVAL
         pinsPage.isUp -> SceneTouch.Mode.NOTES
         // Under music, a call or a timer the charging page is not what shows: their buttons are theirs.
         chargeOnTop() -> SceneTouch.Mode.CHARGE
@@ -3171,30 +3285,34 @@ class RearUserService : IRearService.Stub {
     //
     // Up whenever a face of ours is wanted and the back's focus is Xiaomi's (or nobody's): under the
     // scene and the pages, so whatever of ours is not drawn at some moment, the back is black. Away
-    // only under Xiaomi's Camera opened from the back, an app of ours there, this app's own page.
+    // for Xiaomi's Camera on the back (including its rear preview), our pages, and allowed apps.
     // The focus is heard the moment it changes (the system logs it: [onRearFocusLine]) and read
     // again every tick of the stay loop in case a line was missed.
 
-    private val cover by lazy { RearCover(::rearLayerStack) { geometry.widthPx to geometry.heightPx } }
+    private val cover by lazy { RearCover(::rearLayerStack, "shell") { geometry.widthPx to geometry.heightPx } }
     /** The window that has the back's focus, as last heard or read; null for none or not known yet. */
     @Volatile private var rearFocus: String? = null
 
     /** The cover as the rule has it, now. Any thread. */
     private fun syncCover(why: String) {
-        val want = RearCover.wanted(faceWanted(), rearFocus) && guest?.onTop != true
+        val allow = coverAllow()
+        val want = RearCover.wanted(faceWanted(), rearFocus, allow) && guest?.onTop != true
         val was = cover.isUp
         runCatching { cover.set(want, why) }
         // The dim layer lies only over a face of ours.
         if (want != was) applySceneLook()
         // Kept across a restart of this process: the next one covers the back before it knows anything else.
-        if (want != was || !coverHintWritten) runCatching {
-            coverHintWritten = true
-            val hint = java.io.File(COVER_HINT_FILE)
-            if (faceWanted()) hint.writeText("1") else hint.delete()
+        // The guard reads the same allowlist from it (RearCover.Hint): written again when the apps on the back change,
+        // and with what is on top in the guest's task while we step away for the guest (RearCover.hintAllow).
+        val hintAllow = RearCover.hintAllow(allow, guest?.onTop == true, rearFocus)
+        if (want != was || !coverHintWritten || hintAllow != coverHintAllow) runCatching {
+            coverHintWritten = true; coverHintAllow = hintAllow
+            java.io.File(COVER_HINT_FILE).writeText(RearCover.Hint(faceWanted(), hintAllow).text())
         }
         if (!want && was) {
             // Something meant to be seen has the back: nothing of our face stays over it.
-            if (scene.isUp) scene.aside(why)
+            if (scene.isUp) scene.aside(why) else scene.disarm()
+            if (CameraExit.isCamera(rearFocus)) wakeShow.cut(1L, why)
             navStep(RearNav.Input.OthersTake, why)
         } else if (want && !was) {
             navStep(RearNav.Input.OthersLeave, why)
@@ -3203,6 +3321,10 @@ class RearUserService : IRearService.Stub {
         }
     }
     @Volatile private var coverHintWritten = false
+    @Volatile private var coverHintAllow: Set<String> = emptySet()
+
+    /** The apps he put on the back (the pinned apps, as the app last sent them) and the guest on it now, whichever way it came. */
+    private fun coverAllow(): Set<String> = (portalApps.packages + listOfNotNull(guest?.pkg)).toSet()
 
     /** One of the event log's lines about apps coming to the top (RearCover.changed), as it is logged. */
     private fun onRearFocusLine(line: String) {
@@ -3215,16 +3337,34 @@ class RearUserService : IRearService.Stub {
             // (so the camera counted as "up" for half an hour).
             if (CameraExit.left(was, RearCover.LAUNCHER)) cameraLeftBack(RearCover.LAUNCHER)
         }
-        // And the truth read, now and once more when the change has settled.
+        // And the truth read, now and once more when the change has settled (one settled read pending at a time: RearTop.Settle).
         runCatching {
             holdHandler.post { runCatching { readRearFocus() } }
-            holdHandler.postDelayed({ runCatching { readRearFocus() } }, 250L)
+            val after = focusSettle.line(android.os.SystemClock.uptimeMillis())
+            if (after >= 0L && !holdHandler.postDelayed(focusSettled, after)) focusSettle.dropped()
         }
     }
 
-    /** The back's focus read from the window manager: the truth, a moment later than the log's line. */
-    private fun readRearFocus() {
-        val title = RearCover.focusOf(exec(RearCover.READ), rearDisplay())
+    /** The reads of the back's top app (by binder, the window manager's dump for whatever is new: RearTop). */
+    private val topReader by lazy { RearTop.Reader(::exec, "shell") }
+    private val focusSettle = RearTop.Settle(250L)
+    private val focusSettled: Runnable = object : Runnable {
+        override fun run() {
+            runCatching { readRearFocus() }
+            val next = focusSettle.ran(android.os.SystemClock.uptimeMillis())
+            if (next >= 0L && !holdHandler.postDelayed(this, next)) focusSettle.dropped()
+        }
+    }
+
+    /** When the back's focus was last read from the window manager (uptime), by any caller: for the stay loop's own read ([FocusReread]). */
+    @Volatile private var focusReadAt = 0L
+    /** When the log reader that hears the apps change on a display began following (uptime); 0 while none follows. */
+    @Volatile private var focusLogSince = 0L
+
+    /** The back's focus read from the window manager: the truth, a moment later than the log's line. [force]: the dump whatever the binder says (RearTop.Reader). */
+    private fun readRearFocus(force: Boolean = false) {
+        focusReadAt = android.os.SystemClock.uptimeMillis()
+        val title = topReader.read(Panel.DISPLAY_ID, rearFocus, force)
         if (title != rearFocus) {
             val was = rearFocus
             rearFocus = title
@@ -3262,6 +3402,16 @@ class RearUserService : IRearService.Stub {
     @Volatile private var usageState = dev.kb896.aiusage.data.DashboardState.EMPTY
     @Volatile private var usageNames: List<String?> = emptyList()
     @Volatile private var usageDemo = false
+    /** The switch "Five-hour limits" (off: each account its week alone), and which of OpenAI's Dots stands in ChatGPT's vessel. */
+    @Volatile private var usageFiveHours = false
+    @Volatile private var usageDot = "blue_beret"
+    /** OpenAI's Dots character, drawn by the ChatGPT app's renderer in the app's ":dots" process (setDots). */
+    private val usageDots by lazy { dev.kb896.aiusage.rear.dots.DotsClient(musicHandler, { usageDot }) }
+
+    override fun setDots(dots: android.os.IBinder?) {
+        Log.i(TAG, "usage: OpenAI's Dots character ${if (dots == null) "not to be had" else "to be had"}")
+        usageDots.attach(dots)
+    }
     /** The page as last drawn had nobody signed in: its one button is live. */
     @Volatile private var usageEmpty = false
 
@@ -3271,29 +3421,32 @@ class RearUserService : IRearService.Stub {
 
     private val usage: ShellPage by lazy {
         ShellPage(
-            "usage", ShellPage.Edge.RIGHT, ::rearLayerStack, { geometry }, musicHandler,
+            "usage", ShellPage.Edge.RIGHT, ::rearLayerStack, { geometry }, musicHandler, pacer = pagePacer,
             paint = { c, w, h ->
                 val now = System.currentTimeMillis()
-                val real = UsageFace.model(usageState, now) { a -> usageNames.getOrNull(a.ordinal) }
+                val real = UsageFace.model(usageState, now, { a -> usageNames.getOrNull(a.ordinal) }, fiveHours = usageFiveHours)
                 // With nobody signed in: made-up figures, marked as such, when the settings' demo mode is on
                 // (or, in a debug build, a file named usage-demo is in the app's files folder).
-                val shown = if (real.columns.isEmpty() && (usageDemo || BuildConfig.DEBUG && java.io.File(USAGE_DEMO_FILE).exists())) usageDemoModel ?: UsageFace.demo(now).also { usageDemoModel = it } else real
+                val shown = if (real.columns.isEmpty() && (usageDemo || BuildConfig.DEBUG && java.io.File(USAGE_DEMO_FILE).exists())) usageDemoModel?.takeIf { d -> d.columns.any { c -> c.split } == usageFiveHours } ?: UsageFace.demo(now, usageFiveHours).also { usageDemoModel = it } else real
                 usageEmpty = shown.columns.isEmpty()
-                UsageFace.draw(c, w, h, shown, now, android.os.SystemClock.uptimeMillis() - usageShownAt, timerArt[TimerFace.ART_WATER], ::usageAppIcon)
+                UsageFace.draw(c, w, h, shown, now, android.os.SystemClock.uptimeMillis() - usageShownAt, timerArt[TimerFace.ART_WATER], ::usageAppIcon, usageDots)
             },
             // Looked at: the app is asked for fresh figures (it keeps its own floor between fetches), and the page moves.
             onShown = {
+                usageAppIcons.clear()
+                usageAppMissing.clear()
                 usageShownAt = android.os.SystemClock.uptimeMillis()
                 runCatching { events?.onUsageShown() }
-                musicHandler.removeCallbacks(usageTick); musicHandler.postDelayed(usageTick, USAGE_FRAME_MS)
+                pagePacer.post(usageTick, USAGE_FRAME_MS.toFloat())
             },
             onAlone = { navStep(RearNav.Input.UsageAlone, "left alone") },
+            onPlace = { coverMoved() },
         )
     }
 
     /**
      * The page moves (its fluid, and its mascots, who walk and hop: MascotLive): a new picture every
-     * [USAGE_FRAME_MS], the panel's own pace, for as long as it is up. How long the pictures take is said
+     * [USAGE_FRAME_MS] on the vsync (every 2nd refresh at 120 Hz: FramePacer), for as long as it is up. How long the pictures take is said
      * in the log every 300 of them, so a slow page is seen in numbers and not guessed at.
      */
     private val usageTick: Runnable = object : Runnable {
@@ -3309,18 +3462,25 @@ class RearUserService : IRearService.Stub {
             lastAt = began
             if (count >= 300) { Log.i(TAG, "usage: $count pictures, ${spent / count} ms from one to the next, $worst ms at most"); count = 0; spent = 0L; worst = 0L }
             usage.changed()
-            musicHandler.postAtTime(this, began + USAGE_FRAME_MS)
+            pagePacer.post(this, USAGE_FRAME_MS.toFloat())
         }
     }
 
     /** The notes pinned to the back, newest first (PanelConfig.pins), and which one the page shows. */
     @Volatile private var pins: List<dev.kb896.aiusage.data.Pin> = emptyList()
     /**
+     * THE PINNED PICTURES (a picture's note: Pin.image), read from the app's files off the drawing threads, a few at a
+     * time in memory; as one comes, the pages that may show it draw again (a frame before it shows its place empty).
+     */
+    private val notePictures by lazy {
+        NotePictures(PINS_DIR, ready = { musicHandler.post { pinsPage.changed(); if (arrived.isNotEmpty()) arrivalPage.changed() } })
+    }
+    /**
      * ONE NOTE TURNING TO THE NEXT on the notes page (RearNav's NOTE_OLDER / NOTE_NEWER, and the give at an end): the
      * note that was showing goes out to one side as the other comes in from the other, under the finger while it is
      * down ([peek]) and by the pages' own slide after ([go], [back]). On the pages' thread; the page's painter reads it.
      */
-    private inner class NoteTurn {
+    private inner class NoteTurn(private val page: () -> ShellPage = { pinsPage }) {
         @Volatile var from = -1; @Volatile var to = -1
         /** +1: the older note comes in from the right; -1: the newer from the left. */
         @Volatile var dir = 0
@@ -3331,40 +3491,40 @@ class RearUserService : IRearService.Stub {
         val active get() = from >= 0
 
         fun peek(fromNote: Int, toNote: Int, way: Int, part: Float) = musicHandler.post {
-            musicHandler.removeCallbacks(stepper)
+            pagePacer.cancel(stepper)
             from = fromNote; to = toNote; dir = way; movedAt = 0L
             at = PageDrag.unease(part)
-            pinsPage.changed()
+            page().changed()
         }
 
         /** On from where it is to the new note (or, with none that way, a little way and back). */
         fun go(fromNote: Int, toNote: Int, way: Int) = musicHandler.post {
             if (from != fromNote || to != toNote || dir != way) { from = fromNote; to = toNote; dir = way; at = 0f }
-            goal = if (toNote >= 0) 1f else if (at < GIVE_PEAK) GIVE_PEAK else 0f
+            goal = if (toNote >= 0) 1f else if (at < NoteTurnArt.GIVE_PEAK) NoteTurnArt.GIVE_PEAK else 0f
             movedAt = 0L
             step()
         }
 
         fun back() = musicHandler.post { if (active) { goal = 0f; movedAt = 0L; step() } }
 
-        fun end() = musicHandler.post { musicHandler.removeCallbacks(stepper); from = -1; to = -1; at = 0f }
+        fun end() = musicHandler.post { pagePacer.cancel(stepper); from = -1; to = -1; at = 0f }
 
-        private val stepper = Runnable { step() }
+        /** On the vsync, placed by that frame's own time (FramePacer): every refresh turns it alike. */
+        private val stepper = Runnable { step(pagePacer.frameNs) }
 
-        private fun step() {
-            musicHandler.removeCallbacks(stepper)
+        private fun step(now: Long = System.nanoTime()) {
+            pagePacer.cancel(stepper)
             if (!active) return
-            val now = android.os.SystemClock.uptimeMillis()
             if (movedAt == 0L) movedAt = now
-            val d = (now - movedAt).toFloat() / ShellPage.SLIDE_MS
-            movedAt = now
+            val d = FramePace.share(movedAt, now, ShellPage.SLIDE_MS)
+            movedAt = maxOf(movedAt, now)
             at = if (goal > at) minOf(goal, at + d) else maxOf(goal, at - d)
             if (at == goal) {
                 // With none that way it has given as far as it does: now back.
-                if (to < 0 && goal > 0f) goal = 0f else { from = -1; to = -1; at = 0f; pinsPage.changed(); return }
+                if (to < 0 && goal > 0f) goal = 0f else { from = -1; to = -1; at = 0f; page().changed(); return }
             }
-            pinsPage.changed()
-            musicHandler.postDelayed(stepper, 8L)
+            page().changed()
+            pagePacer.post(stepper, 0f)
         }
     }
     private val noteTurn = NoteTurn()
@@ -3374,51 +3534,227 @@ class RearUserService : IRearService.Stub {
     private val pinsPage: ShellPage by lazy {
         ShellPage(
             // On the pages' own thread, as usage is: holdHandler waits on a shell command every two seconds (the stay loop's look at the back's focus), and its slide stood still meanwhile.
-            "notes", ShellPage.Edge.BOTTOM, ::rearLayerStack, { geometry }, musicHandler,
+            "notes", ShellPage.Edge.BOTTOM, ::rearLayerStack, { geometry }, musicHandler, pacer = pagePacer,
             paint = { c, w, h ->
                 val list = pins
+                // Being put in order (or on its way into it and back): the carousel (NoteCarousel), every frame.
+                if (carousel.active) { arrangeArt.draw(c, w, h, carousel, list, PageCorners.radius(geometry, w)); return@ShellPage }
                 fun note(at: Int) {
                     val i = at.coerceIn(0, (list.size - 1).coerceAtLeast(0))
                     val note = list.getOrNull(i)
-                    PinFace.draw(c, w, h, note?.text.orEmpty(), note?.let { PinFace.stamp(it.freshAt, System.currentTimeMillis()) }.orEmpty(), i, list.size, note?.placed == true)
+                    PinFace.note(c, w, h, note, i, list.size)
                 }
                 val turn = noteTurn
                 val from = turn.from; val to = turn.to
-                if (from < 0) note(nav.pin)
-                else {
+                if (from < 0) {
+                    val i = nav.pin
+                    note(i)
+                    // The neighbours' pictures read ahead (after this one's), so a turn has its picture from its first frame.
+                    notePictures.warm(listOf(list.getOrNull(i - 1)?.image, list.getOrNull(i + 1)?.image))
+                } else {
                     // One note going out as the other comes in beside it; with none that way, this one a little aside.
-                    val e = ShellPage.ease(turn.at) * (if (to >= 0) 1f else GIVE_REACH)
-                    c.drawColor(0xFF000000.toInt())
-                    c.save()
-                    c.translate(-turn.dir * e * w, 0f)
-                    note(from)
-                    // With no note that way the page is aside over black: its corners are the display's own (PageCorners).
-                    if (to >= 0) { c.translate(turn.dir * w, 0f); note(to) } else PageCorners.cut(c, w, h, PageCorners.radius(geometry, w))
-                    c.restore()
+                    NoteTurnArt.draw(c, w, h, PageCorners.radius(geometry, w), from, to, turn.dir, turn.at, ::note)
                 }
             },
             onAlone = { navStep(RearNav.Input.NotesAlone, "left alone") },
+            onPlace = { coverMoved() },
         )
     }
 
-    /** The notes as a payload has them: a note newer than any seen is shown on the back for a moment, as its confirmation. */
-    private fun onPins(next: List<dev.kb896.aiusage.data.Pin>) {
+    // ---- PIN TO LOCATION: A NOTE WHOSE PLACE HE REACHED STANDS ON THE BACK (dev.kb896.aiusage.place, SPEC section 5) ----
+    //
+    // A STATE IN THE PAYLOAD, not news: whenever the notes carry an arrivedAt the page stands (RearNav's arrivals), also
+    // after a restart of this process (then without its slide), until he puts it away: the bin (done), a stroke down
+    // (not now), told to the app and told again with every payload that still carries it (ArrivalPuts).
+
+    /** The notes standing as arrivals, newest arrival first, less what he has put away. */
+    @Volatile private var arrived: List<dev.kb896.aiusage.data.Pin> = emptyList()
+    private val arrivalPuts = ArrivalPuts()
+    private val arrivalTurn = NoteTurn { arrivalPage }
+    /** The arrivals whose page has come in once (by arrivedAt); null before the first payload, whose ones are not news. */
+    private var arrivalsPlayed: MutableSet<Long>? = null
+    /** A debug build's made-up arrivals ("arrive|…"), his own aside meanwhile. */
+    @Volatile private var demoArrivalsUp = false
+
+    private val arrivalPage: ShellPage by lazy {
+        ShellPage(
+            "arrival", ShellPage.Edge.BOTTOM, ::rearLayerStack, { geometry }, musicHandler, pacer = pagePacer,
+            paint = { c, w, h ->
+                val list = arrived
+                fun note(at: Int) {
+                    val i = at.coerceIn(0, (list.size - 1).coerceAtLeast(0))
+                    val n = list.getOrNull(i)
+                    // It may stand for hours on an OLED: after 10 minutes it moves by 2 px now and then.
+                    val (dx, dy) = PinFace.drift(System.currentTimeMillis() - (n?.arrivedAt ?: System.currentTimeMillis()))
+                    c.save(); c.translate(dx, dy)
+                    PinFace.draw(c, w, h, n?.text.orEmpty(), n?.let { PinFace.stamp(it.arrivedAt, System.currentTimeMillis()) }.orEmpty(), i, list.size, true,
+                        place = n?.place, hollow = n?.watched != true, arrival = true, image = n?.image, picture = notePictures.get(n?.image))
+                    if (demoArrivalsUp) demoMark(c, h)
+                    c.restore()
+                }
+                val turn = arrivalTurn
+                if (turn.from < 0) note(nav.arrival)
+                // The same turn as the notes page's, each note off its place with the display's corners (NoteTurnArt).
+                else NoteTurnArt.draw(c, w, h, PageCorners.radius(geometry, w), turn.from, turn.to, turn.dir, turn.at, ::note)
+            },
+            // NO TIMEOUT: it stands until he dismisses it (drawn again every twenty seconds, for its drift).
+            stayMs = Long.MAX_VALUE / 4,
+            onPlace = { coverMoved() },
+        )
+    }
+
+    /** The arrivals as a payload has them (or the demo's): the navigation told how many stand, and what he put away told again. */
+    private fun onArrivals(next: List<dev.kb896.aiusage.data.Pin>) {
+        val first = arrivalsPlayed == null
+        val shown = arrivalPuts.visible(next)
+        if (first) arrivalsPlayed = shown.map { it.arrivedAt }.toMutableSet()
+        arrived = shown
+        if (!demoArrivalsUp) for (put in arrivalPuts.untaken(next)) runCatching {
+            Log.i(TAG, "arrival: told again that he put one away (${if (put.bin) "the bin" else "not now"}) — the app had not taken it")
+            if (put.bin) events?.onPinRemoved(put.at) else events?.onArrivalLater(put.at)
+        }
+        if (shown.size != nav.arrivals) { arrivalTurn.end(); navStep(RearNav.Input.ArrivalsAre(shown.size), "the notes standing at their place") }
+        arrivalPage.changed()
+    }
+
+    /** The arrival page up or down by the navigation; it comes in by its slide once per arrival, after that at once. */
+    private fun applyArrival(s: RearNav.State, anim: RearNav.Anim, reason: String) {
+        val want = s.lit && s.ours && s.arrivalUp
+        if (want == arrivalAsked) return
+        arrivalAsked = want
+        if (!want) { arrivalPage.hide(reason); return }
+        val played = arrivalsPlayed ?: mutableSetOf<Long>().also { arrivalsPlayed = it }
+        val stamp = arrived.firstOrNull()?.arrivedAt ?: 0L
+        val news = stamp != 0L && played.add(stamp)
+        if (news) Log.i(TAG, "arrival: a note's place reached — its page comes in")
+        arrivalPage.show(atOnce = !news)
+    }
+    @Volatile private var arrivalAsked = false
+
+    /** He put the arrival showing away by its bin: done, the note goes (the app takes it off its list). */
+    private fun arrivalBin() {
+        val at = nav.arrival
+        val gone = arrived.getOrNull(at) ?: return
+        sceneFingers.forget()
+        Log.i(TAG, "arrival: its bin — done")
+        notePictures.forget(gone.image)
+        if (!demoArrivalsUp) arrivalPuts.bin(gone)
+        arrived = arrived.filter { it.at != gone.at }
+        arrivalTurn.end()
+        navStep(RearNav.Input.ArrivalRemoved(at), "its bin")
+        arrivalPage.changed()
+        if (!demoArrivalsUp) runCatching { events?.onPinRemoved(gone.at) }
+    }
+
+    /** A stroke down on the arrival: not now, every note standing waits for his next visit there. */
+    private fun arrivalLater(standing: List<dev.kb896.aiusage.data.Pin>) {
+        Log.i(TAG, "arrival: swiped down — not now")
+        arrivalTurn.end()
+        if (demoArrivalsUp) return
+        for (p in standing) { arrivalPuts.later(p); runCatching { events?.onArrivalLater(p.at) } }
+        arrived = emptyList()
+    }
+
+    /**
+     * The notes as a payload has them: a note newer than any seen is shown on the back for a moment, as its confirmation.
+     *
+     * THE NOTES PAGE LISTS A NOTE FOR A PLACE ONLY WHILE THE PHONE IS THERE (dev.kb896.aiusage.place.Here: the app sends
+     * each note's Pin.here, and [pins] is Here.onBack of the payload's list). The arrivals are taken from the whole
+     * list (a note standing at its place stands also after he has left), and so is what is fresh (a place note coming
+     * back onto the page as he reaches it is not a new pin). A fresh note for a place is listed while its pin lands
+     * ([landing]), whatever is learnt of its place meanwhile. Every note keeps its own name (Pin.at), so the bin, the
+     * paging and the order told to the app act on the notes listed; the app puts a told order on its whole list with
+     * the hidden notes in their places (PinOrder.apply). A note for a place coming or going while he reads another
+     * leaves him on his ([listPins]).
+     */
+    private fun onPins(given: List<dev.kb896.aiusage.data.Pin>) {
+        // The order he gave them on the back, until the app's list has it (keptOrder).
+        var next = keptOrder(given)
         // A debug build's made-up notes are on the page for a look ("pins|…"): his own are kept aside and come back after.
-        if (demoPinsUp) { ownPins = next; return }
-        val newest = next.maxOfOrNull { it.freshAt } ?: 0L
+        if (!demoArrivalsUp) onArrivals(next) else ownArrived = next
+        if (demoPinsUp) { ownPins = dev.kb896.aiusage.place.Here.onBack(next, landing.at); return }
+        // Being put in order: the carousel's order over a payload from before his last move (NoteCarousel.ordered).
+        next = carousel.ordered(next)
+        val newestNote = next.maxByOrNull { it.freshAt }
+        val newest = newestNote?.freshAt ?: 0L
         val fresh = pinSeen >= 0L && newest > pinSeen
         pinSeen = maxOf(newest, 0L)
-        pins = next
-        // The table knows how many there are (a new one is in front: he stays on the note he is reading).
-        if (next.size != nav.pins) { noteTurn.end(); navStep(RearNav.Input.PinsAre(next.size), "the pinned notes") }
+        // A note just pinned for a place lands on the notes page whatever is known of its place meanwhile (NoteLanding).
+        if (fresh && landing.fresh(newestNote, android.os.SystemClock.uptimeMillis())) {
+            Log.i(TAG, "notes: a note for a place is landing — on the notes page until its landing is over${if (newestNote?.here == true) "" else " (its place not here)"}")
+            musicHandler.removeCallbacks(landingLook); musicHandler.postDelayed(landingLook, NoteLanding.MOST_MS)
+        }
+        val all = next.size
+        next = dev.kb896.aiusage.place.Here.onBack(next, landing.at)
+        if (all - next.size != pinsAway) { pinsAway = all - next.size; Log.i(TAG, "notes: $pinsAway note(s) for a place not here kept off the notes page") }
+        listPins(next, fresh, "the pinned notes")
+        // A picture just pinned: read now, so the landing, the veil and the page have it when they come.
+        if (fresh) notePictures.warm(listOf(newestNote?.image))
         if (fresh && (viaAt != 0L || android.os.SystemClock.uptimeMillis() - viaStartedAt < PinVia.TIDY_AT)) {
             // This pin goes through Xiaomi's own (pinVia): its arrival is Xiaomi's, and our notes page comes at its end.
             pinsPage.changed()
         } else if (fresh && faceWanted() && cover.isUp && rearLit(rearDisplay()) == true) {
             // BEAMED IN (PinBeam): the card that has just left the front comes out here and becomes the notes page.
             beamMade = true
-            pinBeam.play()
+            beamWithPicture(pins.firstOrNull()?.image, android.os.SystemClock.uptimeMillis())
         } else pinsPage.changed()
+    }
+
+    /**
+     * The beam's card is the notes page drawn once as it starts (ShellBeam): a picture's note starts it when its picture
+     * is in memory (read off this thread, a few ms), [BEAM_PICTURE_WAIT_MS] at most after [since]; no frame waits meanwhile.
+     */
+    private fun beamWithPicture(image: String?, since: Long) {
+        if (image == null || notePictures.has(image) || android.os.SystemClock.uptimeMillis() - since >= BEAM_PICTURE_WAIT_MS) { pinBeam.play(); return }
+        notePictures.warm(listOf(image))
+        musicHandler.postDelayed({ beamWithPicture(image, since) }, 8L)
+    }
+
+    /** A note just pinned for a place, on the notes page while its pin lands ([onPins]); its end looked at on the pages' thread. */
+    private val landing = NoteLanding()
+    /** How many notes for a place not here the last payload kept off the notes page (for the log, when it changes). */
+    private var pinsAway = 0
+    private val landingLook = Runnable { landingOver(nav.notes, "its time is up") }
+
+    /**
+     * The notes page [up] or not, now: if that ends the landing (NoteLanding.page), the landing note follows the rule
+     * from here: off the notes page unless he has reached its place meanwhile (the app's payload says so by then).
+     * Only the landing note goes, so a bin or an order made on the back meanwhile is kept as it is. On the pages' thread.
+     */
+    private fun landingOver(up: Boolean, why: String) {
+        val was = landing.at
+        if (!landing.page(up, android.os.SystemClock.uptimeMillis())) return
+        musicHandler.removeCallbacks(landingLook)
+        if (demoPinsUp) { ownPins = dev.kb896.aiusage.place.Here.onBack(ownPins); return }
+        val next = dev.kb896.aiusage.place.Here.onBack(pins)
+        Log.i(TAG, "notes: the pin has landed ($why)${if (next.any { it.at == was }) " — its place is here, it stays" else " — its place is not here, off the notes page"}")
+        if (next == pins) return
+        pinsAway += pins.size - next.size
+        listPins(next, fresh = false, why = "a note for a place not here has landed")
+        pinsPage.changed()
+    }
+
+    /**
+     * [next] is what the notes page lists from now: the table told how many there are and where the note he is reading
+     * has gone (RearNav.pinsAre: he stays on it, by its own Pin.at). A note for a place comes onto the page or leaves it
+     * at its own place in his order, not in front, while he may be reading another. [fresh]: [next] brings a note just
+     * pinned, in front.
+     */
+    private fun listPins(next: List<dev.kb896.aiusage.data.Pin>, fresh: Boolean, why: String) {
+        val s = nav
+        val shown = if (s.notes) pins.getOrNull(s.pin)?.at else null
+        pins = next
+        RearNav.pinsAre(s, shown, next.map { it.at }, fresh)?.let { noteTurn.end(); navStep(it, why) }
+    }
+
+    private var ownArrived: List<dev.kb896.aiusage.data.Pin> = emptyList()
+    private val demoArrivalsEnd = Runnable {
+        if (!demoArrivalsUp) return@Runnable
+        demoArrivalsUp = false
+        arrivalTurn.end()
+        arrived = emptyList()
+        onArrivals(ownArrived); ownArrived = emptyList()
+        Log.i(TAG, "arrival: demo arrivals ended")
     }
 
     // MADE-UP NOTES FOR A LOOK AT THE NOTES PAGE (a debug build's "pins|one||two||three"; "nopins" or a minute ends it):
@@ -3427,6 +3763,7 @@ class RearUserService : IRearService.Stub {
     private var ownPins: List<dev.kb896.aiusage.data.Pin> = emptyList()
     private val demoPinsEnd = Runnable {
         if (!demoPinsUp) return@Runnable
+        arrangeDrop("the made-up notes are going")
         demoPinsUp = false
         noteTurn.end()
         pins = ownPins; ownPins = emptyList()
@@ -3435,12 +3772,176 @@ class RearUserService : IRearService.Stub {
         Log.i(TAG, "notes: the made-up notes are gone, his own are back")
     }
 
+
+    private val carousel = NoteCarousel()
+    private val arrangeArt by lazy { NoteArrangeArt() }
+    /** The arrange reader's finger: down, where it landed (panel units), and whether its way is decided. */
+    private var arrangeDown = false
+    private var arrangeDownX = 0f
+    private var arrangeDownY = 0f
+    private var arrangeDecided = false
+    /** The order last told to the app, held over its payloads until one agrees: it may be frozen (HyperOS) and late. */
+    @Volatile private var toldOrder: List<Long>? = null
+    @Volatile private var toldOrderAt = 0L
+
+    /** Drawn every frame while it moves or a finger carries a note; once more as it ends, so the page is the page again. */
+    private val arrangeTick: Runnable = object : Runnable {
+        override fun run() {
+            val moving = carousel.step(android.os.SystemClock.uptimeMillis())
+            pinsPage.changed()
+            if (moving || carousel.carrying) pagePacer.post(this, ARRANGE_FRAME_MS.toFloat())
+            else if (!carousel.active) {
+                // The note the page comes back to has its picture from the first frame: its card held it (the shell's few in memory may not).
+                pins.getOrNull(nav.pin)?.image?.let { n -> notePictures.keep(n, arrangeArt.pictureOf(n)) }
+                arrangeArt.clear(); pinsPage.changed()
+            }
+        }
+    }
+
+    private fun arrangeKick() { musicHandler.post { pagePacer.cancel(arrangeTick); arrangeTick.run() } }
+
+    /** The carousel made what the navigation says ([applyNav]): up as arranging begins, back to the page as it ends. */
+    private fun arrangeFollow(s: RearNav.State, why: String) {
+        if (s.arrange) {
+            val list = pins
+            val held = list.getOrNull(s.pin) ?: return
+            noteTurn.end()
+            carousel.enter(list.map { it.at }, held.at)
+            haptic("lifted")
+            Log.i(TAG, "notes: note ${s.pin + 1} of ${list.size} lifted to be put in order${if (demoPinsUp) " (made-up notes)" else ""}")
+        } else {
+            // On a dark back at once; when the list changed under it at once too (its cards are not the notes now).
+            val untold = if (!s.lit || carousel.ids.toSet() != pins.map { it.at }.toSet()) carousel.reset() else carousel.leave()
+            Log.i(TAG, "notes: put in order — done (${why.ifEmpty { "it ended" }})")
+            // Ended under a carrying finger (a pop-up, dark, an urgent call…): the order it made is kept, so it is told.
+            untold?.let { tellOrder("ended in the middle of a carry, at ${it.indexOf(carousel.held) + 1} of ${it.size}", it) }
+        }
+        arrangeKick()
+    }
+
+    /** Arranging ends at once (the made-up notes come or go under it); a carry of his own notes is told (tellOrder). */
+    private fun arrangeDrop(why: String) {
+        if (!nav.arrange && !carousel.active) return
+        carousel.reset()?.let { tellOrder("ended in the middle of a carry", it) }
+        if (nav.arrange) navStep(RearNav.Input.ArrangeDone, why)
+        arrangeKick()
+    }
+
+    /** Held on the notes: lifted (two or more), or the page gives a little (one). */
+    private fun noteHold() {
+        val step = navStep(RearNav.Input.NoteHold, "press and hold")
+        if (step.does == RearNav.Does.GIVE) {
+            pins.getOrNull(nav.pin)?.let { carousel.give(it.at) }
+            arrangeKick()
+            Log.i(TAG, "notes: held with one note — nothing to put in order, the page gives")
+        }
+    }
+
+    /** Every touch, before the other readers: while arranging, a finger that goes sideways carries the held note. */
+    private fun arrangeFinger(e: RearTouches.Event) {
+        val fitX = geometry.fitX
+        when (e) {
+            is RearTouches.Down -> { arrangeDown = true; arrangeDownX = e.x; arrangeDownY = e.y; arrangeDecided = false }
+            is RearTouches.Move -> {
+                if (!arrangeDown) return
+                if (!arrangeDecided && nav.arrange && carousel.open) {
+                    val dx = e.x - arrangeDownX; val dy = e.y - arrangeDownY
+                    if (maxOf(kotlin.math.abs(dx), kotlin.math.abs(dy)) >= PageDrag.SLOP) {
+                        arrangeDecided = true
+                        // The same rule as PageDrag's: more across than up or down is sideways. Down is the page's own way out.
+                        if (kotlin.math.abs(dx) >= kotlin.math.abs(dy)) {
+                            sceneFingers.take()
+                            carousel.grab(arrangeDownX * fitX, e.atMs, geometry.widthPx.toFloat())
+                        }
+                    }
+                }
+                if (carousel.carrying) { for (slot in carousel.drag(e.x * fitX, e.atMs)) noteCarried(slot); arrangeKick() }
+            }
+            is RearTouches.Up -> {
+                arrangeDown = false
+                if (carousel.carrying) {
+                    // The places it passed on the way to the lift, then dropped there.
+                    for (slot in carousel.drag(e.x * fitX, e.atMs)) noteCarried(slot)
+                    if (carousel.drop(e.x * fitX, e.atMs)) tellOrder("dropped at ${carousel.heldAt + 1} of ${carousel.ids.size}")
+                    arrangeKick()
+                }
+            }
+        }
+    }
+
+    /** The held note has come to [slot], past one note: the order is the carousel's, the table told, one soft tick. */
+    private fun noteCarried(slot: Int) {
+        pins = dev.kb896.aiusage.data.PinOrder.applyPins(pins, carousel.ids)
+        navStep(RearNav.Input.NoteCarried(slot), "carried")
+        haptic("passed")
+    }
+
+    /** A tap while arranging: on another note the two swap places; on the held one or the ground it ends. */
+    private fun arrangeTap(px: Float, py: Float) {
+        sceneFingers.forget()
+        if (!nav.arrange || !carousel.open) return
+        val hit = carousel.hit(px, py, geometry.widthPx.toFloat(), geometry.heightPx.toFloat())
+        if (hit == null || hit == carousel.held) { navStep(RearNav.Input.ArrangeDone, if (hit == null) "a tap on the ground" else "a tap on the held note"); return }
+        val with = carousel.ids.indexOf(hit)
+        if (!carousel.swapWith(hit)) return
+        pins = dev.kb896.aiusage.data.PinOrder.applyPins(pins, carousel.ids)
+        navStep(RearNav.Input.NoteSwapped(with), "a tap on another note")
+        haptic("swapped")
+        tellOrder("swapped into ${with + 1} of ${carousel.ids.size}")
+        arrangeKick()
+    }
+
+    /**
+     * The order as it stands told to the app, which keeps it (PanelConfig.pins). [arranged] is the carousel's (a payload
+     * may have come since the last note passed): [pins] is put in it first, and the whole list is told. Made-up notes
+     * tell nothing.
+     */
+    private fun tellOrder(why: String, arranged: List<Long> = carousel.ids) {
+        if (demoPinsUp) { Log.i(TAG, "notes: the made-up notes put in order ($why) — nothing of his is told"); return }
+        pins = dev.kb896.aiusage.data.PinOrder.applyPins(pins, arranged)
+        val order = pins.map { it.at }
+        toldOrder = order; toldOrderAt = android.os.SystemClock.uptimeMillis()
+        Log.i(TAG, "notes: put in order ($why) — told to the app")
+        runCatching { events?.onPinsOrdered(order.toLongArray()) }.onFailure { Log.w(TAG, "notes: the order was not told — ${it.message}") }
+    }
+
+    /**
+     * A payload's notes in the order told last, until the app's own list has it (then that is forgotten): an app frozen
+     * by HyperOS may hear it late, and a payload from before it would put the notes back meanwhile. Told again with it.
+     */
+    private fun keptOrder(given: List<dev.kb896.aiusage.data.Pin>): List<dev.kb896.aiusage.data.Pin> {
+        val told = toldOrder ?: return given
+        if (android.os.SystemClock.uptimeMillis() - toldOrderAt > ORDER_HOLD_MS) { toldOrder = null; return given }
+        val kept = dev.kb896.aiusage.data.PinOrder.applyPins(given, told)
+        if (kept == given) { toldOrder = null; Log.i(TAG, "notes: the app keeps the order"); return given }
+        runCatching { events?.onPinsOrdered(told.toLongArray()) }
+        return kept
+    }
+
+    /**
+     * ONE LIGHT TICK under his finger (the note lifted, each note it passes, a swap). From the shell, which may vibrate:
+     * the app may be frozen. Xiaomi's tick (`prebaked 2`, VibrationEffect.EFFECT_TICK) by the vibrator's own shell
+     * command, on a thread of its own so a slow one never holds a frame.
+     */
+    private val hapticWorker by lazy { java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "notes-haptic").apply { isDaemon = true } } }
+    @Volatile private var hapticSaid = false
+    private fun haptic(why: String) {
+        runCatching {
+            hapticWorker.execute {
+                val out = exec("cmd vibrator_manager synced prebaked 2")
+                if (!hapticSaid || out.isNotEmpty()) { hapticSaid = true; Log.i(TAG, "notes: tick ($why)${if (out.isEmpty()) "" else " — the vibrator says: ${out.take(120)}"}") }
+            }
+        }
+    }
+
     // ---- A PIN THROUGH XIAOMI'S OWN (PinVia): its real arrival on the back for its second, ending on our notes page ----
 
     private val veil by lazy { ShellVeil(::rearLayerStack, { geometry }, musicHandler) }
     /** When Xiaomi's pin was started for the pin now under way (uptime); 0 for none. */
     @Volatile private var viaAt = 0L
     @Volatile private var viaText = ""
+    /** The pin under way is a picture's (its file's name): Xiaomi was handed the picture, and its card is found by kind. */
+    @Volatile private var viaImage: String? = null
     /** When the last pin went to Xiaomi's own, shown on the back or not: its note arriving in our list is not for our own beam. */
     @Volatile private var viaStartedAt = 0L
     @Volatile private var viaXiaomi = false
@@ -3449,14 +3950,31 @@ class RearUserService : IRearService.Stub {
     private var viaFull = false
     private var viaRefused = false
 
+    private val earbudsMoment by lazy { ShellEarbuds(::rearLayerStack, { geometry }, musicHandler) }
+
+    /**
+     * EARBUDS HAVE CONNECTED (the app's EarbudsWatch): the back's moment, light only (ShellEarbuds), from the moment the
+     * front's event is over. Shown only on a lit back of ours with no call and no pop-up or notifications over it,
+     * asked at that moment, not now.
+     */
+    override fun earbuds(b: android.os.Bundle?) {
+        val at = b?.getLong("at") ?: return
+        val level = b.getInt("level", -1).takeIf { it in 0..100 }
+        val picture = b.getByteArray("picture")?.let { runCatching { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
+        Log.i(TAG, "earbuds: connected — the back's moment at +${EarbudsMotion.BACK_AT} ms${if (picture == null) ", no picture of them" else ""}")
+        earbudsMoment.play(at, picture, level) { faceWanted() && cover.isUp && rearLit(rearDisplay()) == true && call == null && !notices.isUp }
+    }
+
     override fun pinVia(b: android.os.Bundle?) {
         val at = b?.getLong("at") ?: return
         val text = b.getString("text").orEmpty()
+        val image = b.getString("image")?.takeIf { dev.kb896.aiusage.data.PinImage.valid(it) }
+        if (image != null) notePictures.warm(listOf(image))
         // Shown only on a lit back of ours with nothing of his over it that must stay (a call): otherwise Xiaomi's
         // arrival plays under our cover unseen, and the note is on our notes page when he looks.
         val show = faceWanted() && cover.isUp && rearLit(rearDisplay()) == true && call == null && !notices.isUp
         Log.i(TAG, "pin: through Xiaomi's own${if (show) "" else " — the back is dark, another's or in a call: not shown there"}")
-        viaText = text; viaXiaomi = false; viaRefused = false; viaBright = false
+        viaText = text; viaImage = image; viaXiaomi = false; viaRefused = false; viaBright = false
         viaFull = dev.kb896.aiusage.BuildConfig.DEBUG && b.getBoolean("full")
         viaStartedAt = at
         // After its time, what THIS pin added to Xiaomi's own list is taken out of it again (known by when it was made).
@@ -3464,14 +3982,20 @@ class RearUserService : IRearService.Stub {
         popWaiter.execute {
             runCatching { Thread.sleep((at + PinVia.TIDY_AT - android.os.SystemClock.uptimeMillis()).coerceAtLeast(0L)) }
             val after = PinVia.notes(exec(PinVia.LIST))?.first ?: run { Log.i(TAG, "pin: Xiaomi's own list was not read — nothing taken out of it"); return@execute }
-            val gone = PinVia.tidy(wall, after, text)
+            // A picture's card has no words of ours: it is the one picture card made as this pin was (PinVia.tidyPicture).
+            val gone = if (image != null) PinVia.tidyPicture(wall, after) else PinVia.tidy(wall, after, text)
             for (id in gone) exec(PinVia.delete(id))
-            Log.i(TAG, "pin: Xiaomi's own list has ${after.size - gone.size} notes (${gone.size} of this pin's taken out again, by its own function)")
+            // Its kind for a picture is not yet seen on the phone: when none was found, the kinds made in those seconds (no words).
+            if (image != null && gone.isEmpty()) Log.i(TAG, "pin: no picture card of this pin's in Xiaomi's list — kinds made in its seconds: ${PinVia.kindsNear(wall, after)}")
+            Log.i(TAG, "pin: Xiaomi's own list has ${after.size - gone.size} notes (${gone.size} of this pin's${if (image != null) " (a picture)" else ""} taken out again, by its own function)")
         }
         if (!show) return
+        // Xiaomi's pin says each stage of its animation in the main log: that log is followed for this pin's time only.
+        followPinLog()
         viaAt = at; viaHanded = at; viaHeard = false; viaChecked = false; viaEnter = 0L; viaGaveUp = false
-        // The guard's cover (under ours) steps aside by itself when our hint is gone; ours stays up until the switch.
-        runCatching { java.io.File(COVER_HINT_FILE).delete() }
+        // The guard's cover (under ours) steps aside by itself when our hint says "0"; ours stays up until the switch.
+        // (Deleting the file no longer does: a missing hint means cover, RearCover.Hint.)
+        runCatching { java.io.File(COVER_HINT_FILE).writeText(RearCover.Hint(false, emptySet()).text()) }
         musicHandler.removeCallbacks(viaFrame)
         musicHandler.postAtTime(viaFrame, at + PinVia.CHECK_AT)
     }
@@ -3504,6 +4028,49 @@ class RearUserService : IRearService.Stub {
         // The frame that waits for the dip waits for the new time (the look at its window is at its old time, or done).
         if (viaChecked) { musicHandler.removeCallbacks(viaFrame); musicHandler.postAtTime(viaFrame, zero + PinVia.DIP_AT) }
     }
+    // XIAOMI'S PIN LINES, HEARD ONLY WHILE A PIN PLAYS: its two tags are in the main log, which the permanent reader
+    // (system and event logs only) does not follow any more. One short reader of the main log for those two tags, made
+    // through LogWatch (it cannot outlive this process), from the moment a pin is handed over until [PIN_LOG_MS] after
+    // the last one: the front's stages come 0.14 to 0.23 s after the hand-over, its arrival on the back about 2.4 s later.
+
+    private val pinLogLock = Any()
+    private var pinLog: Process? = null
+    @Volatile private var pinLogUntil = 0L
+
+    private fun followPinLog() {
+        val now = android.os.SystemClock.uptimeMillis()
+        pinLogUntil = now + PIN_LOG_MS
+        synchronized(pinLogLock) {
+            if (pinLog == null) {
+                val proc = try { LogWatch.start("main", PinVia.LOG_TAG + ":W", PinVia.REAR_TAG + ":W") }
+                catch (e: Exception) { Log.w(TAG, "pin: Xiaomi's lines not followed: no logcat (${e.message})"); null }
+                if (proc != null) {
+                    pinLog = proc
+                    Thread({
+                        try {
+                            proc.inputStream.bufferedReader().useLines { lines ->
+                                for (line in lines) PinVia.heard(line)?.let { onXiaomiPinLine(it, android.os.SystemClock.uptimeMillis()) }
+                            }
+                        } catch (_: java.io.IOException) {
+                        } catch (e: Throwable) { Log.w(TAG, "pin: Xiaomi's lines: ${e.message}") }
+                        LogWatch.stop(proc)
+                        synchronized(pinLogLock) { if (pinLog === proc) pinLog = null }
+                    }, "pin-log").apply { isDaemon = true; start() }
+                }
+            }
+        }
+        runCatching { holdHandler.removeCallbacks(pinLogEnds); holdHandler.postDelayed(pinLogEnds, PIN_LOG_MS) }
+    }
+
+    private val pinLogEnds: Runnable = object : Runnable {
+        override fun run() {
+            val left = pinLogUntil - android.os.SystemClock.uptimeMillis()
+            if (left > 0L) { holdHandler.postDelayed(this, left); return }
+            val proc = synchronized(pinLogLock) { pinLog.also { pinLog = null } }
+            LogWatch.stop(proc)
+        }
+    }
+
     /** When Xiaomi said its arrival on the back began (uptime); 0 while it has not. */
     private var viaEnter = 0L
     /** It was not said in its time: ours is back, and saying it now changes nothing. */
@@ -3533,7 +4100,7 @@ class RearUserService : IRearService.Stub {
             if (viaRefused) {
                 viaAt = 0L
                 runCatching { syncCover("Xiaomi's pin did not play") }
-                if (faceWanted() && cover.isUp && rearLit(rearDisplay()) == true) { beamMade = true; pinBeam.play() }
+                if (faceWanted() && cover.isUp && rearLit(rearDisplay()) == true) { beamMade = true; beamWithPicture(pins.firstOrNull()?.image, now) }
                 return
             }
             if (viaEnter == 0L && !viaGaveUp && t >= PinVia.ENTER_LATEST) {
@@ -3565,7 +4132,7 @@ class RearUserService : IRearService.Stub {
             }
             veil.put(plan.veil, plan.alpha) { c, w, h ->
                 val note = pins.firstOrNull()
-                PinFace.draw(c, w, h, note?.text ?: viaText, PinFace.stamp(note?.freshAt ?: System.currentTimeMillis(), System.currentTimeMillis()), 0, pins.size.coerceAtLeast(1), note?.placed == true)
+                PinFace.note(c, w, h, note, 0, pins.size.coerceAtLeast(1), text = viaText, image = viaImage)
                 // This layer lies over the dim layer (seen: the picture stood brighter than the page it gives way to):
                 // the back's level is put into the picture, so the real page under it is the same picture.
                 c.drawColor(android.graphics.Color.argb((handDim.alpha.coerceIn(0f, 1f) * 255f).toInt(), 0, 0, 0))
@@ -3586,7 +4153,7 @@ class RearUserService : IRearService.Stub {
                 if (demoText != null) { PinFace.draw(c, w, h, demoText, "now", 0, 1, false); demoMark(c, h) }
                 else {
                     val note = pins.firstOrNull()
-                    PinFace.draw(c, w, h, note?.text.orEmpty(), note?.let { PinFace.stamp(it.freshAt, System.currentTimeMillis()) }.orEmpty(), 0, pins.size, note?.placed == true)
+                    PinFace.note(c, w, h, note, 0, pins.size)
                 }
             },
             onLanded = { demo ->
@@ -3645,7 +4212,9 @@ class RearUserService : IRearService.Stub {
             if (!s.lit) append("dark ")
             if (!s.ours) append("another's ")
             if (s.pop) append("pop-up over ")
+            if (s.picker) append("picker over ")
             if (s.shade) append("notifications over ")
+            if (s.arrange) append("arranging (holding note ${s.pin + 1} of ${s.pins}) ")
             if (s.notes) append(if (s.pin > 0) "notes (note ${s.pin + 1} of ${s.pins}) over " else "notes over ")
             append(row)
         }
@@ -3656,27 +4225,43 @@ class RearUserService : IRearService.Stub {
         is RearNav.Input.LiveComes -> "${i.kind.name.lowercase()} is new${if (i.urgent) " (urgent)" else ""}"
         is RearNav.Input.LiveEnds -> "${i.kind.name.lowercase()} ended"
         is RearNav.Input.LiveUpdates -> "${i.kind.name.lowercase()} goes on"
+        is RearNav.Input.PopArrives -> if (i.fixed) "a pop-up (one not to be thrown out)" else "a pop-up"
         else -> i.toString().lowercase()
     }
 
     /** The layers made what [step]'s state says. What is under a page that leaves is in its place already. */
     private fun applyNav(was: RearNav.State, step: RearNav.Step, why: String) {
         val reason = why.ifEmpty { step.anim.name.lowercase().replace('_', ' ') }
+        // The picker taken away by something else than its own end (dark, an app, something live, a note): dropped at
+        // once, the old face whole under whatever comes. Its own end (PICKER_OUT) plays its exit itself.
+        if (was.picker && !step.state.picker && step.anim != RearNav.Anim.PICKER_OUT) picker.drop(reason)
         // The live page first: when usage or the notes go, it is under them before they move.
         applyLive(step.anim)
+        // And what is under the pages as the new state has it: the scene moving again and the live page drawn the moment
+        // what covers them is sent away, before it moves (HiddenFrames; the pages' own calls are on their thread, after this).
+        syncHidden()
+        // The notes lifted into their carousel, or back to the page (NoteCarousel).
+        if (was.arrange != step.state.arrange) arrangeFollow(step.state, why)
         // The pages by the state AS IT IS NOW, one caller at a time: steps come from several threads (the touch
         // reader, the timers, the app's calls), and whichever gets here last leaves the layers as the latest state has them.
         synchronized(pagesAsked) {
             val s = nav
             val wantUsage = s.row == RearNav.Row.USAGE
             if (wantUsage != pagesAsked[0]) { pagesAsked[0] = wantUsage; if (wantUsage) usage.show() else usage.hide(reason) }
-            if (s.notes != pagesAsked[1]) { pagesAsked[1] = s.notes; if (s.notes) pinsPage.show(if (pinLanding) PIN_CONFIRM_MS else 0L, atOnce = pinLanding) else pinsPage.hide(reason) }
+            if (s.notes != pagesAsked[1]) {
+                pagesAsked[1] = s.notes
+                if (s.notes) pinsPage.show(if (pinLanding) PIN_CONFIRM_MS else 0L, atOnce = pinLanding) else pinsPage.hide(reason)
+                // A note for a place not here that has landed leaves the list as its page goes (NoteLanding).
+                if (landing.at != 0L) { val up = s.notes; musicHandler.post { landingOver(up, reason) } }
+            }
+            applyArrival(s, step.anim, reason)
         }
         // The shade is ShellNotices' own (it tells the navigation when it is up and gone); told to go when the table shuts it.
         if (was.shade && !step.state.shade && notices.isUp) runCatching { notices.closeNow(reason) }
         // A pop-up a stroke took away (the table's POP_OUT before its time).
         if (was.pop && !step.state.pop && step.anim == RearNav.Anim.POP_OUT) runCatching { holdHandler.removeCallbacks(popEnds); notices.popGone() }
-        // The moon is what shows and the scene is not on it (it does not run under the charging page): at once, not at the stay loop's next look.
+        // The moon is what shows and the scene is not on it (the scene does not come back under the charging page
+        // (sceneMayReturn); one already up is held under it (HiddenFrames)): at once, not at the stay loop's next look.
         if (RearNav.seen(step.state) == RearNav.Seen.MOON && !scene.isUp) runCatching { holdHandler.removeCallbacks(stayTick); holdHandler.post(stayTick) }
         syncTouchWatch()
     }
@@ -3709,7 +4294,21 @@ class RearUserService : IRearService.Stub {
                 if (!was || redraw) frame()
             } else if (face.isUp) face.hide(moving = slideOut)
         }
-        // A timer takes the whole back, over the scene; a call comes before it; what is playing after both.
+        if (show == RearNav.Live.NAVIGATION) {
+            val route = navigation
+            if (!navigationFace.isUp) {
+                liveUpAt = android.os.SystemClock.uptimeMillis()
+                navigationFace.show(moving = slideIn)
+                navigationFrame(draw = false)
+            } else if (route != null && route != navigationDrawn) {
+                if (liveSeen()) {
+                    if (!musicHandler.hasCallbacks(navigationTick)) musicHandler.post(navigationTick)
+                } else liveHeld = true
+            }
+        } else if (navigationFace.isUp) {
+            pagePacer.cancel(navigationTick)
+            navigationFace.hide(moving = slideOut)
+        }
         card(timerFace, RearNav.Live.TIMER) { timerFrame() }
         card(callFace, RearNav.Live.CALL) { callFrame() }
         card(musicFace, RearNav.Live.MUSIC) { musicFrame() }
@@ -3727,7 +4326,7 @@ class RearUserService : IRearService.Stub {
         }
     }
 
-    /** What is live now, for the log's line: a call before a timer before what is playing (or has just paused). */
+    /** What is live now, for the log: a call, navigation, a timer, then playing or recently paused music. */
     private fun liveToken(now: Long = android.os.SystemClock.uptimeMillis()): PageRow.Token? {
         val m = media
         val playing = m != null && (m.playing || now - maxOf(mediaAliveAt, mediaTouchedAt) < MEDIA_LINGER_MS)
@@ -3737,6 +4336,7 @@ class RearUserService : IRearService.Stub {
             // whichever spoke last must not make the timer a "new" one.
             timer?.let { PageRow.timer(it.pkg, it.total, it.over) },
             if (playing) PageRow.music(musicStarts) else null,
+            navigation = navigationLive()?.let { PageRow.navigation(it.key) },
         )
     }
 
@@ -3746,6 +4346,7 @@ class RearUserService : IRearService.Stub {
         val playing = m != null && (m.playing || now - maxOf(mediaAliveAt, mediaTouchedAt) < MEDIA_LINGER_MS)
         fun mark(t: PageRow.Token?) = t?.let { "${it.key}#${it.phase}" }
         val marks = arrayOfNulls<String>(RearNav.Live.values().size)
+        marks[RearNav.Live.NAVIGATION.ordinal] = mark(navigationLive()?.let { PageRow.navigation(it.key) })
         marks[RearNav.Live.CALL.ordinal] = mark(call?.let { PageRow.call(it.key, it.ringing) })
         marks[RearNav.Live.TIMER.ordinal] = mark(timer?.let { PageRow.timer(it.pkg, it.total, it.over) })
         marks[RearNav.Live.MUSIC.ordinal] = if (playing) mark(PageRow.music(musicStarts)) else null
@@ -3770,14 +4371,29 @@ class RearUserService : IRearService.Stub {
         // One stroke, one page: a finger that landed before the last move's page had settled moves nothing (PageRow.Strokes).
         val sliding = !rowStrokes.mayMove(downAt)
         val was = nav
-        val step = navStep(RearNav.Input.Stroke(way, RearNav.From.MIDDLE, sliding))
-        if (sliding && RearNav.next(was, RearNav.Input.Stroke(way)).let { it.state != was || it.does != RearNav.Does.NOTHING }) {
+        // On a pop-up: meant for it only if its finger landed once it had been there a moment (NoticeThrow.aimed).
+        val aimed = !was.pop || NoticeThrow.aimed(popAt, downAt)
+        val step = navStep(RearNav.Input.Stroke(way, RearNav.From.MIDDLE, sliding, aimed))
+        if (!aimed && was.pop) Log.i(TAG, "notices: a stroke not meant for the pop-up — its finger was on its way before it came; nothing done")
+        else if (sliding && RearNav.next(was, RearNav.Input.Stroke(way)).let { it.state != was || it.does != RearNav.Does.NOTHING }) {
             Log.i(TAG, "row: a stroke ignored — its finger landed before the last page had settled")
         }
         // Whatever this stroke did (a page, or the Camera left of home), the next one waits for it to settle.
         if (step.state != was || step.does == RearNav.Does.OPEN_CAMERA) rowStrokes.moved(at)
+        // The pop-up thrown out sideways: on from where the finger left it, the way it went; its notification dismissed
+        // or snoozed for the hour (ShellNotices, NoticeThrow). One that may not be thrown: back to its place.
+        when (step.anim) {
+            RearNav.Anim.POP_THROWN_LEFT, RearNav.Anim.POP_THROWN_RIGHT -> runCatching {
+                holdHandler.removeCallbacks(popEnds)
+                val kind = if (step.does == RearNav.Does.SNOOZE) NoticeThrow.Kind.SNOOZE else NoticeThrow.Kind.DISMISS
+                if (!notices.popThrown(if (step.anim == RearNav.Anim.POP_THROWN_LEFT) -1f else 1f, kind)) notices.popGone()
+            }
+            RearNav.Anim.POP_GIVES -> { Log.i(TAG, "notices: the pop-up may not be dismissed or snoozed — it springs back"); popBack() }
+            else -> Unit
+        }
         when (step.does) {
-            RearNav.Does.OPEN_CAMERA -> runCatching { popWaiter.execute { Log.i(TAG, "camera: swiped open"); openCamera(rearDisplay()) } }
+            RearNav.Does.OPEN_CAMERA -> runCatching { popWaiter.execute { Log.i(TAG, "camera: swiped open"); openCamera(rearDisplay(), fromMoon = true) } }
+            RearNav.Does.ARRIVAL_LATER -> arrivalLater(arrived)
             else -> Unit
         }
         // Along the notes: the one that showed goes out as the next comes in (from wherever the finger had it).
@@ -3786,6 +4402,10 @@ class RearUserService : IRearService.Stub {
             RearNav.Anim.NOTE_NEWER -> { noteTurn.go(was.pin, step.state.pin, -1); Log.i(TAG, "notes: back to a newer one (${step.state.pin + 1} of ${step.state.pins})") }
             RearNav.Anim.NOTE_END_OLDER -> { noteTurn.go(was.pin, -1, +1); Log.i(TAG, "notes: no older one — the page gives and stays") }
             RearNav.Anim.NOTE_END_NEWER -> { noteTurn.go(was.pin, -1, -1); Log.i(TAG, "notes: no newer one — the page gives and stays") }
+            RearNav.Anim.ARRIVAL_OLDER -> arrivalTurn.go(was.arrival, step.state.arrival, +1)
+            RearNav.Anim.ARRIVAL_NEWER -> arrivalTurn.go(was.arrival, step.state.arrival, -1)
+            RearNav.Anim.ARRIVAL_END_OLDER -> arrivalTurn.go(was.arrival, -1, +1)
+            RearNav.Anim.ARRIVAL_END_NEWER -> arrivalTurn.go(was.arrival, -1, -1)
             else -> Unit
         }
         // The old words, kept for whoever reads the log by them.
@@ -3806,7 +4426,8 @@ class RearUserService : IRearService.Stub {
     // the table once, as the finger's way is known ([dragTracks]): what the table would do with that stroke NOW.
 
     private val pageDrag = PageDrag()
-    private class Dragged(val anim: RearNav.Anim, val coming: Boolean, val extent: Float, val peek: (Float) -> Unit, val unpeek: () -> Unit)
+    /** [pop]: for the pop-up under the finger, which one it is ([popSerial]); -1 for any other page. */
+    private class Dragged(val anim: RearNav.Anim, val coming: Boolean, val extent: Float, val peek: (Float) -> Unit, val unpeek: () -> Unit, val pop: Long = -1L)
     @Volatile private var dragged: Dragged? = null
 
     private fun navWay(w: PageDrag.Way) = when (w) {
@@ -3814,6 +4435,7 @@ class RearUserService : IRearService.Stub {
     }
 
     private fun liveCard(kind: RearNav.Live?): ShellCard? = when (kind) {
+        RearNav.Live.NAVIGATION -> navigationFace
         RearNav.Live.TIMER -> timerFace; RearNav.Live.CALL -> callFace; RearNav.Live.MUSIC -> musicFace
         else -> null
     }
@@ -3828,8 +4450,12 @@ class RearUserService : IRearService.Stub {
         dragged = null
         if (sceneTouchMode(e, from) == SceneTouch.Mode.NONE) return false
         val s = nav
-        // Not under a pop-up (a stroke takes that away), not while the last page still slides, not the notifications' own pull.
-        if (!s.lit || !s.ours || s.shade || s.pop || !rowStrokes.mayMove(downAt)) return false
+        if (!s.lit || !s.ours || s.shade) return false
+        // THE POP-UP FOLLOWS A FINGER GOING SIDEWAYS (NoticeThrow): thrown out at the lift (dismissed or snoozed, by the
+        // table), or back to its place; one that may not be thrown only gives. Up and down take it away as before.
+        if (s.pop) return popTracks(s, way, downAt)
+        // Not while the last page still slides, not the notifications' own pull.
+        if (!rowStrokes.mayMove(downAt)) return false
         if (way == PageDrag.Way.DOWN && from.topNotices() && PortalPull.startsTopPull(downX, downY, geometry.fitX)) return false
         val step = RearNav.next(s, RearNav.Input.Stroke(navWay(way)))
         val w = dev.kb896.aiusage.Panel.WIDTH.toFloat(); val h = dev.kb896.aiusage.Panel.HEIGHT.toFloat()
@@ -3842,6 +4468,11 @@ class RearUserService : IRearService.Stub {
             RearNav.Anim.NOTE_NEWER -> Dragged(step.anim, true, w, { noteTurn.peek(s.pin, step.state.pin, -1, it) }, { noteTurn.back() })
             RearNav.Anim.NOTE_END_OLDER -> Dragged(step.anim, true, w, { noteTurn.peek(s.pin, -1, +1, it) }, { noteTurn.back() })
             RearNav.Anim.NOTE_END_NEWER -> Dragged(step.anim, true, w, { noteTurn.peek(s.pin, -1, -1, it) }, { noteTurn.back() })
+            RearNav.Anim.ARRIVAL_OUT -> Dragged(step.anim, false, h, { arrivalPage.peek(it) }, { arrivalPage.unpeek() })
+            RearNav.Anim.ARRIVAL_OLDER -> Dragged(step.anim, true, w, { arrivalTurn.peek(s.arrival, step.state.arrival, +1, it) }, { arrivalTurn.back() })
+            RearNav.Anim.ARRIVAL_NEWER -> Dragged(step.anim, true, w, { arrivalTurn.peek(s.arrival, step.state.arrival, -1, it) }, { arrivalTurn.back() })
+            RearNav.Anim.ARRIVAL_END_OLDER -> Dragged(step.anim, true, w, { arrivalTurn.peek(s.arrival, -1, +1, it) }, { arrivalTurn.back() })
+            RearNav.Anim.ARRIVAL_END_NEWER -> Dragged(step.anim, true, w, { arrivalTurn.peek(s.arrival, -1, -1, it) }, { arrivalTurn.back() })
             RearNav.Anim.LIVE_IN -> liveCard(step.state.live)?.let { c -> Dragged(step.anim, true, w, { c.peek(it) }, { c.unpeek() }) }
             RearNav.Anim.LIVE_OUT -> liveCard(s.live)?.let { c -> Dragged(step.anim, false, w, { c.peek(it) }, { c.unpeek() }) }
                 // The charging page (its own layer) follows the finger out too, the way the finger goes: to the right, up or down.
@@ -3853,15 +4484,53 @@ class RearUserService : IRearService.Stub {
         return dragged != null
     }
 
+    /**
+     * A finger going [way] on the pop-up: followed if the table throws it out that way, or has it give. Not a finger
+     * that was on its way before this pop-up came ([downAt], NoticeThrow.aimed): the other reader has it, and the table
+     * does nothing with its stroke.
+     */
+    private fun popTracks(s: RearNav.State, way: PageDrag.Way, downAt: Long): Boolean {
+        if (way != PageDrag.Way.LEFT && way != PageDrag.Way.RIGHT) return false
+        val serial = popSerial
+        if (!NoticeThrow.aimed(popAt, downAt)) return false
+        val step = RearNav.next(s, RearNav.Input.Stroke(navWay(way)))
+        val give = step.anim == RearNav.Anim.POP_GIVES
+        if (!give && step.anim != RearNav.Anim.POP_THROWN_LEFT && step.anim != RearNav.Anim.POP_THROWN_RIGHT) return false
+        val w = dev.kb896.aiusage.Panel.WIDTH.toFloat()
+        val dir = if (way == PageDrag.Way.LEFT) -1f else 1f
+        // Its time stands still under the finger (the banner's own); the navigation's end of it waits, at most this long.
+        runCatching { holdHandler.removeCallbacks(popEnds); holdHandler.postDelayed(popEnds, POP_HELD_MOST_MS) }
+        dragged = Dragged(step.anim, false, w, { part ->
+            val dx = (1f - part) * w * dir
+            notices.popPeek(if (give) NoticeThrow.give(dx) else dx)
+        }, { popBack() }, pop = serial)
+        return true
+    }
+
+    /** The pop-up a drag was following is gone, or another has taken its place: the finger is no longer on it. */
+    private fun popLost(d: Dragged) = d.pop >= 0L && NoticeThrow.popLift(d.pop, popSerial, nav.pop, 0f, 0L, 0L) == NoticeThrow.Lift.NOTHING
+
     private fun dragAt(travel: Float) {
         val d = dragged ?: return
+        if (popLost(d)) return
         d.peek(PageDrag.inPart(d.coming, travel, d.extent))
     }
 
     private fun dragEnd(o: PageDrag.Out.End) {
         val d = dragged ?: return
         dragged = null
-        if (!o.turns) {
+        // The pop-up under the finger (NoticeThrow.popLift): gone or replaced, the lift does nothing at all (sent on as a
+        // stroke it would turn the page under, usage or the Camera, or throw out one he has not seen); thrown only by a
+        // stroke meant as one, 150 units within a swipe's time, not PageDrag's fling of 40.
+        val turns = if (d.pop < 0L) o.turns else when (NoticeThrow.popLift(d.pop, popSerial, nav.pop, o.travel, o.downAt, o.at)) {
+            NoticeThrow.Lift.NOTHING -> {
+                Log.i(TAG, "notices: the pop-up the finger had is gone or another took its place — nothing thrown")
+                return
+            }
+            NoticeThrow.Lift.BACK -> false
+            NoticeThrow.Lift.THROW -> true
+        }
+        if (!turns) {
             Log.i(TAG, "drag: let go short (${o.travel.toInt()} units) — the page goes back")
             d.unpeek()
             return
@@ -3875,6 +4544,24 @@ class RearUserService : IRearService.Stub {
     private fun sceneTouch(e: RearTouches.Event, from: EdgeGestures) {
         if (usage.isUp) usage.touched()
         if (pinsPage.isUp) pinsPage.touched()
+        if (arrivalPage.isUp) arrivalPage.touched()
+        // Arranging the notes: a finger sideways carries the held one (before the other readers, who then let it go).
+        arrangeFinger(e)
+        if (e is RearTouches.Down) {
+            fingerDownX = e.x; fingerDownY = e.y; pickerDownAt = e.atMs
+            // A tap on a pinned picture waiting to open it on the front: another finger has come, so it opens nothing (PictureTap).
+            pictureTap.landed()
+            // The back's light read as the finger lands, ahead of anything queued: the table decides its stroke by it.
+            if (lightPolling) runCatching { holdHandler.removeCallbacks(lightOnce); holdHandler.postAtFrontOfQueue(lightOnce) }
+        }
+        // THE PICKER READS ITS OWN FINGER (PickerTouch): nothing here makes a tap, a swipe, a hold or a page drag of it.
+        // (A pop-up over it has the whole back, as everywhere: a stroke takes the pop-up away and the picker is there again.)
+        if (pickerHasFinger()) {
+            sceneFingers.feed(e) { SceneTouch.Mode.PICKER }
+            if (nav.picker) picker.feed(e)
+            return
+        }
+        faceTouch(e)
         val rear = geometry
         // NO BACK TAB AND NO BACK GESTURE ON OUR PAGES. A page's strokes are the row's own, wherever on the back they
         // start. A finger whose way turns a page is followed (PageDrag), and is not the other reader's from then on.
@@ -3923,10 +4610,15 @@ class RearUserService : IRearService.Stub {
                     }
                 }
                 // The bin: the note showing is taken off the back, and the app keeps the list.
-                SceneTouch.Mode.NOTES -> if (!PinFace.onBin(o.x * rear.fitX, o.y * rear.fitY)) onTap() else nav.pin.let { at -> pins.getOrNull(at)?.let { gone ->
+                // Arranging: a tap on another note swaps the two, on the held one or the ground ends it; no bin then.
+                // A tap on the note's picture: the back bright as for any tap, and the picture opened on the front once no
+                // second tap has come (PictureTap).
+                SceneTouch.Mode.NOTES -> if (nav.arrange || carousel.active) arrangeTap(o.x * rear.fitX, o.y * rear.fitY) else if (!PinFace.onBin(o.x * rear.fitX, o.y * rear.fitY)) { onTap(); pictureTapped(o) } else nav.pin.let { at -> pins.getOrNull(at)?.let { gone ->
                     sceneFingers.forget()
                     Log.i(TAG, "notes: one removed on the back")
                     pins = pins.filter { it.at != gone.at }
+                    // Its picture, if it had one, let go here (the app deletes its file as it takes the note off its list).
+                    notePictures.forget(gone.image)
                     // The note he was on is gone: the next older one shows in its place (the last, if it was the oldest).
                     noteTurn.end()
                     navStep(RearNav.Input.PinRemoved(at), "its bin")
@@ -3935,44 +4627,505 @@ class RearUserService : IRearService.Stub {
                     if (!demoPinsUp) runCatching { events?.onPinRemoved(gone.at) }
                 } }
                 SceneTouch.Mode.CHARGE -> onTap()
+                // A standing arrival: its bin is done; any other tap is the back bright, as everywhere.
+                SceneTouch.Mode.ARRIVAL -> if (PinFace.onBin(o.x * rear.fitX, o.y * rear.fitY)) arrivalBin() else { onTap(); pictureTapped(o) }
                 else -> Unit
             }
             is SceneTouch.Out.DoubleTap -> onDoubleTap(o)
             // Down from the top edge's pull zone is the notifications' own pull (EdgeGestures, ShellNotices); every other
             // stroke that begins there is a stroke like any (it used to be dropped, with every tap there).
             is SceneTouch.Out.Swipe -> if (o.on != SceneTouch.Mode.NONE && !(o.way == SceneTouch.Way.DOWN && from.topNotices() && PortalPull.startsTopPull(o.fromX, o.fromY, rear.fitX))) strokeGo(o)
+            // HELD ON THE FACE: the picker (Xiaomi's, copied). Asked only while the face is what shows, so a finger held
+            // on a live page's button is never taken from it.
             SceneTouch.Out.FirstDown -> runCatching {
+                val x = fingerDownX; val y = fingerDownY; val at = pickerDownAt
                 holdHandler.postDelayed({
-                    if (sceneFingers.heldAlone(android.os.SystemClock.uptimeMillis())) nextFace()
-                }, SceneTouch.SWITCH_MS + 20L)
+                    if (RearNav.seen(nav) == RearNav.Seen.MOON && sceneFingers.heldAlone(android.os.SystemClock.uptimeMillis())) openPicker(x, y, at)
+                }, SceneTouch.PICKER_HOLD_MS + 20L)
+            }
+            // Held on the notes page: lifted to be put in order (on the pages' thread: the hold thread waits on shell commands).
+            SceneTouch.Out.NotesDown -> runCatching {
+                musicHandler.postDelayed({
+                    if (sceneFingers.heldOnNotes(android.os.SystemClock.uptimeMillis())) noteHold()
+                }, SceneTouch.NOTE_HOLD_MS + 20L)
             }
             SceneTouch.Out.SecondDown -> runCatching {
                 holdHandler.postDelayed({
                     if (sceneFingers.held(android.os.SystemClock.uptimeMillis())) {
-                        // Off by hand: the dark edge right after a double tap sets the latch (ManualOff),
-                        // so nothing of ours lights it again until he wakes it himself.
                         Log.i(TAG, "scene: double tap and hold — the back off")
-                        lastDoubleTapAt = android.os.SystemClock.elapsedRealtime()
-                        execChecked("cmd power sleep --group-id ${rearPowerGroup(rearDisplay())}")
+                        backOffByHand()
                     }
                 }, SceneTouch.HOLD_MS + 20L)
             }
         }
     }
 
-    /**
-     * A press and hold on the scene: the next face, of the clips named "….loop.mp4" in the clips
-     * folder, in their order, round and round. Shown at once from here, and told to the app, which
-     * keeps the choice (PanelConfig.sceneLoop) and sends it back with the next payload.
-     */
-    private fun nextFace() {
-        val faces = SceneFaces.list(java.io.File(CLIPS_DIR).list())
-        val next = SceneFaces.next(faces, sceneLoop) ?: return
-        Log.i(TAG, "scene: press and hold — $next")
-        sceneLoop = next
-        clipPath(next)?.let { scene.play(null, it, android.os.SystemClock.uptimeMillis(), waitForLight = false) }
-        runCatching { events?.onFacePicked(next) }.onFailure { Log.w(TAG, "scene: the face was not told — ${it.message}") }
+    // -- A TAP ON A PINNED PICTURE OPENS IT ON THE FRONT (PictureTap; ui/PinViewActivity) -------------------------------
+
+    private val pictureTap = PictureTap()
+
+    /** What [on] (the notes page or an arrival's) shows now, for [pictureTap]. */
+    private fun pictureUnder(on: SceneTouch.Mode): PictureTap.Under {
+        val notes = on == SceneTouch.Mode.NOTES
+        val note = if (notes) pins.getOrNull(nav.pin) else arrived.getOrNull(nav.arrival)
+        return PictureTap.Under(
+            note = note,
+            place = note?.image?.let { PinFace.pictureAt(note.text, it) },
+            up = if (notes) pinsPage.isUp else arrivalPage.isUp,
+            moving = if (notes) noteTurn.active || carousel.active || nav.arrange else arrivalTurn.active,
+            lit = nav.lit,
+            inCall = call != null,
+            madeUp = if (notes) demoPinsUp else demoArrivalsUp,
+        )
     }
+
+    /**
+     * A tap (no bin's) on the notes page or an arrival: on the note's picture, the open waits out the double tap's window
+     * (on the pages' thread, as the notes' hold: the hold thread waits on shell commands, and the open would wait with it).
+     */
+    private fun pictureTapped(o: SceneTouch.Out.Tap) {
+        val rear = geometry
+        if (pictureTap.tapped(o.x * rear.fitX, o.y * rear.fitY, o.on, pictureUnder(o.on), android.os.SystemClock.uptimeMillis()))
+            runCatching { musicHandler.removeCallbacks(pictureDue); musicHandler.postDelayed(pictureDue, PictureTap.WAIT_MS) }
+    }
+
+    /** The double tap's window is over: the picture opened on the front by the shell (an app frozen by HyperOS cannot). */
+    private val pictureDue = Runnable {
+        val p = pictureTap.due(android.os.SystemClock.uptimeMillis(), ::pictureUnder) ?: return@Runnable
+        Log.i(TAG, "notes: a pinned picture tapped on ${if (p.on == SceneTouch.Mode.ARRIVAL) "an arrival" else "the notes page"} — opened on the front")
+        Thread({
+            val out = exec(PictureTap.command(BuildConfig.APPLICATION_ID, p.at))
+            if (out.contains("Error", ignoreCase = true) || out.contains("Exception")) Log.w(TAG, "notes: the picture was not opened on the front: ${out.take(160)}")
+        }, "picture-open").apply { isDaemon = true; start() }
+    }
+
+    /**
+     * THE BACK OFF BY HAND (a double tap and hold, or three fingers held when that is their choice): the rear group
+     * asleep, and the dark edge right after it sets the latch (ManualOff.byDoubleTap, by [lastDoubleTapAt]), so nothing
+     * of ours lights it again until he wakes it himself. On [holdHandler] (it waits on a shell command).
+     */
+    private fun backOffByHand() {
+        lastDoubleTapAt = android.os.SystemClock.elapsedRealtime()
+        execChecked("cmd power sleep --group-id ${rearPowerGroup(rearDisplay())}")
+    }
+
+
+    /** The touch watch's ThreeHold (one per getevent), for [threeCheck]. */
+    @Volatile private var threeHold: ThreeHold? = null
+    /** The choice, from the settings (styleFrame). */
+    @Volatile private var threeFingers = dev.kb896.aiusage.data.ThreeFingers.SCREENSHOT
+    /** A hold under way is complete at the time it said (ThreeHold.Out.Arm): asked then, as getevent is quiet while fingers lie still. */
+    private val threeCheck = Runnable { threeHold?.due(android.os.SystemClock.uptimeMillis())?.let { onThreeFingers(it) } }
+
+    /**
+     * Another finger is down with the first: what the first was becoming goes. The scene's reader makes nothing more of it
+     * and forgets a tap before it; a page following it goes back (a pop-up too, never thrown); a Xiaomi face is told
+     * its touch is cancelled; the picker's finger means nothing more. On the reader thread, before the frame's moves.
+     */
+    private fun fingersCrowded() {
+        sceneFingers.crowded()
+        pictureTap.landed()
+        if (pageDrag.crowded()) dragged?.let { d ->
+            dragged = null
+            if (!popLost(d)) d.unpeek()
+        }
+        if (faceFingerDown) { faceFingerDown = false; runCatching { scene.face?.touch(android.view.MotionEvent.ACTION_CANCEL, 0f, 0f) } }
+        if (pickerHasFinger()) runCatching { picker.crowded() }
+        // The screenshot's polaroid and the recording's pill keep the finger they own (nothing under them sees it), but
+        // its lift neither bins, flicks nor stops anything; a card it dragged goes back.
+        synchronized(sheetLock) {
+            if (binOwns && !binCrowded) {
+                binCrowded = true
+                if (shotDragging) runCatching { shotPolaroid.release(0f) }
+            }
+            if (pillOwns) pillCrowded = true
+        }
+        Log.i(TAG, "fingers: more than one down — no tap, stroke, page drag or hold of the face and pages, and nothing of the polaroid or the pill, comes of this touch")
+    }
+
+    /**
+     * THREE FINGERS HELD (ThreeHold has fired): what the settings say, only on a lit back that is ours. One log line.
+     * The screenshot is taken before anything of ours is drawn for it (the polaroid comes after, from the file); the
+     * control centre is closed first only if it is up. Any thread.
+     */
+    private fun onThreeFingers(f: ThreeHold.Out.Fire) {
+        val s = nav
+        val ours = faceWanted() && cover.isUp && s.lit && s.ours
+        val did = ThreeFingersAct.run(threeFingers, ours, object : ThreeFingersAct.Does {
+            override fun screenshot() { runCatching { captureWorker.execute { this@RearUserService.screenshot("three fingers", clearFirst = controlCenter.isUp) } } }
+            override fun recording() { runCatching { captureWorker.execute { toggleRecording("three fingers") } } }
+            override fun backOff() { runCatching { holdHandler.post { backOffByHand() } } }
+        })
+        // The widest finger's size goes in too: the panel reports no palms, and a size limit is to be measured from these.
+        Log.i(TAG, "three fingers: ${f.fingers} held ${f.heldMs} ms, landed within ${f.spreadMs} ms at (${f.x.toInt()}, ${f.y.toInt()}), widest ${f.widest} — $did")
+    }
+
+
+    /** Where the finger that is down landed (panel units, the reader's clock), for the picker it may open. */
+    @Volatile private var fingerDownX = 0f
+    @Volatile private var fingerDownY = 0f
+    @Volatile private var pickerDownAt = 0L
+
+    private val mamlHost by lazy { MamlHost(context) }
+    private val faceScan by lazy { FaceScan(indexFile = java.io.File("${MamlHost.DIR}/index.json")) }
+    private val facesThread by lazy {
+        android.os.Handler(android.os.HandlerThread("rear-faces", android.os.Process.THREAD_PRIORITY_LOWEST).apply { isDaemon = true; start() }.looper)
+    }
+    private val faceSchedule = FaceScan.Schedule()
+    private val faceWatches = ArrayList<android.os.FileObserver>()
+    @Volatile private var facesStarted = false
+
+    /** The faces, as the last scan found them; ours alone (the moon, then the dust) until then. */
+    @Volatile private var faces: List<FaceCatalog.Face> = listOf(
+        FaceCatalog.Face(FaceCatalog.MOON, FaceCatalog.Source.OURS, mapOf("en_US" to "Moon"), null, null, null, 0L, null, null, false, false, null),
+        FaceCatalog.dust(),
+    )
+    /** The chosen face (PanelConfig.face) and which choice it is (faceSeq): the shell's copy, kept in [FACE_FILE]. */
+    @Volatile private var faceKey: String = FaceCatalog.MOON
+    @Volatile private var faceSeq = 0L
+    /** By sha1: faces that failed in this process (FaceCatalog rule 8), with why. */
+    private val faceFailed = java.util.concurrent.ConcurrentHashMap<String, String>()
+    /** By sha1: how like Xiaomi's picture of it each face's first frame was (rule 9), kept in [FAITHFUL_FILE]. */
+    private val faceFaithful = java.util.concurrent.ConcurrentHashMap<String, Double>()
+    /** The face a native crash took down last time (MamlHost.CRASHING), until the scan knows its sha1. */
+    @Volatile private var faceCrashed: String? = null
+    private var facesSaidAt = ""
+
+    /** The chosen face if it is a Xiaomi one that can be shown now; null for ours (the moon, the dust). */
+    private fun xiaomiFaceKey(): String? = faceKey.takeIf { k -> !FaceCatalog.ours(k) && faces.any { it.key == k && it.offered } }
+
+    /** The face the scene shows for the choice: the Xiaomi face's key, the dust, else the moon. */
+    private fun shownFaceKey(): String = xiaomiFaceKey() ?: if (faceKey == FaceCatalog.DUST) FaceCatalog.DUST else FaceCatalog.MOON
+
+    /**
+     * The scene's loop: the Xiaomi face's key, the dust's key (drawn by the scene's GL, DustField), else the moon's clip.
+     * And its wake clip: none for a Xiaomi face or the dust.
+     */
+    private fun faceLoopPath(): String? = xiaomiFaceKey() ?: if (faceKey == FaceCatalog.DUST) FaceCatalog.DUST else clipPath(sceneLoop)
+    private fun faceWakePath(): String? = if (shownFaceKey() != FaceCatalog.MOON) null else clipPath(sceneWake)
+    private fun faceTitle(key: String): String = faces.firstOrNull { it.key == key }?.title ?: FaceCatalog.title(emptyMap(), key)
+
+    private val faceSource = object : ShellScene.FaceSource {
+        override fun open(key: String): MamlHost.Face? {
+            val f = faces.firstOrNull { it.key == key && it.offered } ?: run { Log.i(TAG, "face: $key is not offered — the moon"); return null }
+            val content = f.content ?: return null
+            val rear = geometry
+            val night = (context?.resources?.configuration?.uiMode ?: 0) and android.content.res.Configuration.UI_MODE_NIGHT_MASK == android.content.res.Configuration.UI_MODE_NIGHT_YES
+            return runCatching { mamlHost.open(key, content, f.editConfig, rear.widthPx, rear.heightPx, night, sceneLook.level) }
+                .onFailure { failed(key, it.message ?: "it did not load") }.getOrNull()
+        }
+        override fun failed(key: String, why: String) {
+            val f = faces.firstOrNull { it.key == key }
+            Log.w(TAG, "face: ${f?.title ?: key} failed — $why; left out until the shell starts again")
+            f?.sha1?.let { faceFailed[it.lowercase()] = why }
+            // The moon while it is out: the next scene request finds it not offered.
+            scanFaces("a face failed", sha1 = false) {
+                if (faceKey == key) runCatching { popWaiter.execute { if (scene.isUp && scene.showing() == key) scene.play(null, faceLoopPath(), android.os.SystemClock.uptimeMillis(), waitForLight = false) } }
+            }
+        }
+        override fun shown(face: MamlHost.Face?) { Unit }
+    }
+
+    /** The first payload: the faces are looked at, watched and polled from now on. */
+    private fun facesStart() {
+        if (facesStarted) return
+        facesStarted = true
+        runCatching { java.io.File(MamlHost.DIR).mkdirs() }
+        faceCrashed = MamlHost.crashedLastTime()?.also { Log.w(TAG, "face: $it took the last shell process down — the moon, and that face left out") }
+        // The shell's own copy of the choice: right before the app speaks (HyperOS may have the app frozen).
+        runCatching {
+            java.io.File(FACE_FILE).takeIf { it.isFile }?.readText()?.trim()?.split(' ')?.let { p ->
+                val k = p.getOrNull(0); val n = p.getOrNull(1)?.toLongOrNull() ?: 0L
+                if (k != null && (FaceCatalog.ours(k) || k.startsWith("xiaomi:"))) { faceKey = k; faceSeq = n }
+            }
+        }
+        runCatching {
+            java.io.File(FAITHFUL_FILE).takeIf { it.isFile }?.readLines()?.forEach { l ->
+                val (sha, score) = l.split(' ').let { (it.getOrNull(0) ?: "") to (it.getOrNull(1)?.toDoubleOrNull()) }
+                if (sha.isNotEmpty() && score != null) faceFaithful[sha] = score
+            }
+        }
+        // Watches on what changes with his list and his downloads (FUSE: not proven to see the theme manager's own
+        // writes, so the poll below is the proven way in).
+        for (dir in FaceScan.Paths().watched) runCatching {
+            val o = object : android.os.FileObserver(java.io.File(dir), CREATE or DELETE or MOVED_FROM or MOVED_TO or CLOSE_WRITE) {
+                override fun onEvent(event: Int, path: String?) {
+                    val now = android.os.SystemClock.uptimeMillis()
+                    faceSchedule.watched(now)
+                    facesThread.removeCallbacks(faceDebounce)
+                    facesThread.postDelayed(faceDebounce, FaceScan.Schedule.DEBOUNCE_MS + 50L)
+                    if (BuildConfig.DEBUG) Log.i(TAG, "faces: the watch on $dir saw $path change")
+                }
+            }
+            o.startWatching(); faceWatches += o
+        }.onFailure { Log.w(TAG, "faces: no watch on $dir — ${it.message}") }
+        scanFaces("the shell started", sha1 = true)
+    }
+
+    private val faceDebounce = Runnable {
+        if (faceSchedule.debounced(android.os.SystemClock.uptimeMillis())) scanFaces("a watched folder changed (inotify)", sha1 = true)
+    }
+
+    /** The back lit: a scan, and the poll of the download folders every five minutes while it stays lit. */
+    private fun facesLit() {
+        if (!facesStarted) return
+        scanFaces("the back lit", sha1 = true)
+        facesThread.removeCallbacks(facePoll)
+        facesThread.postDelayed(facePoll, FaceScan.Schedule.POLL_MS)
+        facesThread.post { faceSchedule.polled(android.os.SystemClock.uptimeMillis(), FaceScan.Paths().polled.map { java.io.File(it).lastModified() }) }
+    }
+
+    private val facePoll: Runnable = object : Runnable {
+        override fun run() {
+            val now = android.os.SystemClock.uptimeMillis()
+            // Dark: nothing of ours ticks (the night rule). The next light-up scans and starts this again.
+            if (faceSchedule.nextPoll(now, rearLit(rearDisplay()) == true) == null) return
+            if (faceSchedule.polled(now, FaceScan.Paths().polled.map { java.io.File(it).lastModified() })) scanFaces("the download folder changed (the 5-minute look)", sha1 = true)
+            facesThread.postDelayed(this, FaceScan.Schedule.POLL_MS)
+        }
+    }
+
+    /** A scan on the faces' thread; [then] after it, on that thread. */
+    private fun scanFaces(why: String, sha1: Boolean, then: (() -> Unit)? = null) {
+        runCatching {
+            facesThread.post {
+                val list = runCatching {
+                    synchronized(faceScan) {
+                        faceScan.scan(mamlHost.abilities, faceFailed.toMap(), faceFaithful.toMap(), moonCard(), sha1, dustCard = dustCard())
+                    }
+                }.onFailure { Log.w(TAG, "faces: the scan failed — ${it.message}") }.getOrNull() ?: return@post
+                // The face a crash took down: out for this process.
+                faceCrashed?.let { k -> list.firstOrNull { it.key == k }?.sha1?.let { faceFailed[it.lowercase()] = FaceCatalog.CRASHED; faceCrashed = null; scanFaces("a face crashed the last process", false); return@post } }
+                facesFound(list, why)
+                then?.invoke()
+                if (sha1) measureFaces(list)
+            }
+        }
+    }
+
+    /** The list as found: said when it changed, written for the app, and the chosen face checked. On the faces' thread. */
+    private fun facesFound(list: List<FaceCatalog.Face>, why: String) {
+        val was = faces
+        faces = list
+        val said = list.joinToString("|") { "${it.key}:${it.leftOut}" }
+        if (said != facesSaidAt) {
+            facesSaidAt = said
+            for (f in list) if (!f.offered && !f.pending) Log.i(TAG, "faces: left out ${f.title} (${f.id8}): ${f.leftOut}")
+            Log.i(TAG, "faces: ${list.count { it.offered }} offered, ${list.count { !it.offered }} left out ($why)")
+            writeFacesForApp(list)
+            runCatching { events?.onFacesChanged() }
+        }
+        // His choice against the list (FaceCatalog.afterScan): gone from the phone or a crash takes it back to the moon;
+        // out for now (failed in this process) shows the moon and keeps his choice for the next shell process.
+        val chosen = faceKey
+        val title = list.firstOrNull { it.key == chosen }?.title ?: was.firstOrNull { it.key == chosen }?.title ?: chosen
+        when (FaceCatalog.afterScan(chosen, list, was)) {
+            FaceCatalog.AfterScan.BACK_TO_MOON -> {
+                Log.i(TAG, "face: $title is gone from the phone (or took the shell down), back to the moon")
+                chooseFace(FaceCatalog.MOON, "gone")
+            }
+            // Offered again (or for the first time since this process began): the back shows it now.
+            FaceCatalog.AfterScan.SHOW_IT -> if (scene.isUp && scene.showing() != chosen)
+                runCatching { popWaiter.execute { scene.play(null, faceLoopPath(), android.os.SystemClock.uptimeMillis(), waitForLight = false) } }
+            FaceCatalog.AfterScan.SHOW_MOON -> if (scene.isUp && scene.showing() == chosen) {
+                Log.i(TAG, "face: $title is out for now — the moon shows, the choice is kept")
+                runCatching { popWaiter.execute { if (scene.showing() == chosen) scene.play(null, faceLoopPath(), android.os.SystemClock.uptimeMillis(), waitForLight = false) } }
+            }
+            FaceCatalog.AfterScan.KEEP -> Unit
+        }
+    }
+
+    /**
+     * The list for the app (it cannot read the downloads): faces/faces.json (keys, titles, group, source, offered or why
+     * not) and each card picture as faces/<key>.jpg, Xiaomi's own picture made 488 x 298. Only what changed is written.
+     */
+    private fun writeFacesForApp(list: List<FaceCatalog.Face>) = runCatching {
+        val dir = java.io.File(FACES_APP_DIR).apply { mkdirs() }
+        val arr = kotlinx.serialization.json.buildJsonArray {
+            for (f in list) add(kotlinx.serialization.json.buildJsonObject {
+                put("key", kotlinx.serialization.json.JsonPrimitive(f.key))
+                put("title", kotlinx.serialization.json.JsonPrimitive(f.title))
+                put("group", kotlinx.serialization.json.JsonPrimitive(f.group ?: ""))
+                put("source", kotlinx.serialization.json.JsonPrimitive(f.source.name.lowercase()))
+                put("offered", kotlinx.serialization.json.JsonPrimitive(f.offered))
+                put("pending", kotlinx.serialization.json.JsonPrimitive(f.pending))
+                put("reason", kotlinx.serialization.json.JsonPrimitive(f.leftOut ?: ""))
+            })
+        }
+        java.io.File(dir, "faces.json.tmp").apply { writeText(arr.toString()); renameTo(java.io.File(dir, "faces.json")) }
+        for (f in list) {
+            val src = f.card?.let { java.io.File(it) }?.takeIf { it.isFile } ?: continue
+            val out = java.io.File(dir, "${f.key.replace(':', '_')}.jpg")
+            if (out.isFile && out.lastModified() >= src.lastModified() && out.length() > 0) continue
+            val bm = android.graphics.BitmapFactory.decodeFile(src.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 }) ?: continue
+            val scaled = if (bm.width == 488 && bm.height == 298) bm else android.graphics.Bitmap.createScaledBitmap(bm, 488, 298, true)
+            java.io.FileOutputStream(out).use { scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, it) }
+            if (scaled !== bm) scaled.recycle(); bm.recycle()
+        }
+    }.onFailure { Log.w(TAG, "faces: the list was not written for the app — ${it.message}") }
+
+    /**
+     * OUR OWN CARD: a frame of our own clip at its start (MediaMetadataRetriever), made once and kept. Our footage, not a
+     * drawing. On the faces' thread.
+     */
+    private fun moonCard(): String? {
+        val out = java.io.File("${MamlHost.DIR}/moon.png")
+        val clip = clipPath(sceneLoop)?.let { java.io.File(it) }?.takeIf { it.isFile } ?: return out.takeIf { it.isFile }?.path
+        if (out.isFile && out.lastModified() >= clip.lastModified()) return out.path
+        return runCatching {
+            val r = android.media.MediaMetadataRetriever()
+            try {
+                r.setDataSource(clip.path)
+                val bm = r.getFrameAtTime(0L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return@runCatching null
+                // A loop with depth is the picture over its matte: the top half is the picture.
+                val pic = if (bm.height >= bm.width) android.graphics.Bitmap.createBitmap(bm, 0, 0, bm.width, bm.height / 2) else bm
+                java.io.FileOutputStream(out).use { pic.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                out.path
+            } finally { r.release() }
+        }.onFailure { Log.w(TAG, "faces: no picture of the moon — ${it.message}") }.getOrNull()
+    }
+
+    /**
+     * THE DUST'S CARD: the face's first picture drawn by its own formulas (DustField.render, the twin of its shaders),
+     * 976 x 596, made once per look (DustField.CARD_VERSION) and kept. The cards of earlier looks are deleted once the
+     * new one is written (nothing reads them). On the faces' thread.
+     */
+    private fun dustCard(): String? {
+        val out = java.io.File("${MamlHost.DIR}/dust-${DustField.CARD_VERSION}.png")
+        if (out.isFile && out.length() > 0) return out.path
+        return runCatching {
+            val bm = android.graphics.Bitmap.createBitmap(DustField.card(), DustField.W.toInt(), DustField.H.toInt(), android.graphics.Bitmap.Config.ARGB_8888)
+            java.io.FileOutputStream(out).use { bm.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            bm.recycle()
+            out.parentFile?.listFiles { f -> f.isFile && f.name != out.name && DUST_CARD_NAME.matches(f.name) }?.forEach { it.delete() }
+            out.path
+        }.onFailure { Log.w(TAG, "faces: no picture of the dust — ${it.message}") }.getOrNull()
+    }
+
+    /**
+     * RULE 9 (FaceCatalog): each face that passes the others is drawn once offscreen and compared with Xiaomi's own
+     * picture of it (Faithful), once per sha1 for good (kept in [FAITHFUL_FILE]). This loads Xiaomi's engine in this
+     * process, once per new face on the phone. On the faces' thread, one at a time, while the back is lit.
+     */
+    private fun measureFaces(list: List<FaceCatalog.Face>) {
+        val todo = list.filter { it.pending && it.leftOut == "not drawn yet" && it.sha1 != null && it.content != null && it.card != null }
+        if (todo.isEmpty() || rearLit(rearDisplay()) != true) return
+        var any = false
+        for (f in todo) {
+            val sha = f.sha1!!.lowercase()
+            if (faceFaithful.containsKey(sha) || faceFailed.containsKey(sha)) continue
+            val score = runCatching {
+                val rear = geometry
+                val face = mamlHost.open("${f.key} (offscreen)", f.content!!, f.editConfig, rear.widthPx, rear.heightPx, false, sceneLook.level)
+                try {
+                    face.resume()
+                    Thread.sleep(MEASURE_SETTLE_MS)
+                    val ours = face.snapshot(rear.widthPx, rear.heightPx)
+                    val ref = android.graphics.BitmapFactory.decodeFile(f.card) ?: error("Xiaomi's picture could not be read")
+                    val a = IntArray(ours.width * ours.height).also { ours.getPixels(it, 0, ours.width, 0, 0, ours.width, ours.height) }
+                    val b = IntArray(ref.width * ref.height).also { ref.getPixels(it, 0, ref.width, 0, 0, ref.width, ref.height) }
+                    Faithful.score(a, ours.width, ours.height, b, ref.width, ref.height).also { ours.recycle(); ref.recycle() }
+                } finally { runCatching { java.io.File(MamlHost.CRASHING).delete() }; face.close() }
+            }.onFailure { faceFailed[sha] = it.message ?: "it did not draw" }.getOrNull()
+            if (score != null) {
+                faceFaithful[sha] = score
+                Log.i(TAG, "faces: ${f.title} (${f.id8}) drawn offscreen and compared with Xiaomi's picture: %.2f".format(java.util.Locale.ROOT, score))
+                runCatching { java.io.File(FAITHFUL_FILE).appendText("$sha $score\n") }
+            }
+            any = true
+        }
+        if (any) scanFaces("faces were drawn and compared", sha1 = false)
+    }
+
+    private fun faceHistory(from: String, to: String, why: String) = runCatching {
+        val f = java.io.File(FACE_LOG)
+        val line = "${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.ROOT).format(java.util.Date())} $from -> $to ($why)"
+        val kept = (f.takeIf { it.isFile }?.readLines().orEmpty() + line).takeLast(FACE_LOG_LINES)
+        f.writeText(kept.joinToString("\n", postfix = "\n"))
+    }
+
+    /** The choice from the app (the settings' Faces, or its copy of ours): followed unless older than ours. */
+    private fun faceFromPayload(key: String, seq: Long) {
+        if (seq < faceSeq || seq == faceSeq && key == faceKey) return
+        if (key != faceKey) Log.i(TAG, "face: ${faceTitle(key)} from the settings")
+        faceSeq = seq
+        setFace(key, "the settings")
+    }
+
+    /** [key] made the face by a tap here (the picker, a debug word): numbered, kept, told to the app, shown. */
+    private fun chooseFace(key: String, why: String) {
+        faceSeq = FaceCatalog.nextSeq(faceSeq, System.currentTimeMillis())
+        Log.i(TAG, "face: chosen ${faceTitle(key)} ($key) — $why")
+        setFace(key, why)
+        runCatching { events?.onFaceChosen(key, faceSeq) }.onFailure { Log.w(TAG, "face: the app was not told — ${it.message}") }
+    }
+
+    private fun setFace(key: String, why: String) {
+        val was = faceLoopPath()
+        if (key != faceKey) faceHistory(faceKey, key, why)
+        faceKey = key
+        runCatching { java.io.File(FACE_FILE).writeText("$key $faceSeq") }
+        val now = faceLoopPath()
+        if (was != now && scene.isUp) runCatching { popWaiter.execute { scene.play(null, now, android.os.SystemClock.uptimeMillis(), waitForLight = false) } }
+    }
+
+    private val picker: ShellPicker by lazy {
+        ShellPicker(::rearLayerStack, { geometry }, scene,
+            onShut = { chosen, _ ->
+                // The table first (its exit is the picker's own, PICKER_OUT), then the face, so the new one is built
+                // while the exit waits its 150 ms.
+                runCatching { holdHandler.post { navStep(RearNav.Input.PickerShut(chosen != null), if (chosen != null) "chosen" else "left") } }
+                if (chosen != null) chooseFace(chosen.key, "the picker") else Log.i(TAG, "face: picker left, ${faceTitle(faceKey)} stays")
+            },
+            // Gone: if the table still has it up (it could not be shown at all), its end is said now, or the back would
+            // keep giving every finger to a picker that is not there.
+            onGone = { runCatching { holdHandler.post { if (nav.picker) navStep(RearNav.Input.PickerShut(false), "the picker is gone"); syncTouchWatch() } } },
+        )
+    }
+
+    /**
+     * The finger is the picker's: it is up, or its exit is still playing, and no pop-up lies over it (a pop-up has the
+     * whole back, also over an exit that plays under it since its shut came after the pop-up).
+     */
+    private fun pickerHasFinger(): Boolean { val s = nav; return !s.pop && (s.picker || picker.isUp) }
+
+    /** A hold on the face: the picker, on the faces offered, at the face that shows. */
+    private fun openPicker(x: Float, y: Float, downAt: Long) {
+        val step = navStep(RearNav.Input.Hold, "held ${SceneTouch.PICKER_HOLD_MS} ms")
+        if (step.anim != RearNav.Anim.PICKER_IN) return
+        // The face had the finger as a possible tap: it is the picker's now (and the dust's clearing closes).
+        if (faceFingerDown) { faceFingerDown = false; scene.face?.touch(android.view.MotionEvent.ACTION_CANCEL, 0f, 0f) }
+        scene.dustRelease()
+        val offered = FaceCatalog.offered(faces)
+        val showing = shownFaceKey()
+        val at = offered.indexOfFirst { it.key == showing }.coerceAtLeast(0)
+        picker.open(offered, at, x, y, downAt)
+        // The list fresh for next time (a download meanwhile): from the index, no hashing while it is up.
+        scanFaces("the picker opened", sha1 = false)
+    }
+
+    /**
+     * HIS TAP ON A XIAOMI FACE (SPEC 4.2): given to the face as a tap, so Charlie's next pet animation comes as on Xiaomi.
+     * Down as it lands, up as it lifts; a finger that becomes anything else gets a cancel. The tap still brightens the back.
+     */
+    private fun faceTouch(e: RearTouches.Event) {
+        // THE DUST SHOWS THE FINGER (DustFinger): what the touch does is decided below and elsewhere, as before.
+        if (scene.dustShowing) scene.dustTouch(e, e.x * geometry.fitX, e.y * geometry.fitY, RearNav.seen(nav) == RearNav.Seen.MOON)
+        val face = scene.face ?: return
+        if (RearNav.seen(nav) != RearNav.Seen.MOON) { if (faceFingerDown) { faceFingerDown = false; face.touch(android.view.MotionEvent.ACTION_CANCEL, 0f, 0f) }; return }
+        val px = e.x * geometry.fitX; val py = e.y * geometry.fitY
+        when (e) {
+            is RearTouches.Down -> { faceFingerDown = true; face.touch(android.view.MotionEvent.ACTION_DOWN, px, py) }
+            is RearTouches.Move -> if (faceFingerDown && (kotlin.math.abs(e.x - fingerDownX) > SceneTouch.TAP_SLOP || kotlin.math.abs(e.y - fingerDownY) > SceneTouch.TAP_SLOP || e.atMs - pickerDownAt > SceneTouch.TAP_MS)) {
+                faceFingerDown = false; face.touch(android.view.MotionEvent.ACTION_CANCEL, px, py)
+            }
+            is RearTouches.Up -> if (faceFingerDown) {
+                faceFingerDown = false
+                face.touch(if (e.atMs - pickerDownAt <= SceneTouch.TAP_MS) android.view.MotionEvent.ACTION_UP else android.view.MotionEvent.ACTION_CANCEL, px, py)
+            }
+        }
+    }
+    @Volatile private var faceFingerDown = false
 
     /** The tap's full brightness over: back to what the posture asks for. */
     private val sceneBrightEnd = Runnable {
@@ -4070,10 +5223,13 @@ class RearUserService : IRearService.Stub {
     private var lightSaid = ""
     /** What the panel itself gives now, in nits (RearPanel), read as the light is looked at; NaN: not known. */
     @Volatile private var panelNits = Float.NaN
+    /** Its reading, kept two seconds (RearPanel.Kept), read again at once when the light around has changed. */
+    private val panelKept = RearPanel.Kept()
 
     override fun setAmbient(lux: Float, source: Int) {
         lightSource = source
         if (source != 2) lightSteady.feed(lux, android.os.SystemClock.uptimeMillis())
+        panelKept.forget()
         applySceneLook()
     }
 
@@ -4082,7 +5238,7 @@ class RearUserService : IRearService.Stub {
         val now = android.os.SystemClock.uptimeMillis()
         val bright = now < sceneBrightUntil
         val lux = lightSteady.at(now)
-        if (adaptive && stay > 0) panelNits = RearPanel.read(rearDisplay())
+        if (adaptive && stay > 0) panelNits = panelKept.nits(rearDisplay(), now)
         val panel = panelNits
         val target = if (adaptive) RearLight.gain(RearLight.light(lux, RearLight.Doing(stay, bright, dimmedByHand && !bright), lightBias, panel))
         else {
@@ -4098,10 +5254,76 @@ class RearUserService : IRearService.Stub {
                 (if (bright) ", tapped" else if (dimmedByHand) ", dimmed by hand" else "") + (if (adaptive) "" else ", fixed levels")
             if (word != lightSaid && stay > 0) { lightSaid = word; Log.i(TAG, "light: $word") }
         }
-        // Still only as a dim still's posture asks (and under the music page, where it is not seen): never by hand.
-        scene.still = (stay == STAY_STILL && !bright) || musicFace.isUp
+        // Still only as a dim still's posture asks (and under the music page, and under every opaque page of ours in its
+        // place, where it is not seen: HiddenFrames): never by hand.
+        scene.still = stillNow(now)
         putGain(now)
         if (gainEase.moving(now)) runCatching { holdHandler.removeCallbacks(gainTick); holdHandler.postDelayed(gainTick, 16L) }
+    }
+
+    /**
+     * Whether the scene is held on its frame at [now]: a dim still's posture without a tap, the music page up, or an
+     * opaque page of ours in its place over it (HiddenFrames, from the navigation's state and the layers' own places).
+     */
+    private fun stillNow(now: Long): Boolean =
+        HiddenFrames.sceneStill(stay == STAY_STILL && now >= sceneBrightUntil && !(nav.pop && islandOverFace), musicFace.isUp, nav, ::layerInPlace)
+
+    /** Whether [layer] stands in its place now: for the live page, the card of the navigation's live thing. */
+    private fun layerInPlace(layer: HiddenFrames.Layer): Boolean = when (layer) {
+        HiddenFrames.Layer.POP -> popInPlace
+        HiddenFrames.Layer.ARRIVAL -> arrivalPage.inPlace
+        HiddenFrames.Layer.NOTES -> pinsPage.inPlace
+        HiddenFrames.Layer.USAGE -> usage.inPlace
+        HiddenFrames.Layer.LIVE -> when (nav.live) {
+            RearNav.Live.NAVIGATION -> navigationFace.inPlace
+            RearNav.Live.TIMER -> timerFace.inPlace
+            RearNav.Live.CALL -> callFace.inPlace
+            RearNav.Live.MUSIC -> musicFace.inPlace
+            else -> false
+        }
+        HiddenFrames.Layer.CHARGE -> chargeInPlace
+        HiddenFrames.Layer.SHADE -> pileInPlace && notices.pagesUp
+    }
+
+    /** The pop-up stands over the whole back in its place (ShellNotices' word). */
+    @Volatile private var popInPlace = false
+    @Volatile private var islandOverFace = false
+    /** The whole charging page stands in its place (ShellCharge's word; read here so its lazy page is not made for it). */
+    @Volatile private var chargeInPlace = false
+    /** The notifications' pile stands settled over the whole back (ShellNotices' word, from its sheet: ShellOverlay.onCover). */
+    @Volatile private var pileInPlace = false
+
+    /** A page of ours came into its place or is leaving it (its own thread, before it moves): what is under it follows. */
+    private fun coverMoved() = syncHidden()
+
+    /**
+     * NO PICTURES FOR NOBODY (HiddenFrames): the scene held while a page of ours covers it in its place, and moving
+     * again the moment that ends; the live page's pictures stopped while usage, the notes or an arrival lie over it in
+     * their place, and the live page DRAWN AT ONCE when that ends, before what lay over it moves (on the pages' thread
+     * this is called on, or first in that thread's queue). Any thread.
+     */
+    private fun syncHidden() {
+        synchronized(lightLock) { scene.still = stillNow(android.os.SystemClock.uptimeMillis()) }
+        if (liveHeld && HiddenFrames.liveDrawn(nav, ::layerInPlace)) {
+            if (android.os.Looper.myLooper() == musicHandler.looper) drawLiveNow() else runCatching { musicHandler.post { drawLiveNow() } }
+        }
+    }
+
+    /** A live page's frame tick found it covered and drew nothing: it is drawn the moment it is not ([drawLiveNow]). */
+    @Volatile private var liveHeld = false
+
+    /** Whether the live page's pictures are to be drawn now: not while usage, the notes or an arrival lie over it in their place. */
+    private val liveLayerInPlace: (HiddenFrames.Layer) -> Boolean = ::layerInPlace
+    private fun liveSeen(): Boolean = HiddenFrames.liveDrawn(nav, liveLayerInPlace)
+
+    /** On the pages' thread: the live page that was not drawn under a page drawn NOW, and its frames going on. */
+    private fun drawLiveNow() {
+        if (!liveHeld || !liveSeen()) return
+        liveHeld = false
+        if (navigationFace.isUp) navigationFrame()
+        if (timerFace.isUp) timerFrame(sync = true)
+        if (callFace.isUp) callFrame(sync = true)
+        if (musicFace.isUp) musicFrame(sync = true)
     }
 
     /** The gain as it is at [now], put on the back: the dim layer over all of ours, and the rest in the scene itself. */
@@ -4139,7 +5361,8 @@ class RearUserService : IRearService.Stub {
 
     /** [art]: the track's cover; [icon]: the player's own icon, shown in its place when a track has none. */
     private class Media(val title: String, val artist: String, val playing: Boolean, val art: android.graphics.Bitmap?, val icon: android.graphics.Bitmap? = null) {
-        val colors: MusicFace.Palette by lazy { MusicFace.palette(MusicFace.seed(art ?: icon)) }
+        /** Taken as the cover arrives, never in a frame (Celebi on the cover costs some milliseconds). */
+        val colors: MusicFace.Palette = MusicFace.colorsOf(art ?: icon)
     }
     @Volatile private var media: Media? = null
     /** When it last played, or was last touched (uptime): it stays a short while after a pause. */
@@ -4149,29 +5372,62 @@ class RearUserService : IRearService.Stub {
     @Volatile private var musicFlippedAt = 0L
     @Volatile private var musicPressed: MusicFace.Button? = null
     @Volatile private var musicPressedAt = 0L
-    private val musicGlow = MusicFace.Glow()
+    /** Its floor ("Fluid size") is the default's until the first payload says his. */
+    private val musicBody = MusicFace.Body { Log.i(TAG, it) }.apply { floor = dev.kb896.aiusage.data.PanelConfig.MUSIC_FLOOR }
     private val musicFade = MusicFace.Fade()
+    /** When the last payload changed "Fluid size" (uptime): bounds the frames a page standing still is drawn for it. */
+    @Volatile private var musicFloorAt = 0L
 
-    override fun setMusicLevel(level: Float) { musicGlow.hear(level, android.os.SystemClock.uptimeMillis()) }
+    /** Not sent any more (setMusicSound has taken its place). */
+    override fun setMusicLevel(level: Float) {}
+
+    override fun setMusicSound(v: FloatArray?) { if (v != null) musicBody.hear(v, android.os.SystemClock.uptimeMillis()) }
 
     /** Its own thread: the glows move thirty times a second, and nothing else of the shell's may hold them up. */
     private val musicHandler by lazy { android.os.Handler(android.os.HandlerThread("rear-music").apply { isDaemon = true; start() }.looper) }
 
+    /**
+     * THE PAGES' PICTURES ON THE VSYNC (FramePacer): every page on [musicHandler]'s thread asks it for its next picture
+     * (usage, the notes and their turn and carousel, an arrival, music, timer, call, and the slides of them all), in
+     * place of a fixed 8 / 12 / 14 / 16 / 33 ms sleep that fell one or two refreshes apart by turns.
+     */
+    private val pagePacer: FramePacer by lazy { FramePacer(musicHandler, "rear-music", ::rearPeakHz) }
+
+    /** The rear's highest refresh rate (FramePacer: never its rate of the moment); 0 when it does not say. */
+    private fun rearPeakHz(): Float = runCatching {
+        val d = context?.getSystemService(android.hardware.display.DisplayManager::class.java)?.getDisplay(rearDisplay())
+        d?.supportedModes?.maxOfOrNull { it.refreshRate } ?: 0f
+    }.getOrDefault(0f)
+
     private val musicFace: ShellCard by lazy {
-        ShellCard("music", ::rearLayerStack, { geometry }, musicHandler, z = ShellLayer.Z_MUSIC, opaque = true, slide = true) { c, w, h ->
+        ShellCard("music", ::rearLayerStack, { geometry }, musicHandler, z = ShellLayer.Z_MUSIC, opaque = true, slide = true, onPlace = { coverMoved() }, pacer = pagePacer) { c, w, h ->
             val m = media ?: return@ShellCard
             val now = android.os.SystemClock.uptimeMillis()
-            // The colours eased from the last cover's to this one's, the glows where their one clock has them: asked every frame.
-            MusicFace.draw(c, w, h, m.title, m.artist, m.playing, m.art, musicFade.at(m.colors, now), musicGlow.at(now, m.playing), now - musicFlippedAt, musicPressed, now - musicPressedAt, m.icon, musicGlow.strength)
+            // The colours eased from the last cover's to this one's, the body where its one clock has it: asked every frame.
+            // The page's hides tell the body its first frame back after being away (it shows the present then).
+            MusicFace.draw(c, w, h, m.title, m.artist, m.playing, m.art, musicFade.at(m.colors, now), musicBody.step(now, m.playing, musicFace.hides), now - musicFlippedAt, musicPressed, now - musicPressedAt, m.icon)
         }
     }
 
     /** One more picture of the music page, and the next one for as long as something on it moves. */
     private val musicTick: Runnable = Runnable { musicFrame() }
-    private fun musicFrame() {
-        musicHandler.removeCallbacks(musicTick)
+    /** [sync]: drawn on this thread now, not posted (only ever on the pages' thread: [drawLiveNow]). */
+    private fun musicFrame(sync: Boolean = false) {
+        pagePacer.cancel(musicTick)
         if (!musicFace.isUp) { musicFrameAt = 0L; return }
         val began = android.os.SystemClock.uptimeMillis()
+        // COVERED in its place by usage, the notes or an arrival: no picture for nobody, only a look now and then
+        // (it is drawn at once as what covers it starts to leave: drawLiveNow). The gaps are not counted.
+        if (!liveSeen()) {
+            liveHeld = true
+            musicFrameAt = 0L
+            // Not seen: a new "Fluid size" is stood on at once (a glide is for a change he watches), so the page is on it
+            // the moment it is drawn again; nothing of the floor is left to look for.
+            musicBody.floorUnseen()
+            val goesOn = media?.playing == true || began - musicFlippedAt < MUSIC_REST_MS || began - musicPressedAt < MusicFace.PRESS_MS + 60
+            if (goesOn) musicHandler.postAtTime(musicTick, began + HiddenFrames.hiddenDelay(MUSIC_PAGE_FRAME_MS))
+            return
+        }
         // How evenly it is drawn, said every few hundred pictures, so its smoothness can be checked.
         if (musicFrameAt != 0L) {
             val gap = began - musicFrameAt
@@ -4182,11 +5438,14 @@ class RearUserService : IRearService.Stub {
             }
         }
         musicFrameAt = began
-        musicFace.redraw()
+        if (sync) musicFace.drawNow() else musicFace.redraw()
         val now = android.os.SystemClock.uptimeMillis()
-        // EVERY FRAME while it plays (the glows breathe), and for a few seconds after a pause (they sink to rest).
-        val moving = media?.playing == true || now - musicFlippedAt < MUSIC_REST_MS || now - musicPressedAt < MusicFace.PRESS_MS + 60
-        if (moving) musicHandler.postAtTime(musicTick, began + MUSIC_PAGE_FRAME_MS) else musicFrameAt = 0L
+        // EVERY FRAME while it plays (the glows breathe), and for a few seconds after a pause (they sink to rest), and
+        // until the body is on a new "Fluid size" (however late its frames came; bounded by the change's time, so a body
+        // that is not stepped never keeps the thread going).
+        val moving = media?.playing == true || now - musicFlippedAt < MUSIC_REST_MS || now - musicPressedAt < MusicFace.PRESS_MS + 60 ||
+            (musicBody.floorGliding && now - musicFloorAt < MUSIC_FLOOR_MS)
+        if (moving) pagePacer.post(musicTick, MUSIC_PAGE_FRAME_MS.toFloat()) else musicFrameAt = 0L
     }
     private var musicFrameAt = 0L
     private var musicFrames = 0
@@ -4196,6 +5455,7 @@ class RearUserService : IRearService.Stub {
     override fun setMedia(b: android.os.Bundle?) {
         val active = b?.getBoolean("active") == true
         mediaIsDemo = false
+        musicBody.endDemo()
         val was = media
         val next = if (!active || b == null) null else Media(
             b.getString("title").orEmpty(), b.getString("artist").orEmpty(), b.getBoolean("playing"),
@@ -4225,7 +5485,7 @@ class RearUserService : IRearService.Stub {
     private val timerArt: Map<String, android.graphics.Bitmap> by lazy { XiaomiArt.load("timer", TimerFace.ART) }
 
     private val timerFace: ShellCard by lazy {
-        ShellCard("timer", ::rearLayerStack, { geometry }, musicHandler, z = ShellLayer.Z_LIVE, opaque = true, slide = true) { c, w, h ->
+        ShellCard("timer", ::rearLayerStack, { geometry }, musicHandler, z = ShellLayer.Z_LIVE, opaque = true, slide = true, onPlace = { coverMoved() }, pacer = pagePacer) { c, w, h ->
             val m = timer ?: return@ShellCard
             TimerFace.draw(c, w, h, m, System.currentTimeMillis(), timerArt, timerPressed, android.os.SystemClock.uptimeMillis() - timerPressedAt)
             if (m.pkg == CALL_DEMO) demoMark(c, h)
@@ -4234,14 +5494,19 @@ class RearUserService : IRearService.Stub {
 
     /** One more picture of the timer page, and the next for as long as it runs or a press shows. */
     private val timerTick: Runnable = Runnable { timerFrame() }
-    private fun timerFrame() {
-        musicHandler.removeCallbacks(timerTick)
+    /** [sync]: drawn on this thread now, not posted (only ever on the pages' thread: [drawLiveNow]). */
+    private fun timerFrame(sync: Boolean = false) {
+        pagePacer.cancel(timerTick)
         val m = timer
         if (!timerFace.isUp || m == null) return
-        timerFace.redraw()
         val pressing = android.os.SystemClock.uptimeMillis() - timerPressedAt < TimerFace.PRESS_MS + 60
-        // Running, its water drifts: a new picture every frame of ours (once a second it only stepped, and looked like lag).
-        if (pressing || (!m.paused && !m.over)) musicHandler.postDelayed(timerTick, MUSIC_FRAME_MS)
+        val goesOn = pressing || (!m.paused && !m.over)
+        // Covered in its place (usage, the notes, an arrival over it): no picture, a look now and then (HiddenFrames).
+        if (!liveSeen()) { liveHeld = true; if (goesOn) musicHandler.postDelayed(timerTick, HiddenFrames.hiddenDelay(MUSIC_FRAME_MS)); return }
+        if (sync) timerFace.drawNow() else timerFace.redraw()
+        // Running, its water drifts: a new picture every frame of ours (once a second it only stepped, and looked like lag),
+        // on the vsync (every 4th refresh at 120 Hz: FramePacer).
+        if (goesOn) pagePacer.post(timerTick, MUSIC_FRAME_MS.toFloat())
     }
 
     /**
@@ -4268,14 +5533,78 @@ class RearUserService : IRearService.Stub {
         if (m.pkg == CALL_DEMO) return
         runCatching {
             popWaiter.execute {
-                if (m.pkg == XIAOMI_CLOCK) {
-                    val action = when (act) { TimerFace.Act.PAUSE -> "action.timer_pause"; TimerFace.Act.RESUME -> "action.timer_continue"; TimerFace.Act.CANCEL -> "action.timer_cancel"; TimerFace.Act.DISMISS -> "action.timer_dismiss" }
+                val action = when (act) { TimerFace.Act.PAUSE -> "action.timer_pause"; TimerFace.Act.RESUME -> "action.timer_continue"; TimerFace.Act.CANCEL -> "action.timer_cancel"; TimerFace.Act.DISMISS -> "action.timer_dismiss" }
+                // The Clock's own command, unless the health look found it gone from the Clock's code: its notification's button then.
+                if (m.pkg == XIAOMI_CLOCK && !ShellHealth.clockTakes(action)) Log.i(TAG, "timer: the Clock has no $action any more — its notification's button")
+                if (m.pkg == XIAOMI_CLOCK && ShellHealth.clockTakes(action)) {
                     val out = exec("am broadcast -a $action -p $XIAOMI_CLOCK")
                     if (!out.contains("Broadcast completed")) Log.w(TAG, "timer: the Clock was not told: ${out.take(120)}")
                 } else {
                     val i = TimerFace.actionFor(act, m.actions)
                     if (i >= 0) runCatching { events?.onLiveAction(m.key, i) } else Log.i(TAG, "timer: this clock offers no button for that")
                 }
+            }
+        }
+    }
+
+    // -- a route being followed: the whole back (NavFace), from the app's NavigationNotification packet ----------------
+
+    /** The route the app last told of; null for none. */
+    @Volatile private var navigationAsTold: NavFace.Model? = null
+    /** What the page shows: the route, or a demo's (the debug file), which never stands in for his own route. */
+    @Volatile private var navigation: NavFace.Model? = null
+    /** The last drawn, for a picture drawn again while the page slides out after the route has ended. */
+    @Volatile private var navigationDrawn: NavFace.Model? = null
+    /** The settings' "Navigation on the back". */
+    @Volatile private var navigationOn = true
+    private val navigationMotion = NavFace.TrackerMotion()
+    /** The route's pictures as last decoded: the same arrow sent again with the next step is not decoded again. */
+    private val navigationImages = dev.kb896.aiusage.service.NavigationNotification.Images()
+
+    /** The route as live to the navigation (RearNav.Live.NAVIGATION): none while the switch is off (a test's demo shows all the same). */
+    private fun navigationLive(): NavFace.Model? = navigation?.takeIf { navigationOn || it.demo }
+
+    private val navigationFace: ShellCard by lazy {
+        ShellCard("navigation", ::rearLayerStack, { geometry }, musicHandler, z = ShellLayer.Z_LIVE, opaque = true, slide = true, onPlace = { coverMoved() }, pacer = pagePacer) { c, w, h ->
+            val route = navigation
+            val model = route ?: navigationDrawn ?: return@ShellCard
+            val position = if (route == null) model.fraction ?: Float.NaN else
+                navigationMotion.position(model, android.os.SystemClock.uptimeMillis())
+            NavFace.drawFrame(c, w, h, model, position)
+            navigationDrawn = model
+        }
+    }
+    private val navigationTick = Runnable { navigationFrame() }
+
+    /** Called under liveLooking. RearNav still decides whether the new model has a page. */
+    private fun updateNavigation(next: NavFace.Model?) {
+        if (next == navigation) return
+        if (next == null) navigationMotion.reset() else navigationMotion.update(next, android.os.SystemClock.uptimeMillis())
+        navigation = next
+    }
+
+    /** Draw on the page thread, then ask for the next frame only while a reported step is easing. */
+    private fun navigationFrame(draw: Boolean = true) {
+        pagePacer.cancel(navigationTick)
+        if (!navigationFace.isUp) return
+        val route = navigation ?: return
+        if (!liveSeen()) { liveHeld = true; return }
+        // Decide before painting so that a draw which crosses the deadline cannot leave the tracker short of its target.
+        val moving = (route.tracker != null || route.styledByProgress) &&
+            navigationMotion.moving(android.os.SystemClock.uptimeMillis())
+        if (draw) navigationFace.drawNow()
+        if (moving) pagePacer.post(navigationTick, 0f)
+    }
+
+    private fun realLiveDuringNavigationDemo(now: Long): Boolean =
+        call?.let { it.pkg != CALL_DEMO } == true || timer?.let { it.pkg != CALL_DEMO } == true ||
+            (!mediaIsDemo && media?.let { it.playing || now - maxOf(mediaAliveAt, mediaTouchedAt) < MEDIA_LINGER_MS } == true)
+
+    private val navigationDemoEnds = Runnable {
+        synchronized(liveLooking) {
+            if (navigation?.demo == true) {
+                updateNavigation(navigationAsTold)
+                syncMediaCard(atOnce = true)
             }
         }
     }
@@ -4291,7 +5620,7 @@ class RearUserService : IRearService.Stub {
     private val callArt: Map<String, android.graphics.Bitmap> by lazy { XiaomiArt.load("phone", CallFace.ART) }
 
     private val callFace: ShellCard by lazy {
-        ShellCard("call", ::rearLayerStack, { geometry }, musicHandler, z = ShellLayer.Z_LIVE, opaque = true, slide = true) { c, w, h ->
+        ShellCard("call", ::rearLayerStack, { geometry }, musicHandler, z = ShellLayer.Z_LIVE, opaque = true, slide = true, onPlace = { coverMoved() }, pacer = pagePacer) { c, w, h ->
             val m = call ?: return@ShellCard
             val up = android.os.SystemClock.uptimeMillis()
             CallFace.draw(c, w, h, m, System.currentTimeMillis(), callArt, up - callChangedAt, callPressed, up - callPressedAt, ringAt = System.currentTimeMillis() - (up - callShownAt))
@@ -4301,14 +5630,21 @@ class RearUserService : IRearService.Stub {
 
     /** One more picture of the call page: at once again while it rings or something on it moves, else at the next second for its time. */
     private val callTick: Runnable = Runnable { callFrame() }
-    private fun callFrame() {
-        musicHandler.removeCallbacks(callTick)
+    /** [sync]: drawn on this thread now, not posted (only ever on the pages' thread: [drawLiveNow]). */
+    private fun callFrame(sync: Boolean = false) {
+        pagePacer.cancel(callTick)
         val m = call
         if (!callFace.isUp || m == null) return
-        callFace.redraw()
+        val seen = liveSeen()
+        if (!seen) liveHeld = true
+        else if (sync) callFace.drawNow() else callFace.redraw()
         val up = android.os.SystemClock.uptimeMillis()
         val moving = m.ringing || up - callChangedAt < CallFace.CHANGE_MS + 60 || up - callPressedAt < CallFace.PRESS_MS + 60
-        musicHandler.postDelayed(callTick, if (moving) MUSIC_FRAME_MS else 1_000L - System.currentTimeMillis() % 1_000L + 20L)
+        val next = if (moving) MUSIC_FRAME_MS else 1_000L - System.currentTimeMillis() % 1_000L + 20L
+        // Covered in its place: no picture, a look now and then, never sooner than its own pace (HiddenFrames).
+        // Seen and moving (ringing, a change, a press): on the vsync (FramePacer); else at the next second, by the clock.
+        if (seen && moving) pagePacer.post(callTick, MUSIC_FRAME_MS.toFloat())
+        else musicHandler.postDelayed(callTick, if (seen) next else HiddenFrames.hiddenDelay(next))
     }
 
     /**
@@ -4336,13 +5672,17 @@ class RearUserService : IRearService.Stub {
         }
         runCatching {
             popWaiter.execute {
-                if (m.pkg == DIALER) {
-                    val action = when (act) {
-                        CallFace.Act.ANSWER -> "ACTION_REAR_ANSWER_INCOMING_CALL"
-                        CallFace.Act.DECLINE -> "ACTION_REAR_REJECT_INCOMING_CALL"
-                        CallFace.Act.END -> "ACTION_REAR_HANG_UP_CALL"
-                        CallFace.Act.SPEAKER -> "ACTION_REAR_SPEAKER"
-                    }
+                val command = when (act) {
+                    CallFace.Act.ANSWER -> "ACTION_REAR_ANSWER_INCOMING_CALL"
+                    CallFace.Act.DECLINE -> "ACTION_REAR_REJECT_INCOMING_CALL"
+                    CallFace.Act.END -> "ACTION_REAR_HANG_UP_CALL"
+                    CallFace.Act.SPEAKER -> "ACTION_REAR_SPEAKER"
+                }
+                // The dialer's own command, unless the health look found it gone from the dialer's code: then the way any
+                // other app's call takes (its notification's button, else the phone's call keys).
+                if (m.pkg == DIALER && !ShellHealth.dialerTakes(command)) Log.i(TAG, "call: the dialer has no $command any more — the plain way")
+                if (m.pkg == DIALER && ShellHealth.dialerTakes(command)) {
+                    val action = command
                     val out = exec("am broadcast -a $DIALER.$action -p $DIALER")
                     if (!out.contains("Broadcast completed")) Log.w(TAG, "call: the dialer was not told: ${out.take(120)}")
                 } else {
@@ -4383,6 +5723,19 @@ class RearUserService : IRearService.Stub {
     private fun demoLiveFor() = runCatching { holdHandler.removeCallbacks(demoLiveEnds); holdHandler.postDelayed(demoLiveEnds, DEMO_LIVE_MS) }
 
     override fun setLive(b: android.os.Bundle?) {
+        // A route (its own packet: a call or a timer does not replace it). His own route takes a demo's place at once.
+        if (b?.getString("kind") == dev.kb896.aiusage.service.NavigationNotification.KIND) {
+            synchronized(liveLooking) {
+                val next = dev.kb896.aiusage.service.NavigationNotification.fromBundle(b, navigationImages)
+                if ((next == null) != (navigationAsTold == null)) Log.i(TAG, if (next != null) "navigation: a route is followed (${next.pkg})" else "navigation: the route has ended")
+                navigationAsTold = next
+                if (next != null || navigation?.demo != true) {
+                    updateNavigation(next)
+                    syncMediaCard()
+                }
+            }
+            return
+        }
         liveAsTold = b
         val key = b?.getString("key")
         if (b == null || key.isNullOrEmpty()) {
@@ -4435,6 +5788,7 @@ class RearUserService : IRearService.Stub {
      */
     private fun syncMediaCard(redraw: Boolean = false, atOnce: Boolean = false): Unit = synchronized(liveLooking) {
         val now = android.os.SystemClock.uptimeMillis()
+        if (navigation?.demo == true && realLiveDuringNavigationDemo(now)) updateNavigation(navigationAsTold)
         // The light and whose the back is, as they are: an edge missed (the first look after this process started) is made up here.
         val lit = rearLight == WakeStyle.Light.ON
         if (lit != nav.lit) navStep(if (lit) RearNav.Input.Lit else RearNav.Input.Dark, "as found")
@@ -4444,7 +5798,7 @@ class RearUserService : IRearService.Stub {
         val told = liveWatch.look(now, liveMarks(now), nav, atOnce) { kind -> kind == RearNav.Live.CALL || (kind == RearNav.Live.TIMER && timer?.over == true) }
         if (token != liveSaid) {
             // Said at each change: this is what decides whether a page he sent away comes back by itself.
-            Log.i(TAG, "row: live is now ${token?.let { "${it.kind.name.lowercase()} (${it.key.takeLast(24)}, ${it.phase})" } ?: "nothing"}${if (nav.away) ", one sent away" else ""}")
+            Log.i(TAG, "row: live is now ${token?.let { if (it.kind == PageRow.Kind.NAVIGATION) "navigation" else "${it.kind.name.lowercase()} (${it.key.takeLast(24)}, ${it.phase})" } ?: "nothing"}${if (nav.away) ", one sent away" else ""}")
             liveSaid = token
         }
         for (input in told.inputs) navStep(input)
@@ -4493,7 +5847,7 @@ class RearUserService : IRearService.Stub {
     private var privateLockHeld = false
     /** The last the hold's look saw of a private guest and the rear's light: chrome goes with an edge of that. Under [holdLock]. */
     private var privateLight: Pair<Int, Boolean>? = null
-    private var holdListening = false
+    @Volatile private var holdListening = false
     private val doubleTaps = GuestHold.DoubleTaps()
     /** Mirrors [GuestHold.held] for the touch path, which takes no lock. */
     @Volatile private var holdTaken = false
@@ -4518,6 +5872,7 @@ class RearUserService : IRearService.Stub {
             syncGuestHold()
             // A wake under a guest is skipped (WakeStyle.skipWhy), but read, so the edge is not lost.
             if (companion) rearLightChanged()
+            chargeLitChanged()
         }
     }
 
@@ -4646,6 +6001,7 @@ class RearUserService : IRearService.Stub {
             if (want) holdDisplays?.registerDisplayListener(holdDisplayListener, holdHandler)
             else holdDisplays?.unregisterDisplayListener(holdDisplayListener)
         }
+        syncLightPoll()
     }
 
     /**
@@ -4661,10 +6017,12 @@ class RearUserService : IRearService.Stub {
             if (displayId != rearDisplay()) return
             syncTouchWatch()
             rearLightChanged()
+            // The charging page that stays waits on a dark back for exactly this word (it does not poll any more).
+            chargeLitChanged()
         }
     }
     private val companionListenLock = Any()
-    private var companionListening = false
+    @Volatile private var companionListening = false
 
     private fun syncCompanionListening() = synchronized(companionListenLock) {
         // The top pull's touch watch (More apps) and the wake animation's OFF/DOZE -> ON edge.
@@ -4678,6 +6036,59 @@ class RearUserService : IRearService.Stub {
         }
         resetRearLight(want)
         syncTouchWatch()
+        syncLightPoll()
+    }
+
+
+    /** The light as this clock last read it; null before its first read. On [holdHandler]. */
+    private var polledLight: WakeStyle.Light? = null
+    /** Whether the clock runs. On [holdHandler]. */
+    private var lightPolling = false
+    private val lightPoll: Runnable = object : Runnable {
+        override fun run() {
+            if (!lightPolling) return
+            readLightNow()
+            runCatching { holdHandler.postDelayed(this, LIGHT_POLL_MS) }
+        }
+    }
+    /** One read, now (a finger has landed). */
+    private val lightOnce = Runnable { if (lightPolling) readLightNow() }
+
+    /** The clock on while a listener is wanted, off when none is. Any thread; done on [holdHandler]. */
+    private fun syncLightPoll() {
+        runCatching {
+            holdHandler.post {
+                val want = companionListening || holdListening
+                if (want == lightPolling) return@post
+                lightPolling = want
+                holdHandler.removeCallbacks(lightPoll)
+                polledLight = null
+                // After [resetRearLight]'s own post, so the first read finds the baseline it set and says no edge.
+                if (want) holdHandler.post(lightPoll)
+            }
+        }
+    }
+
+    /** On [holdHandler]. The rear's light as it is; a change since the last read is said as a listener would have. */
+    private fun readLightNow() {
+        try {
+            val display = rearDisplay()
+            val light = WakeStyle.light(rearState(display))
+            if (light == polledLight) return
+            val first = polledLight == null
+            polledLight = light
+            // As holdDisplayListener: the guest hold's look (it reads the display itself).
+            if (holdListening) syncGuestHold()
+            // As companionDisplayListener: the top pull's touch watch, then the light's edge.
+            if (companionListening) syncTouchWatch()
+            if (companion && (companionListening || holdListening) && light != rearLight) {
+                if (!first) Log.i(TAG, "light: the back is ${light?.name?.lowercase() ?: "unknown"} — read; no display event came")
+                rearLightChanged()
+            }
+            chargeLitChanged()
+        } catch (e: Throwable) {
+            Log.w(TAG, "light: reading the back's light failed", e)
+        }
     }
 
     /** Unconditionally, for the end of the service. */
@@ -5029,21 +6440,40 @@ class RearUserService : IRearService.Stub {
     // -- screenshots and recordings of the back --------------------------------------------
     //
     // The control centre's two tiles (ControlCenterLayout.SHOT, RECORD), on the panel's and on the
-    // one over a guest. Made here, by the shell — screencap and screenrecord of the rear's own
-    // display (its physical id, as the cover's capture) — into the app's own external files, and
-    // handed to the app, which puts them in the gallery (CaptureStore). The control centre goes
-    // first, so it is not in the picture; the recording's pill is left out of it (RecordPill).
+    // one over a guest, and three fingers held on the back (ThreeHold, as the settings choose). Made
+    // here, by the shell — screencap and screenrecord of the rear's own display (its physical id, as
+    // the cover's capture) — in the shell's own space, and handed to the app, which puts them in the
+    // gallery (CaptureStore). The control centre goes first, so it is not in the picture; the
+    // recording's pill is left out of it (RecordPill).
+    //
+    // A SCREENSHOT goes into DCIM/Screenshots beside his others, named as the phone names them
+    // (BackShots). It is never lost to a frozen app (ShotKeeper): the app claims it first; not
+    // claimed within ShotKeeper.CLAIM_MS, or not handed over at all, the shell writes it there itself
+    // and has the media store index it ([shellSaveShot]). That writing, and the bin of a shot the
+    // shell wrote, run on [shotSaver], never on [captureWorker]: the media store's commands take
+    // seconds, and a tile or a hold meanwhile must not wait to take its picture. One thread for both,
+    // so a bin always comes after the copy it deletes.
 
     private val captureWorker by lazy {
         java.util.concurrent.Executors.newSingleThreadExecutor { r -> guardedThread("back-capture", r) }
+    }
+    /** The shell's own saving of a screenshot, and its bin ([shellSaveShot], [binLastShot]): in order, off [captureWorker]. */
+    private val shotSaver by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r -> guardedThread("back-shot-saver", r) }
     }
     /** The recording's screenrecord, and where it writes; 0 with none running. */
     @Volatile private var recordPid = 0
     @Volatile private var recordPath: String? = null
     private val recordPill by lazy { RecordPill(rearLayerStack(), geometry) }
     private val shotPolaroid by lazy { ShotPolaroid(rearLayerStack(), geometry) { runCatching { notices.lookNow() }.getOrNull() } }
+    /** Who saves each screenshot: the app (claimed in time) or this shell. */
+    private val shots = ShotKeeper()
+    /** The last screenshot's name (BackShots.name), for the polaroid's bin. */
+    @Volatile private var lastShotName: String? = null
     /** A finger on the polaroid, owned from its landing: on its bin, or dragging the card. Under [sheetLock]. */
     @Volatile private var binOwns = false
+    /** That finger is one of several (fingersCrowded): its lift does nothing. Under [sheetLock]. */
+    private var binCrowded = false
     private var shotDragging = false
     private var shotDownX = 0f
     private var shotLastX = 0f
@@ -5067,9 +6497,10 @@ class RearUserService : IRearService.Stub {
         when (e) {
             is RearTouches.Down -> {
                 binOwns = true
+                binCrowded = false
                 shotDownX = e.x; shotLastX = e.x; shotLastAt = e.atMs; shotSpeed = 0f
             }
-            is RearTouches.Move -> if (shotDragging) {
+            is RearTouches.Move -> if (shotDragging && !binCrowded) {
                 val ms = (e.atMs - shotLastAt).coerceAtLeast(1L)
                 shotSpeed = 0.6f * ((e.x - shotLastX) / ms) + 0.4f * shotSpeed
                 shotLastX = e.x; shotLastAt = e.atMs
@@ -5077,13 +6508,13 @@ class RearUserService : IRearService.Stub {
             }
             is RearTouches.Up -> {
                 binOwns = false
-                if (shotDragging) {
+                if (binCrowded) binCrowded = false
+                else if (shotDragging) {
                     // A finger that stopped before lifting is not flicking.
                     shotPolaroid.release(if (e.atMs - shotLastAt > 80L) 0f else shotSpeed)
                 } else if (shotPolaroid.binAt(e.x, e.y)) {
                     shotPolaroid.bin()
-                    Log.i(TAG, "capture: the screenshot binned")
-                    runCatching { events?.onDeleteLastShot() }
+                    binLastShot()
                 }
             }
         }
@@ -5092,17 +6523,114 @@ class RearUserService : IRearService.Stub {
 
     /** A finger on the pill, owned from its landing: where it landed and where the pill was, and whether it moved. Under [sheetLock]. */
     @Volatile private var pillOwns = false
+    /** That finger is one of several (fingersCrowded): the pill stays where it is and the lift stops nothing. Under [sheetLock]. */
+    private var pillCrowded = false
     private var pillDownX = 0f
     private var pillDownY = 0f
     private var pillFrom = 0 to 0
     private var pillMoved = false
 
     override fun capture(record: Boolean) {
-        runCatching { captureWorker.execute { if (record) toggleRecording() else screenshot() } }
+        runCatching { captureWorker.execute { if (record) toggleRecording("its tile") else screenshot("its tile") } }
     }
 
-    /** Where captures are made: the shell's own space; each is handed to the app open ([handOver]), then gone. */
+    /** Where captures are made: the shell's own space; each is handed to the app open ([handOver], [handOverShot]), then gone. */
     private fun captureDir(): String = "/data/local/tmp/magicrear-captures"
+
+    /** The app has screenshot [name] in hand and asks whether to save it (ShotKeeper.claim; its Claim's code). */
+    override fun claimShot(name: String?): Int {
+        if (!BackShots.isName(name)) return ShotKeeper.Claim.SAVE.code
+        val claim = shots.claim(name!!)
+        if (claim != ShotKeeper.Claim.SAVE) Log.i(TAG, "capture: the app came for $name — ${if (claim == ShotKeeper.Claim.SCAN) "the shell has saved it already" else "nothing to do"}")
+        return claim.code
+    }
+
+    private fun handOverShot(path: String, name: String) {
+        val f = java.io.File(path)
+        val sent = shots.handOver(name, android.os.SystemClock.uptimeMillis()) {
+            runCatching {
+                android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+                    (events ?: error("nobody to hand it to")).onShot(pfd, name)
+                }
+            }.onFailure { Log.w(TAG, "capture: not handed over: ${it.message}") }.isSuccess
+        }
+        if (!sent) {
+            // Taken by the shell on its saver, after anything already queued there: binned meanwhile, nobody saves it.
+            runCatching {
+                shotSaver.execute { if (shots.unsent(name)) shellSaveShot(path, name, "not handed to the app", appHasIt = false) else f.delete() }
+            }.onFailure { f.delete() }
+            return
+        }
+        runCatching {
+            holdHandler.postDelayed({
+                runCatching {
+                    shotSaver.execute {
+                        if (shots.due(name, android.os.SystemClock.uptimeMillis())) shellSaveShot(path, name, "the app did not take it within ${ShotKeeper.CLAIM_MS} ms", appHasIt = true)
+                        else f.delete()
+                    }
+                }.onFailure { f.delete() }
+            }, ShotKeeper.CLAIM_MS + 20L)
+        }.onFailure { f.delete() }
+    }
+
+    /**
+     * The shell saves screenshot [name] itself ([why]: the app could not take it): copied into DCIM/Screenshots through
+     * the FUSE mount (BackShots.SHELL_DIR), and the media store has it indexed ([indexShot]). The copy failing, a shot
+     * the app holds open ([appHasIt]: handed over, not yet claimed) is the app's again (ShotKeeper.failed): it saves it
+     * when it thaws. On [shotSaver].
+     */
+    private fun shellSaveShot(path: String, name: String, why: String, appHasIt: Boolean) {
+        val dest = BackShots.shellPath(name)
+        val copied = exec("mkdir -p ${BackShots.SHELL_DIR} && cp $path $dest && echo ok").endsWith("ok")
+        java.io.File(path).delete()
+        if (!copied) {
+            // Nothing half-written left beside his screenshots.
+            exec("rm -f $dest")
+            if (appHasIt && shots.failed(name)) Log.w(TAG, "capture: $why, and the shell could not write $dest either — the app has it open and saves it when it comes")
+            else Log.w(TAG, "capture: $why, and the shell could not write $dest either — the screenshot is lost")
+            return
+        }
+        Log.i(TAG, "capture: $why — saved by the shell as ${BackShots.RELATIVE_PATH}/$name, ${indexShot(dest, name)}")
+    }
+
+    /**
+     * [dest] in the media store, and how: the FUSE mount adds a file made through it as it is closed (Android 11 on);
+     * MediaProvider's scan_file call (the one MediaScannerConnection makes, open to the shell's `content` tool) makes
+     * sure; a query for its name checks; only if it is still not there, the old scanner broadcast. The app, once it
+     * thaws and claims the shot, asks for a scan of it too (CaptureStore.scanShellShot). On [shotSaver].
+     */
+    private fun indexShot(dest: String, name: String): String {
+        exec(BackShots.scanCommand(dest))
+        if (BackShots.indexed(exec(BackShots.queryCommand(name)))) return "in the media store (scan_file)"
+        exec(BackShots.broadcastCommand(dest))
+        Thread.sleep(SCAN_WAIT_MS)
+        return if (BackShots.indexed(exec(BackShots.queryCommand(name)))) "in the media store (the scanner broadcast)"
+        else "not in the media store yet (the app asks again when it comes)"
+    }
+
+    /**
+     * The polaroid's bin: the last screenshot gone from whoever has it, or saved by nobody if it is still waiting. The
+     * shell's own file goes on [shotSaver], after the copy that made it.
+     */
+    private fun binLastShot() {
+        val name = lastShotName
+        when (name?.let { shots.bin(it) }) {
+            ShotKeeper.Custodian.BINNED -> Log.i(TAG, "capture: the screenshot binned before it was saved")
+            ShotKeeper.Custodian.SHELL -> runCatching {
+                shotSaver.execute {
+                    val dest = BackShots.shellPath(name)
+                    exec("rm -f $dest")
+                    // Gone through the FUSE mount is gone from the media store; the scan of a missing file makes sure.
+                    exec(BackShots.scanCommand(dest))
+                    Log.i(TAG, "capture: the screenshot binned (the shell's own file)")
+                }
+            }
+            else -> {
+                Log.i(TAG, "capture: the screenshot binned")
+                runCatching { events?.onDeleteLastShot() }
+            }
+        }
+    }
 
     /** [path] handed to the app open (it copies it to the gallery), and gone from here: an open file outlives its name. */
     private fun handOver(path: String, video: Boolean) {
@@ -5122,22 +6650,29 @@ class RearUserService : IRearService.Stub {
         Thread.sleep(CAPTURE_CLEAR_MS)
     }
 
-    private fun screenshot() {
+    /**
+     * A screenshot of the back ([why]: its tile, three fingers), into DCIM/Screenshots as BackShots names it. The control
+     * centre out of the picture first ([clearFirst]; the tile's is always up). Taken before anything of it is drawn:
+     * the polaroid plays from the file after. On [captureWorker].
+     */
+    private fun screenshot(why: String, clearFirst: Boolean = true) {
         val id = rearPhysicalId() ?: run { Log.w(TAG, "capture: no physical id for the rear"); return }
-        clearForCapture("a screenshot")
+        if (clearFirst) clearForCapture("a screenshot")
         val dir = captureDir()
-        val path = "$dir/shot_${System.currentTimeMillis()}.png"
+        val name = BackShots.name(System.currentTimeMillis())
+        val path = "$dir/$name"
         val said = exec("mkdir -p $dir && screencap -d $id -p $path && echo ok")
         if (!said.endsWith("ok")) { Log.w(TAG, "capture: screencap failed: ${said.take(120)}"); return }
-        Log.i(TAG, "capture: the back's screenshot made")
+        Log.i(TAG, "capture: the back's screenshot made ($why)")
+        lastShotName = name
         // Shown as taken (ShotPolaroid), from the file itself, before it is handed over and gone.
         runCatching { android.graphics.BitmapFactory.decodeFile(path) }.getOrNull()?.let { shotPolaroid.play(it) }
-        handOver(path, video = false)
+        handOverShot(path, name)
     }
 
-    /** A recording started, or the one running stopped. On [captureWorker]. */
-    private fun toggleRecording() {
-        if (recordPid > 0) { stopRecording("its tile"); return }
+    /** A recording started, or the one running stopped ([why]: its tile, three fingers). On [captureWorker]. */
+    private fun toggleRecording(why: String) {
+        if (recordPid > 0) { stopRecording(why); return }
         val id = rearPhysicalId() ?: run { Log.w(TAG, "capture: no physical id for the rear"); return }
         clearForCapture("a recording")
         val dir = captureDir()
@@ -5190,11 +6725,12 @@ class RearUserService : IRearService.Stub {
         when (e) {
             is RearTouches.Down -> {
                 pillOwns = true
+                pillCrowded = false
                 pillDownX = e.x; pillDownY = e.y
                 pillFrom = recordPill.position
                 pillMoved = false
             }
-            is RearTouches.Move -> {
+            is RearTouches.Move -> if (!pillCrowded) {
                 val dx = e.x - pillDownX
                 val dy = e.y - pillDownY
                 if (!pillMoved && kotlin.math.hypot(dx, dy) > EdgeGestures.SLOP) pillMoved = true
@@ -5202,8 +6738,10 @@ class RearUserService : IRearService.Stub {
             }
             is RearTouches.Up -> {
                 pillOwns = false
+                val crowdedLift = pillCrowded
+                pillCrowded = false
                 // Tapped: it fades at once, as the recording is finished off behind it.
-                if (!pillMoved) { recordPill.hide(); runCatching { captureWorker.execute { stopRecording("its pill") } } }
+                if (!pillMoved && !crowdedLift) { recordPill.hide(); runCatching { captureWorker.execute { stopRecording("its pill") } } }
             }
         }
         return true
@@ -5830,6 +7368,10 @@ class RearUserService : IRearService.Stub {
             syncBackLock(force = true)
             flushConfined()
             if (panelCovered) tellPanelCovered()
+            toldOrder?.let { o -> runCatching { events.onPinsOrdered(o.toLongArray()) } }
+            // The face as the shell has it: a choice made on the back while the app was not there to be told (frozen,
+            // restarted, its data cleared) is the app's too, so its settings show the face the back shows.
+            if (facesStarted && faceSeq > 0L) { val k = faceKey; val n = faceSeq; runCatching { events.onFaceChosen(k, n) } }
         }
     }
 
@@ -6054,12 +7596,16 @@ class RearUserService : IRearService.Stub {
                     val on = context?.getSystemService(android.hardware.display.DisplayManager::class.java)
                         ?.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.state == android.view.Display.STATE_ON
                     val locked = phoneLocked()
+                    if (on && frontWasOn == false) autostart.frontCameOn()
+                    // Likewise the system search's block, which waits for a lit screen (SearchOffline).
+                    if (on && frontWasOn == false) searchOffline.frontCameOn()
                     synchronized(lockGuard) {
                         if (!on && frontWasOn == true) rearLock.dark()
                         rearLock.seen(locked)
                     }
                     frontWasOn = on
-                    syncBackLock()
+                    // The phone's lock as just read, not asked again (it was asked two or three times a look).
+                    syncBackLock(phone = locked)
                     val backNowLocked = backLockedNow
                     if (sheetLocked && sheetUp && !backNowLocked) openedElsewhere()
                     // The phone locked with the back open: what is up locks now, not at the next look.
@@ -6068,7 +7614,7 @@ class RearUserService : IRearService.Stub {
                         guest?.takeIf { it.onTop && it.onPrivate && !lockVeiled }?.let { veil(it) }
                     }
                     if (lockVeiled) {
-                        if (!backLocked()) unveil("the phone is unlocked")
+                        if (!backLocked(locked)) unveil("the phone is unlocked")
                         else if (rearLit(rearDisplay()) != true) coverShown = false
                         else if (!coverShown && !sheetUp) { coverShown = true; openLockCover() }
                     }
@@ -6093,9 +7639,9 @@ class RearUserService : IRearService.Stub {
     /** Companion mode's: a banner keeps its words while the phone is locked (PanelConfig.noticeTextWhenLocked). */
     @Volatile private var noticeTextWhenLocked = false
 
-    /** [backLockedNow] looked at again, and the panel told when it changed (IRearEvents.onBackLock). Any thread. */
-    private fun syncBackLock(force: Boolean = false) {
-        val now = backLocked()
+    /** [backLockedNow] looked at again, and the panel told when it changed (IRearEvents.onBackLock). Any thread. [phone]: the phone's lock as just read; null to read it. */
+    private fun syncBackLock(force: Boolean = false, phone: Boolean? = null) {
+        val now = backLocked(phone)
         if (now == backLockedNow && !force) return
         backLockedNow = now
         Log.i(TAG, "back lock: ${if (now) "on" else "off"}")
@@ -6105,11 +7651,11 @@ class RearUserService : IRearService.Stub {
         runCatching { controlCenter.lockChanged() }
     }
 
-    /** Whether the back is locked now (BackLock). Any thread; one binder call. */
-    private fun backLocked(): Boolean {
+    /** Whether the back is locked now (BackLock). Any thread; one binder call, none where [phone] (the phone's lock as just read) is given. */
+    private fun backLocked(phone: Boolean? = null): Boolean {
         if (lockDemo() != null) return true
-        val phone = phoneLocked()
-        return synchronized(lockGuard) { rearLock.locked(lockKind, phone) }
+        val locked = phone ?: phoneLocked()
+        return synchronized(lockGuard) { rearLock.locked(lockKind, locked) }
     }
 
     /** [backLocked], said in the log with why: for a sheet opening, not for every look. */
@@ -6611,7 +8157,18 @@ class RearUserService : IRearService.Stub {
             layerStack = ::rearLayerStack,
             geometry = { geometry },
             // A made-up row (a debug build's demo list) is nobody's notification: the app is not told of it.
-            onDismissed = { key -> if (key.startsWith("demo:")) Log.i(TAG, "notices: a demo row swiped away ($key)") else events?.onNoticeDismissed(key) },
+            // A made-up finger (a test's) never takes one of his away (NoticeThrow.toPhone): only said.
+            onDismissed = { key -> when {
+                NoticeThrow.isDemo(key) -> Log.i(TAG, "notices: a demo row swiped away ($key)")
+                !NoticeThrow.toPhone(key, madeUpFinger()) -> Log.i(TAG, "notices: thrown out by a made-up finger — the notification is unchanged")
+                else -> events?.onNoticeDismissed(key)
+            } },
+            // Thrown the other way: snoozed for the hour on the phone (the app's listener does it); a demo's only logged.
+            onSnoozed = { key, ms -> when {
+                NoticeThrow.isDemo(key) -> Log.i(TAG, "notices: a demo row snoozed ($key)")
+                !NoticeThrow.toPhone(key, madeUpFinger()) -> Log.i(TAG, "notices: snoozed by a made-up finger — the notification is unchanged")
+                else -> events?.onNoticeSnoozed(key, ms)
+            } },
             onProgress = { frame.controlCenterOpen(it); strip.sheetOpen(it) },
             // Companion mode: the text while locked is its own choice (PanelConfig.noticeTextWhenLocked,
             // NoticeFilter.textShown); Replace mode keeps the panel's lockedNoticeText.
@@ -6624,8 +8181,19 @@ class RearUserService : IRearService.Stub {
                 Log.i(TAG, "notices: dock — $pkg")
                 runCatching { popWaiter.execute { launchGuest(pkg, rearDisplay()) } }
             },
+            // The pop-up standing over the whole back, or not any more: what is under it may be held, or must move (HiddenFrames).
+            onPopPlace = { popInPlace = it; coverMoved() },
+            // The pile settled over the whole back, or not any more (a finger on it, a frame that moves, its end): the same.
+            onPileCover = { pileInPlace = it; coverMoved() },
+            // The pull with nothing waiting: the rim's light in white, or in Xiaomi's rear-glow colours (the settings' choice).
+            rimXiaomi = { emptyPullXiaomi },
+            // The message island's tint of the live face ("Island · Tint"): the scene's engines read it at each picture.
+            veil = scene.veil,
         )
     }
+    @Volatile private var emptyPullXiaomi = false
+    /** "Message style" (PanelConfig.messageStyle): the full page or the message island; read as each message comes. */
+    @Volatile private var messageStyle = dev.kb896.aiusage.data.MessageStyle.FULL
     @Volatile private var noticesOn = true
     @Volatile private var noticesPop = true
 
@@ -6635,7 +8203,7 @@ class RearUserService : IRearService.Stub {
      * touch reader's).
      */
     private fun noticesOpens(): Boolean =
-        noticesOn && !sheetUp && !beginPending && (companion || (pullOpens() && !dozing)) && !cameraUp() && !controlCenter.isUp
+        !nav.picker && !picker.isUp && noticesOn && !sheetUp && !beginPending && (companion || (pullOpens() && !dozing)) && !cameraUp() && !controlCenter.isUp
 
     override fun setNotices(list: android.os.Bundle?, pop: String?) {
         val items = notices.items(list)
@@ -6693,7 +8261,7 @@ class RearUserService : IRearService.Stub {
         // Locked or not, now: the banner's words follow it (redact), read once a banner.
         syncBackLock()
         val now = android.os.SystemClock.uptimeMillis()
-        when (val d = rearShow.request(RearShow.Kind.BANNER, now, ShellNotices.BANNER_MS)) {
+        when (val d = rearShow.request(RearShow.Kind.BANNER, now, notices.popMs(messageStyle))) {
             is RearShow.Decision.Drop -> return
             is RearShow.Decision.Start -> when (d.cut) {
                 RearShow.Kind.CHARGE -> charge.cut(d.fadeMs, "a notification")
@@ -6705,12 +8273,35 @@ class RearUserService : IRearService.Stub {
     }
 
     /** A pop-up shown, and told to the navigation for its time on the back (RearNav: it lies over everything, and touches go through it). */
-    private fun popUp(item: NoticeShade.Item) {
-        notices.pop(item)
-        navStep(RearNav.Input.PopArrives)
-        runCatching { holdHandler.removeCallbacks(popEnds); holdHandler.postDelayed(popEnds, ShellNotices.BANNER_MS) }
+    private fun popUp(item: NoticeShade.Item, style: dev.kb896.aiusage.data.MessageStyle = messageStyle) {
+        // A new one (or the next in the place of the one up): a finger already down is not aimed at it (NoticeThrow.aimed),
+        // and a drag that followed the one before lets go of it (popLost).
+        popAt = android.os.SystemClock.uptimeMillis()
+        popSerial++
+        // In the style chosen; the island's open page tints the face itself when the face is what shows (asked before the
+        // navigation has the pop-up). Its time on the back is the style's own.
+        islandOverFace = style != dev.kb896.aiusage.data.MessageStyle.FULL && RearNav.seen(nav.copy(pop = false)) == RearNav.Seen.MOON
+        val ms = notices.pop(item, style, faceTints = islandOverFace && scene.tintsItself)
+        // Whether it may be thrown out (dismissed, snoozed) is its own: one that may not gives under the finger and stays.
+        navStep(RearNav.Input.PopArrives(fixed = !item.clearable))
+        runCatching { holdHandler.removeCallbacks(popEnds); holdHandler.postDelayed(popEnds, ms) }
     }
-    private val popEnds = Runnable { navStep(RearNav.Input.PopEnds); applyLive() }
+
+    /** The pop-up back in its place after a finger held it aside (NoticeThrow's spring), and its end timed again from what it has left. */
+    private fun popBack() {
+        val left = runCatching { notices.popBack() }.getOrDefault(0L)
+        runCatching { holdHandler.removeCallbacks(popEnds); holdHandler.postDelayed(popEnds, left) }
+    }
+    private val popEnds = object : Runnable {
+        override fun run() {
+            val remaining = notices.islandTimeLeft()
+            if (remaining > 0L) holdHandler.postDelayed(this, remaining)
+            else { navStep(RearNav.Input.PopEnds); applyLive() }
+        }
+    }
+    /** When the pop-up up now came (uptime ms, 0 before any), and which one it is: one more for each. */
+    @Volatile private var popAt = 0L
+    @Volatile private var popSerial = 0L
 
     // -- the charging animation over Xiaomi's rear (ShellCharge) -------------------------------
 
@@ -6718,17 +8309,25 @@ class RearUserService : IRearService.Stub {
     private val rearShow = RearShow()
 
     private val charge: ShellCharge by lazy {
+        chargeMade = true
         ShellCharge(
             layerStack = ::rearLayerStack,
             geometry = { geometry },
             lit = { rearLit(rearDisplay()) == true },
+            litRecently = ::rearLitRecently,
             onEnded = {
                 chargeLoose = false
                 rearShow.end(RearShow.Kind.CHARGE, android.os.SystemClock.uptimeMillis())
                 syncTouchWatch()
             },
+            // The whole charging page standing in its place, or not any more: what is under it may be held, or must move (HiddenFrames).
+            onPlace = { chargeInPlace = it; coverMoved() },
         )
     }
+
+    /** The rear's light may have changed: told to the charging page only if it was ever made (it waits for this on a dark back). */
+    private fun chargeLitChanged() { if (chargeMade) runCatching { charge.litChanged() } }
+    @Volatile private var chargeMade = false
 
     /** PanelConfig.chargeAnim, chargeStyle, chargePercent, from the last payload. */
     @Volatile private var chargeOn = true
@@ -6815,6 +8414,42 @@ class RearUserService : IRearService.Stub {
 
     override fun endCharge() = chargeOver()
 
+    // -- the health check's shell half (rear/ShellHealth): scanned once, some seconds after the start, and when asked
+    // to look again; an ordinary ask answers with what is known (ShellHealth.Gate) --
+
+    private val healthGate = ShellHealth.Gate()
+    private val healthFirstLook = guarded {
+        try { Thread.sleep(HEALTH_FIRST_LOOK_MS) } catch (_: InterruptedException) { return@guarded }
+        if (synchronized(healthGate) { healthGate.first() }) ShellHealth.look(::exec)
+    }.apply { name = "rear-health"; isDaemon = true; start() }
+
+    override fun health(again: Boolean): android.os.Bundle {
+        if (synchronized(healthGate) { healthGate.ask(again) }) ShellHealth.look(::exec)
+        return ShellHealth.report(cover.made, cover.lastError, autostart.troubles, searchOffline.troubles)
+    }
+
+    /**
+     * THE PHONE'S OWN SEARCH KEPT OFF THE INTERNET (rear/SearchOffline; "Keep the system search offline" in Advanced):
+     * its firewall block applied again in every new shell process (after a restart of the phone, after an update), then
+     * read once an hour and applied again only when gone. Only while the front or the back is lit; started from the
+     * constructors, last.
+     */
+    private val searchOffline = SearchOffline.Runner(
+        lit = {
+            val front = rearState(android.view.Display.DEFAULT_DISPLAY)
+            val back = rearState(rearDisplay())
+            // Neither readable (no Context): taken as lit, so the block is not held back for ever.
+            (front == null && back == null) || (front != null && dev.kb896.aiusage.service.FrontScreen.isOn(front)) || back == android.view.Display.STATE_ON
+        },
+        exec = ::exec,
+    )
+
+    private val autostart = Autostart.Runner(
+        frontOn = { dev.kb896.aiusage.service.FrontScreen.isOn(rearState(android.view.Display.DEFAULT_DISPLAY) ?: android.view.Display.STATE_OFF) },
+        coverUp = { cover.isUp },
+        doNotDisturb = { exec("settings get global zen_mode").trim().let { it.isNotEmpty() && it != "0" && it != "null" } },
+    )
+
     /** Full, the charger still in (ChargeState.Is.FULL): not live any more, and its page slides out as a page that ends does. */
     override fun chargeFull() {
         if (!chargeWanted) return
@@ -6863,9 +8498,19 @@ class RearUserService : IRearService.Stub {
             layerStack = ::rearLayerStack,
             geometry = { geometry },
             lit = { rearLit(rearDisplay()) == true },
+            litRecently = ::rearLitRecently,
             onEnded = { syncTouchWatch() },
+            faces = faceSource,
+            moonLoop = { clipPath(sceneLoop) },
+            sensors = { context?.getSystemService(android.hardware.SensorManager::class.java) },
+            panelHz = ::rearPanelHz,
         )
     }
+
+    /** The back's panel's refresh rate now (its mode's, not an app's render rate); 0 when it does not say. */
+    private fun rearPanelHz(): Float = runCatching {
+        context?.getSystemService(android.hardware.display.DisplayManager::class.java)?.getDisplay(rearDisplay())?.mode?.refreshRate ?: 0f
+    }.getOrDefault(0f)
 
     /** PanelConfig.sceneOn, sceneWake, sceneLoop and the face's look, from the last payload. */
     @Volatile private var sceneOn = true
@@ -6894,8 +8539,8 @@ class RearUserService : IRearService.Stub {
             else -> null
         }
         if (why != null) { Log.i(TAG, "scene: not played — $why"); return false }
-        val started = scene.play(clipPath(sceneWake), clipPath(sceneLoop), seenAt, waitForLight = false)
-        if (started) { Log.i(TAG, "scene: $sceneWake then $sceneLoop"); syncTouchWatch() }
+        val started = scene.play(faceWakePath(), faceLoopPath(), seenAt, waitForLight = false)
+        if (started) { Log.i(TAG, "scene: ${if (shownFaceKey() != FaceCatalog.MOON) faceTitle(faceKey) else "$sceneWake then $sceneLoop"}"); syncTouchWatch() }
         return started
     }
 
@@ -6906,8 +8551,8 @@ class RearUserService : IRearService.Stub {
             "wake", "loop" -> {
                 val display = rearDisplay()
                 if (cameraUp() || cameraHasRear(display) || guestOnTop()) { Log.i(TAG, "playScene: the back is taken — not played"); return }
-                val wake = if (what == "wake") clipPath(sceneWake) else null
-                val loop = clipPath(sceneLoop)
+                val wake = if (what == "wake") faceWakePath() else null
+                val loop = faceLoopPath()
                 if (scene.play(wake, loop, android.os.SystemClock.uptimeMillis(), waitForLight = true)) syncTouchWatch()
             }
             else -> Log.w(TAG, "playScene: \"$what\" is nothing")
@@ -6946,6 +8591,8 @@ class RearUserService : IRearService.Stub {
         Log.i(TAG, "stay: ${STAY_NAME[next]} — ${why.orEmpty()}")
         // Face down afresh: the tilt's last word (he had lifted it) is forgotten.
         if (next == FrontDim.FACE_DOWN_LEVEL && stay != next) frontDim.fresh()
+        // Lit by the rule again: the panel's level read afresh, not one kept from before.
+        if (stay == 0 && next > 0) panelKept.forget()
         stay = next
         syncFrontDim("the stay rule")
         applySceneLook()
@@ -6965,14 +8612,66 @@ class RearUserService : IRearService.Stub {
         val line = runCatching { file.readText().trim() }.getOrDefault("")
         runCatching { file.delete() }
         val parts = line.split('|')
+        if (parts[0] == "island") {
+            // No activity launch and no setting write. The third field spends the shell's one-use debug token.
+            if (parts.size != 3) return
+            val style = when (parts[1]) {
+                "tint" -> dev.kb896.aiusage.data.MessageStyle.TINT
+                "sweep" -> dev.kb896.aiusage.data.MessageStyle.SWEEP
+                else -> return
+            }
+            val token = file.resolveSibling(dev.kb896.aiusage.DebugLock.FILE)
+            val stored = runCatching { token.readText() }.getOrNull()
+            val verdict = dev.kb896.aiusage.DebugLock.verdict(BuildConfig.DEBUG, true, parts[2], stored,
+                token.lastModified(), System.currentTimeMillis())
+            if (!verdict.open || !token.delete()) return
+            if (RearNav.seen(nav) != RearNav.Seen.MOON || rearLit(rearDisplay()) != true) {
+                Log.i(TAG, "island: demo skipped because the face is not visible")
+                return
+            }
+            val pkg = "com.whatsapp"
+            demoIcon(pkg)
+            popUp(NoticeShade.Item("demo:${android.os.SystemClock.uptimeMillis()}", pkg, demoLabel(pkg), "Demo",
+                "Running ten minutes late", color = 0xFF25D366.toInt()), style)
+            return
+        }
         // "nolive" takes the live page off the back for a look at something else, FOR THREE MINUTES at most: a real
         // timer of his says itself only once (Xiaomi's Clock), so what the app last told is put back ("relive", or by itself).
         // "nolive": every DEMO's live page down, now. ONLY DEMOS: it used to take whatever was live off the back, his own
         // call or timer too (a test's clean-up must never end a real call's page).
         // "hidelive" is the old word, for a look at the back without his live page, three minutes at most.
-        if (parts[0] == "nolive") { holdHandler.removeCallbacks(demoLiveEnds); demoLiveEnds.run(); return }
+        if (parts[0] == "nolive") {
+            holdHandler.removeCallbacks(navigationDemoEnds)
+            navigationDemoEnds.run()
+            holdHandler.removeCallbacks(demoLiveEnds)
+            demoLiveEnds.run()
+            return
+        }
         if (parts[0] == "hidelive") { timer = null; call = null; syncMediaCard(atOnce = true); runCatching { holdHandler.removeCallbacks(liveBack); holdHandler.postDelayed(liveBack, 180_000L) }; return }
         if (parts[0] == "relive") { holdHandler.removeCallbacks(liveBack); liveBack.run(); return }
+        // "face|moon", "face|xiaomi:<id>": that face, as a tap in the picker would choose it (a test goes back to the moon
+        // so, never by a stroke: a left-to-right stroke on the moon opens the Camera). "faces": a scan now, said in the log.
+        // "picker-leave": the picker shut without choosing, as a stroke up does.
+        if (parts[0] == "face") { parts.getOrNull(1)?.let { chooseFace(it, "debug") }; return }
+        // THE DUST FACE MADE TO REACT WITHOUT HIS HANDS ("face|dust" shows it; the finger's part is the made-up touches'):
+        // "dust|push|ax|ay|ms" the phone moved and stopped (m/s² at its briskest along the back as he sees it, x right, y
+        // down; default 3 to the right over 500 ms, about 12 cm), "dust|turn|deg|ms" turned about the back's own axis and
+        // back (clockwise to him; default 30 degrees over 800 ms), "dust|tilt|deg|ms" tipped left or right and back
+        // (default 15 over 1500 ms), as its two sensors would say it (DustMotion.Made). "dust": whether it shows and its
+        // sensors are on, in the log.
+        if (parts[0] == "dust") {
+            fun num(i: Int, def: Float) = parts.getOrNull(i)?.toFloatOrNull() ?: def
+            val none = FloatArray(3)
+            when (parts.getOrNull(1)) {
+                "push" -> scene.dustMove(DustMotion.Made(none, pushX = num(2, 3f), pushY = num(3, 0f), pushS = num(4, 500f).coerceIn(20f, 3000f) / 1000f))
+                "turn" -> scene.dustMove(DustMotion.Made(none, turn = Math.toRadians(num(2, 30f).toDouble()).toFloat(), turnS = num(3, 800f).coerceIn(100f, 5000f) / 1000f))
+                "tilt" -> scene.dustMove(DustMotion.Made(none, tilt = Math.toRadians(num(2, 15f).toDouble()).toFloat(), turnS = num(3, 1500f).coerceIn(100f, 5000f) / 1000f))
+            }
+            Log.i(TAG, "dust: ${if (scene.dustShowing) "showing" else "not showing"}, its sensors ${scene.dustSensing}")
+            return
+        }
+        if (parts[0] == "faces") { scanFaces("debug", sha1 = true); return }
+        if (parts[0] == "picker-leave") { picker.leave(); return }
         if (parts[0] == "uncover") {
             val seconds = (parts.getOrNull(1)?.toLongOrNull() ?: 8L).coerceIn(1L, 20L)
             uncoverUntil = android.os.SystemClock.uptimeMillis() + seconds * 1000L
@@ -6987,6 +8686,7 @@ class RearUserService : IRearService.Stub {
         if (parts[0] == "cover") { holdHandler.removeCallbacks(coverAgain); coverAgain.run(); return }
         if (parts[0] == "pins") {
             val made = line.substringAfter('|', "").split("||").map { it.trim() }.filter { it.isNotEmpty() }.take(dev.kb896.aiusage.ui.PinActivity.MOST)
+            arrangeDrop("made-up notes are coming")
             if (!demoPinsUp) ownPins = pins
             demoPinsUp = true
             noteTurn.end()
@@ -6999,6 +8699,27 @@ class RearUserService : IRearService.Stub {
             return
         }
         if (parts[0] == "nopins") { holdHandler.removeCallbacks(demoPinsEnd); demoPinsEnd.run(); return }
+        // "arrive|Place|words||words": made-up notes whose place he has just reached, marked "Demo", his own aside (back at
+        // "noarrive" or after a minute; their bin and "not now" tell the app nothing). The sound is the app's (PlacePinActivity's debug word).
+        if (parts[0] == "arrive") {
+            val rest = line.substringAfter('|', "")
+            val place = rest.substringBefore('|').trim().ifEmpty { "Gym" }
+            val words = rest.substringAfter('|', "").split("||").map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf("A note for this place") }.take(3)
+            if (!demoArrivalsUp) ownArrived = pins
+            demoArrivalsUp = true
+            val now = System.currentTimeMillis()
+            val made = words.mapIndexed { i, text -> dev.kb896.aiusage.data.Pin("$text (Demo)", now - 1_000_000_000L - i, 0.0, 0.0, radius = 150, place = place, arrivedAt = now - i, watched = true) }
+            arrivalsPlayed?.removeAll(made.map { it.arrivedAt }.toSet())
+            arrived = made
+            arrivalTurn.end()
+            navStep(RearNav.Input.ArrivalsAre(0), "made-up arrivals")
+            navStep(RearNav.Input.ArrivalsAre(made.size), "made-up arrivals")
+            arrivalPage.changed()
+            holdHandler.removeCallbacks(demoArrivalsEnd); holdHandler.postDelayed(demoArrivalsEnd, 60_000L)
+            Log.i(TAG, "arrival: ${made.size} demo arrivals")
+            return
+        }
+        if (parts[0] == "noarrive") { holdHandler.removeCallbacks(demoArrivalsEnd); demoArrivalsEnd.run(); return }
         // "pinbeam-gl|words": the same arrival through OpenGL with Xiaomi's own card model (plumbing; not the pin's look yet).
         if (parts[0] == "pinbeam-gl") {
             if (faceWanted() && cover.isUp && rearLit(rearDisplay()) == true) { beamMade = true; pinBeam.playGl(parts.getOrNull(1)?.takeIf { it.isNotBlank() } ?: "A note") }
@@ -7015,16 +8736,40 @@ class RearUserService : IRearService.Stub {
         if (parts[0] == "nonotices") { holdHandler.removeCallbacks(demoListEnds); demoListEnds.run(); return }
         // "nav": the navigation's state, said in the log (a regression script asks for it).
         // (With what is live and whether it is a demo's: the script touches a button only on a demo.)
-        if (parts[0] == "nav") {
-            val live = listOfNotNull(call?.let { if (it.pkg == CALL_DEMO) "demo call" else "HIS call" }, timer?.let { if (it.pkg == CALL_DEMO) "demo timer" else "HIS timer" }, media?.let { if (mediaIsDemo) "demo track" else if (it.playing) "HIS track" else null }, if (chargeWanted) "charger" else null)
+        if (parts[0] == "nav" && parts.size == 1) {
+            val live = listOfNotNull(navigation?.let { if (it.demo) "demo navigation" else "live navigation" }, call?.let { if (it.pkg == CALL_DEMO) "demo call" else "live call" }, timer?.let { if (it.pkg == CALL_DEMO) "demo timer" else "live timer" }, media?.let { if (mediaIsDemo) "demo track" else if (it.playing) "live track" else null }, if (chargeWanted) "charger" else null)
             Log.i(TAG, "nav: is ${navName(nav)} [live: ${live.joinToString(", ").ifEmpty { "nothing" }}]")
+            // Which way throws a notification out (RearNav.DISMISS_WAY), for the regression to expect: its own line, so the
+            // line above stays as older scripts read it.
+            val dismissLeft = RearNav.DISMISS_WAY == RearNav.Way.LEFT
+            Log.i(TAG, "notices: throws are ${if (dismissLeft) "left" else "right"} dismisses, ${if (dismissLeft) "right" else "left"} snoozes")
             return
         }
-        if (parts.size < 4 && parts[0] != "charge") return
+        // Short words that are complete as they are; everything else below needs its four parts.
+        if (parts.size < 4 && parts[0] !in SHORT_DEMO_WORDS) { Log.i(TAG, "demo: \"${parts[0]}\" needs more parts — not shown"); return }
+        if (parts[0] == "nav") {
+            // "nav|distance|instruction|eta|progress" (and a sixth part, the line under it): the navigation page with no
+            // route there, marked "Demo", taken down after DEMO_LIVE_MS like every demo. Never over his own route, call,
+            // timer or music. Its app icon is the installed Maps' own; no arrow or tracker (there is no app picture for them).
+            val demo = NavigationDemo.parse(parts) ?: run { Log.i(TAG, "navigation: a demo needs nav|distance|instruction|eta|progress (0 to 1, or empty)"); return }
+            synchronized(liveLooking) {
+                if (navigationAsTold != null || realLiveDuringNavigationDemo(android.os.SystemClock.uptimeMillis())) {
+                    Log.i(TAG, "navigation: a demo asked for while real activity is live")
+                    return
+                }
+                Log.i(TAG, "navigation: a demo page")
+                val icon = runCatching { context?.packageManager?.getApplicationIcon(demo.pkg)?.toBitmap(160, 160) }.getOrNull()
+                updateNavigation(demo.copy(appIcon = icon))
+                syncMediaCard()
+                holdHandler.removeCallbacks(navigationDemoEnds)
+                holdHandler.postDelayed(navigationDemoEnds, DEMO_LIVE_MS)
+            }
+            return
+        }
         val color = parts[0].toLongOrNull(16)?.let { (0xFF000000L or it).toInt() } ?: 0
         if (parts[0] == "call") {
             // "call|ringing or talking or speaker|who|what": the call page, with no call there. Its buttons act on the demo alone.
-            if (call?.let { it.pkg != CALL_DEMO } == true || timer?.let { it.pkg != CALL_DEMO } == true) { Log.i(TAG, "call: a demo asked for while his own is live — not shown"); return }
+            if (navigationAsTold != null || call?.let { it.pkg != CALL_DEMO } == true || timer?.let { it.pkg != CALL_DEMO } == true) { Log.i(TAG, "call: demo skipped while live content is active"); return }
             Log.i(TAG, "call: a demo page")
             val was = call
             val ringing = parts[1] == "ringing"
@@ -7061,13 +8806,20 @@ class RearUserService : IRearService.Stub {
         if (parts[0] == "timer") {
             // "timer|running or paused or over|seconds left|seconds in all": the timer page, with no timer there. Its buttons act on the demo alone (the X ends it).
             // A demo never takes the place of something of his own: with a call or a timer of his live, it is not shown.
-            if (call?.let { it.pkg != CALL_DEMO } == true || timer?.let { it.pkg != CALL_DEMO } == true) { Log.i(TAG, "timer: a demo asked for while his own is live — not shown"); return }
+            if (navigationAsTold != null || call?.let { it.pkg != CALL_DEMO } == true || timer?.let { it.pkg != CALL_DEMO } == true) { Log.i(TAG, "timer: demo skipped while live content is active"); return }
             Log.i(TAG, "timer: a demo page")
             val left = (parts[2].toLongOrNull() ?: 0L) * 1000L
             call = null
             timer = TimerFace.Model("demo", CALL_DEMO, "Timer", System.currentTimeMillis() + left, left, (parts[3].toLongOrNull() ?: 0L) * 1000L, paused = parts[1] == "paused", over = parts[1] == "over")
             syncMediaCard(redraw = true)
             demoLiveFor()
+            return
+        }
+        if (parts[0] == "musicsound") {
+            // "musicsound": a made-up 20 s course for the music page's body (quiet, a build, a drop with kicks, quiet), over a
+            // DEMO track's page only ("media|playing|…" first), never over his music. It ends by itself.
+            if (mediaIsDemo && media?.playing == true) musicBody.demo(android.os.SystemClock.uptimeMillis())
+            else Log.i(TAG, "music sound: a made-up course is only for a demo track's page (media|playing|… first)")
             return
         }
         if (parts[0] == "media") {
@@ -7101,6 +8853,12 @@ class RearUserService : IRearService.Stub {
             }
             Log.i(TAG, "notices: a demo list of ${made.size}")
             made.forEach { demoIcon(it.pkg) }
+            // "notices|" with nothing (or "notices|empty"): the pull with nothing waiting, played once at once by the clock
+            // (the rim's light). The real list is neither read nor put aside, and no notification is touched.
+            if (made.isEmpty() && parts[0] == "notices") {
+                if (!notices.emptyDemo()) Log.i(TAG, "notices: the rim's demo not played — the notifications are up")
+                return
+            }
             notices.demo(made, logosFirst = parts[0] == "notices-logos")
             runCatching { holdHandler.removeCallbacks(demoListEnds); holdHandler.postDelayed(demoListEnds, 180_000L) }
             return
@@ -7110,13 +8868,13 @@ class RearUserService : IRearService.Stub {
         popUp(NoticeShade.Item("demo:${android.os.SystemClock.uptimeMillis()}", parts[1], demoLabel(parts[1]), parts[2], parts.drop(3).joinToString("|"), color = color))
     }
 
-    /** An app's own icon for the usage page's accounts (Claude's, ChatGPT's), read from the phone once; none when the app is not installed. */
+    /** An app's own icon for the usage page's accounts (Claude's, ChatGPT's), cached for each opening of the page. */
     private val usageAppIcons = java.util.concurrent.ConcurrentHashMap<String, android.graphics.Bitmap>()
     private val usageAppMissing = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
     private fun usageAppIcon(pkg: String): android.graphics.Bitmap? {
         usageAppIcons[pkg]?.let { return it }
         if (pkg.isEmpty() || pkg in usageAppMissing) return null
-        val bmp = runCatching { context?.packageManager?.getApplicationIcon(pkg)?.toBitmap(96, 96) }.getOrNull()
+        val bmp = runCatching { context?.packageManager?.getApplicationIcon(pkg)?.toBitmap(96, 96, android.graphics.Bitmap.Config.ARGB_8888) }.getOrNull()
         if (bmp == null) usageAppMissing += pkg else usageAppIcons[pkg] = bmp
         return bmp
     }
@@ -7136,7 +8894,7 @@ class RearUserService : IRearService.Stub {
         }
     }
 
-    private val demoListEnds = Runnable { Log.i(TAG, "notices: the demo list over, his own back"); notices.demo(null) }
+    private val demoListEnds = Runnable { Log.i(TAG, "notices: demo list ended"); notices.demo(null) }
 
     /** A made-up notification's app name is its app's own too. */
     private fun demoLabel(pkg: String): String = runCatching {
@@ -7152,7 +8910,11 @@ class RearUserService : IRearService.Stub {
     private val stayTick: Runnable = object : Runnable {
         override fun run() {
             popDemo()
-            if (faceWanted()) runCatching { readRearFocus() }
+            // The truth read: every ten seconds while the log is followed (each of its lines is read after at once and
+            // once more when it has settled), every tick while it is not, or for ten seconds after it was started again
+            // (FocusReread). While it is not followed this read is the only one: the dump itself, as before (force).
+            val logSince = focusLogSince
+            if (faceWanted() && FocusReread.due(android.os.SystemClock.uptimeMillis(), focusReadAt, logSince)) runCatching { readRearFocus(force = logSince == 0L) }
             runCatching { syncMediaCard() }
             // The front's dim is kept only while the app goes on saying "face down", and never through a call.
             runCatching { syncFrontDim(if (call != null) "a call" else "the app has not said face down again") }
@@ -7189,7 +8951,7 @@ class RearUserService : IRearService.Stub {
                         exec("input -d $display keyevent KEYCODE_WAKEUP")
                     }
                 } else if (!scene.isUp && sceneMayReturn(now)) {
-                    if (scene.play(null, clipPath(sceneLoop) ?: clipPath(sceneWake), now, waitForLight = false)) {
+                    if (scene.play(null, faceLoopPath() ?: faceWakePath(), now, waitForLight = false)) {
                         Log.i(TAG, "scene: back up")
                         syncTouchWatch()
                     }
@@ -7235,75 +8997,55 @@ class RearUserService : IRearService.Stub {
         }
     }.onFailure { Log.w(TAG, "rearShot: ${it.message}") }.getOrNull()
 
-    // -- the camera's standby page on the back --------------------------------------------------
-    //
-    // With the camera open on the front, Xiaomi's Camera starts an activity of its own on the
-    // rear display (com.android.camera/.fragment.presentation.MainScreenSelfieActivity): a blank
-    // page whose only use is a swipe that moves the viewfinder to the back. It covers Xiaomi's
-    // rear launcher, so the back shows and does nothing else while the camera is open (seen in
-    // the phone's log: "LetterboxLifecycleEvent OPEN taskId=557 displayId=1",
-    // then "wms.hideSurface ... SubScreenLauncher"). With [cameraKeepRear] that page is sent home
-    // (HOME on the rear display, which is Xiaomi's launcher), and the launcher's own swipe from
-    // the left still starts the camera's preview there (com.android.camera/.Camera), which is a
-    // different activity and is left alone.
+    // -- rear focus and camera-use events ------------------------------------------------------
 
-    /** PanelConfig.cameraKeepRear, from the last payload. */
-    @Volatile private var cameraKeepRear = true
-    private val cameraStandbyLock = Any()
-    private var cameraStandbyWatch: Thread? = null
-    private var cameraStandbyLog: Process? = null
+    private val rearFocusWatchLock = Any()
+    private var rearFocusWatch: Thread? = null
+    private var rearFocusLog: Process? = null
 
-    /**
-     * The watch for that page, running if and only if companion mode and the setting want it.
-     *
-     * HEARD, NOT POLLED. The page's start is a line in the system's log ("START u0 {...
-     * cmp=com.android.camera/.fragment.presentation.MainScreenSelfieActivity ...", or "Displayed
-     * com.android.camera/.fragment.presentation.MainScreenSelfieActivity"), which the shell may read; one `logcat` of new ActivityTaskManager lines is followed, and a start of
-     * that activity is looked at (which display it took) and sent home if it took the back. The
-     * app's "a camera is in use" (CameraWatch) was tried first and did not fire for it on the phone (the page stood
-     * on the back for 12 s and nothing came).
-     */
-    private fun syncCameraStandbyWatch() = synchronized(cameraStandbyLock) {
+    /** Follow activity changes for the cover and camera-use probe while companion mode is active. */
+    private fun syncRearFocusWatch() = synchronized(rearFocusWatchLock) {
         val want = companion
-        val running = cameraStandbyWatch?.isAlive == true
+        val running = rearFocusWatch?.isAlive == true
         if (want == running) return@synchronized
         if (!want) {
-            LogWatch.stop(cameraStandbyLog)
-            cameraStandbyLog = null
-            cameraStandbyWatch = null
+            LogWatch.stop(rearFocusLog)
+            rearFocusLog = null
+            rearFocusWatch = null
             return@synchronized
         }
-        cameraStandbyWatch = Thread({
+        rearFocusWatch = Thread({
             // Orphans of an older build's watchers, still reading the log for nobody: ended as this one starts.
             LogWatch.sweep(::exec).let { if (it > 0) Log.i(TAG, "log watch: $it stale watchers ended") }
+            // The camera service's word, registered now: its first statuses are in long before a probe looks.
+            cameraWord
             while (companion && !Thread.currentThread().isInterrupted) {
+                // THE SYSTEM AND EVENT LOGS ONLY (ActivityTaskManager is the system's, the wm_ lines the event log's): all
+                // of the logs was every line of every app for a few tags, filtered here. Xiaomi's pin animation's own
+                // lines are in the main log: they are followed only while a pin plays (followPinLog).
                 val proc = try {
-                    LogWatch.start("all", "ActivityTaskManager:I", "wm_set_resumed_activity:I", "wm_task_moved:I", "wm_on_top_resumed_gained_called:I", PinVia.LOG_TAG + ":W", PinVia.REAR_TAG + ":W")
-                } catch (e: Exception) { Log.w(TAG, "camera standby watch: no logcat (${e.message})"); return@Thread }
-                synchronized(cameraStandbyLock) { cameraStandbyLog = proc }
+                    LogWatch.start(FOCUS_LOG_BUFFERS, "ActivityTaskManager:I", "wm_set_resumed_activity:I", "wm_task_moved:I", "wm_on_top_resumed_gained_called:I")
+                } catch (e: Exception) { Log.w(TAG, "rear focus watch: no logcat (${e.message})"); return@Thread }
+                synchronized(rearFocusWatchLock) { rearFocusLog = proc }
+                focusLogSince = android.os.SystemClock.uptimeMillis()
                 try {
                     proc.inputStream.bufferedReader().useLines { lines ->
                         for (line in lines) {
                             // The apps on a display may have changed (the system's event log says so as it happens): the cover follows at once.
                             if (RearCover.changed(line)) { onRearFocusLine(line); continue }
-                            // Xiaomi's own pin animation on the front says when it begins and when it is over (PinVia).
-                            PinVia.heard(line)?.let { onXiaomiPinLine(it, android.os.SystemClock.uptimeMillis()); continue }
                             // Any activity coming up may be one that opens a camera: asked of the camera service, off this thread.
                             if (line.contains("Displayed ")) runCatching { cameraProbe.execute { probeCamera() } }
-                            // Its start, or its first frame ("START u0 {...}" is not always logged for it; "Displayed" is).
-                            if (!cameraKeepRear || !line.contains(CameraStandby.CLASS)) continue
-                            // On its own thread: its looks wait up to three seconds, and this reader is the one that hears the back's focus change (the review's 35).
-                            runCatching { cameraStandby.execute { sendCameraStandbyHome() } }
                         }
                     }
                 } catch (_: java.io.IOException) {
-                } catch (e: Throwable) { Log.w(TAG, "camera standby watch: ${e.message}") }
+                } catch (e: Throwable) { Log.w(TAG, "rear focus watch: ${e.message}") }
+                focusLogSince = 0L
                 LogWatch.stop(proc)
                 // logcat ended (the log was cleared, the daemon restarted): again, after a breath.
                 try { Thread.sleep(2_000L) } catch (_: InterruptedException) { return@Thread }
             }
-        }, "camera-standby").apply { isDaemon = true; start() }
-        Log.i(TAG, "camera: watching for its standby page on the back")
+        }, "rear-focus").apply { isDaemon = true; start() }
+        Log.i(TAG, "rear focus: watching for activity changes")
     }
 
     // -- a camera open on the phone, for the back at full while a picture is taken ---------------
@@ -7311,12 +9053,40 @@ class RearUserService : IRearService.Stub {
     // The app's CameraManager callback never fired for Xiaomi's Camera on this phone,
     // so the shell asks the camera service itself: once after any activity comes up, and then
     // every two seconds for as long as a camera stays open. The app is told (IRearEvents.onCameraOpen).
+    // Asked of its dump until the service's own word, registered here, has been seen to say the same (CameraWord);
+    // from then on a look the word says no camera is open for takes the word, and nothing is forked (the dump is
+    // still read while a camera is open, and at the first look a minute after the last dump).
 
     private val cameraProbe = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "camera-probe").apply { isDaemon = true } }
-    private val cameraStandby = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "camera-standby").apply { isDaemon = true } }
     @Volatile private var cameraOpenNow = false
 
-    private fun cameraOpen(): Boolean = exec("dumpsys media.camera | grep -c -E 'Device [0-9]+ is open'").trim().toIntOrNull()?.let { it > 0 } == true
+    /** The camera service's own word (CameraWord), registered as the log watch first runs; null where it cannot be had. */
+    private val cameraWord: CameraWord? by lazy {
+        runCatching {
+            val cameras = context?.getSystemService(android.hardware.camera2.CameraManager::class.java) ?: return@runCatching null
+            val word = CameraWord()
+            cameras.registerAvailabilityCallback(java.util.concurrent.Executor { it.run() }, object : android.hardware.camera2.CameraManager.AvailabilityCallback() {
+                override fun onCameraAvailable(cameraId: String) = word.available(cameraId)
+                override fun onCameraUnavailable(cameraId: String) = word.unavailable(cameraId)
+            })
+            word
+        }.onFailure { Log.w(TAG, "camera: the camera service's word cannot be had here (${it.message}); its dump is read as before") }.getOrNull()
+    }
+
+    private fun cameraOpen(): Boolean {
+        val word = cameraWord
+        val now = android.os.SystemClock.uptimeMillis()
+        // Believed and saying none is open (and a dump within the minute): no dump. Anything else: the dump decides, as before.
+        if (word != null && word.byWord(now)) return false
+        val dump = exec(CameraWord.PROBE)
+        when (word?.held(dump, now)) {
+            CameraWord.Verdict.TRUST -> Log.i(TAG, "camera: the camera service's own word said what its dump said — a look it says none is open for takes it from now on, no dump")
+            CameraWord.Verdict.NEVER -> Log.i(TAG, "camera: the camera service's dump names cameras its word to the shell does not — the dump is read as before")
+            CameraWord.Verdict.DROPPED -> Log.i(TAG, "camera: the camera service's word and its dump differ (a camera open by ${if (CameraWord.isOpen(dump)) "the dump" else "the word"} alone) — the word is dropped, the dump is read as before")
+            else -> Unit
+        }
+        return CameraWord.isOpen(dump)
+    }
 
     private fun probeCamera() {
         try { Thread.sleep(CAMERA_OPEN_SETTLE_MS) } catch (_: InterruptedException) { return }
@@ -7332,21 +9102,6 @@ class RearUserService : IRearService.Stub {
             cameraOpenNow = false
             Log.i(TAG, "camera: closed")
             runCatching { events?.onCameraOpen(false) }
-        }
-    }
-
-    /** The page has just been started somewhere: if it took the back, home goes there, and once more if it comes back. */
-    private fun sendCameraStandbyHome() {
-        val display = rearDisplay()
-        var sent = 0
-        for (look in 0 until CAMERA_STANDBY_LOOKS) {
-            try { Thread.sleep(if (look == 0) CAMERA_STANDBY_FIRST_MS else CAMERA_STANDBY_STEP_MS) } catch (_: InterruptedException) { return }
-            val dump = exec("dumpsys window displays | grep -E 'mDisplayId=|mFocusedApp='")
-            if (!CameraStandby.onRear(dump, display)) { if (sent > 0) return else continue }
-            if (sent >= 2) return
-            sent++
-            Log.i(TAG, "camera: its standby page took the back — sent home, Xiaomi's rear screen is back")
-            exec("input -d $display keyevent KEYCODE_HOME")
         }
     }
 
@@ -7373,9 +9128,7 @@ class RearUserService : IRearService.Stub {
     @Volatile private var pendingPreview: dev.kb896.aiusage.data.WakeAnimStyle? = null
     @Volatile private var pendingPreviewUntil = 0L
 
-    private fun rearState(displayId: Int): Int? = runCatching {
-        context?.getSystemService(android.hardware.display.DisplayManager::class.java)?.getDisplay(displayId)?.state
-    }.getOrNull()
+    private fun rearState(displayId: Int): Int? = displayStates.fresh(displayId)
 
     /**
      * The rear display changed (a display listener, on [holdHandler]): an OFF or DOZE to ON is a
@@ -7410,7 +9163,10 @@ class RearUserService : IRearService.Stub {
             if (now == WakeStyle.Light.OFF && companion && sceneWanted() && SCENE_ARM_AHEAD) runCatching { popWaiter.execute { if (WakeStyle.light(rearState(rearDisplay())) == WakeStyle.Light.OFF) scene.arm() } }
             else scene.disarm()
         } else {
+            // The panel's level read afresh at the next look: one kept from before the dark is not the panel's now.
+            panelKept.forget()
             navStep(RearNav.Input.Lit, "the back is lit")
+            facesLit()
             runCatching { holdHandler.removeCallbacks(lightTick); holdHandler.postDelayed(lightTick, 500L) }
             if (!scene.isUp && !WakeStyle.isWakeEdge(was, now)) scene.disarm()
             // Whatever happened on the way: a lit back with no scene playing never keeps the curtain.
@@ -7438,6 +9194,10 @@ class RearUserService : IRearService.Stub {
     private fun onWakeEdge(seenAt: Long) {
         // Every wake counts for the guard, played or not (RearShow.wakeEdge).
         val fresh = rearShow.wakeEdge(seenAt)
+        if (companion && CameraExit.isCamera(rearFocus)) {
+            scene.disarm()
+            return
+        }
         val preview = pendingPreview?.takeIf { seenAt < pendingPreviewUntil }
         if (preview != null) {
             pendingPreview = null
@@ -7445,9 +9205,8 @@ class RearUserService : IRearService.Stub {
             playWakeNow(preview, seenAt, asPreview = true)
             return
         }
-        // No dumpsys here (cameraHasRear reads SurfaceFlinger's, far longer than the first frame
-        // may wait): any camera in use on the phone counts, which Xiaomi's rear preview always is.
-        val cameraBusy = cameraUp() || (cameraInUse && android.os.SystemClock.elapsedRealtime() - cameraInUseAt < BAND_WATCH_MS)
+        // Use cached ownership and camera-use signals so the first wake frame can proceed without a dump.
+        val cameraBusy = cameraUp() || RearCameraRoute.isOurs(rearFocus) || (cameraInUse && android.os.SystemClock.elapsedRealtime() - cameraInUseAt < BAND_WATCH_MS)
         // The scene is the wake animation when one is chosen; otherwise the curtain goes and the old styles may play.
         if (fresh && playSceneOnWake(seenAt, cameraBusy)) return
         scene.disarm()
@@ -7944,6 +9703,8 @@ class RearUserService : IRearService.Stub {
     private companion object {
         /** How long a banner for a dark back waits for it to light (the app's wake), and how often it looks. */
         private const val POP_LIT_WAIT_MS = 1_200L
+        /** A pop-up held aside by a finger: the navigation ends it at the latest this long after (a lift that never came). */
+        private const val POP_HELD_MOST_MS = 15_000L
         private const val POP_LIT_STEP_MS = 40L
         /**
          * Asks the system for no animation of its own as an app starts on the back: the change
@@ -8013,7 +9774,7 @@ dumpsys power 2>/dev/null | sed -n '/^Wake Locks:/,/^${'$'}/p' | head -12
 """
 
         /**
-         * Tail of the 17 Pro's rear panel physical display id (local:4630946949513469332).
+         * Tail of the 17 Pro's rear panel physical display id (local:4000000000000004332).
          * Only the fallback now, for when [rearPhysicalId] cannot read the real one: it
          * is the 17 Pro's panel, and nothing says another phone's rear display ends in it.
          */
@@ -8053,8 +9814,27 @@ dumpsys power 2>/dev/null | sed -n '/^Wake Locks:/,/^${'$'}/p' | head -12
         /** The app's clips folder as the shell reads it (ClipStore.dir on the app's side). */
         /** Debug builds: with this file there and nobody signed in, the usage page shows made-up figures, marked "Demo". */
         const val USAGE_DEMO_FILE = "/storage/emulated/0/Android/data/${BuildConfig.APPLICATION_ID}/files/usage-demo"
-        const val POP_DEMO_FILE = "/storage/emulated/0/Android/data/${BuildConfig.APPLICATION_ID}/files/pop-demo"
+        /** pop-demo words that are whole with fewer than four parts ("notices|" / "notices|empty" = the empty pull's rim). */
+        val SHORT_DEMO_WORDS = setOf("charge", "fullmoment", "notices", "notices-logos", "musicsound")
+        const val POP_DEMO_FILE ="/storage/emulated/0/Android/data/${BuildConfig.APPLICATION_ID}/files/pop-demo"
+        /** The pinned pictures' files (data/PinImage.DIR in the app's external files folder). */
+        const val PINS_DIR = "/storage/emulated/0/Android/data/${BuildConfig.APPLICATION_ID}/files/${dev.kb896.aiusage.data.PinImage.DIR}"
+        /** The beam's card waits this long at most for a picture's note's picture (NotePictures). */
+        const val BEAM_PICTURE_WAIT_MS = 150L
         const val CLIPS_DIR = "/storage/emulated/0/Android/data/${BuildConfig.APPLICATION_ID}/files/clips"
+        /** The faces' list and pictures for the app, which cannot read his downloads (FaceScan). */
+        const val FACES_APP_DIR = "/storage/emulated/0/Android/data/${BuildConfig.APPLICATION_ID}/files/faces"
+        /** The shell's copy of the chosen face, "key seq": a new process shows it before the app speaks. */
+        const val FACE_FILE = "/data/local/tmp/chicken-rear-face"
+        /** [faceHistory]'s file, and how many lines it keeps. */
+        const val FACE_LOG = "/data/local/tmp/chicken-rear-face-log"
+        const val FACE_LOG_LINES = 200
+        /** Rule 9's scores, "sha1 score" a line, once per face for good. */
+        const val FAITHFUL_FILE = "${MamlHost.DIR}/faithful.txt"
+        /** The dust's card of any look (dustCard): the earlier ones are deleted when a new one is made. */
+        val DUST_CARD_NAME = Regex("""dust-\d+\.png""")
+        /** A face drawn offscreen for rule 9 is compared this long after it was resumed (its intro played). */
+        const val MEASURE_SETTLE_MS = 1_000L
         /** The black curtain put up while the back is off, so a wake's clip starts from black with no flash. */
         private const val SCENE_ARM_AHEAD = true
         /** A finger this soon after the scene began is the tap that woke the back, not one to end it. */
@@ -8072,6 +9852,11 @@ dumpsys power 2>/dev/null | sed -n '/^Wake Locks:/,/^${'$'}/p' | head -12
         private const val MUSIC_PAGE_FRAME_MS = 16L
         /** After a pause the glows take this long at most to sink to rest. */
         private const val MUSIC_REST_MS = 4_000L
+        /**
+         * A new "Fluid size": a page standing still is drawn until the body is on it (MusicFace.Body.floorGliding, about 1 s
+         * of frames for the whole range), and never longer than this after the change.
+         */
+        private const val MUSIC_FLOOR_MS = 5_000L
         /** The usage page: sixty pictures a second, as the panel shows them. */
         private const val USAGE_FRAME_MS = 16L
         /** The phone's own dialer (Xiaomi's), which takes the rear page's commands; and the made-up call's name for its app. */
@@ -8081,16 +9866,26 @@ dumpsys power 2>/dev/null | sed -n '/^Wake Locks:/,/^${'$'}/p' | head -12
         private const val XIAOMI_CLOCK = "com.android.deskclock"
         /** A note just pinned: on the back this long, as its confirmation. */
         private const val PIN_CONFIRM_MS = 8_000L
-        /** With no note that way the notes page goes this part of its width aside and comes back; [GIVE_PEAK] is that as the turn's own measure. */
-        private const val GIVE_REACH = 0.14f
+        /** The carousel of the notes is drawn this often while it moves. */
+        private const val ARRANGE_FRAME_MS = 16L
+        /** An order told to the app is held over its payloads this long at most, until one agrees (keptOrder). */
+        private const val ORDER_HOLD_MS = 10 * 60_000L
         private const val VIA_UNCOVER_MOST_MS = 4_000L
         /** At full: how long "100" stands after the fluid has risen, and how long when the page was up already. */
         private const val FULL_STANDS_MS = 800L
         private const val FULL_REACHED_MS = 2_000L
-        private const val GIVE_PEAK = 1f
         /** There while a face of ours is wanted: this process's next start covers the back before anything else (RearCover). */
-        private const val COVER_HINT_FILE = "/data/local/tmp/chicken-rear-cover"
+        private const val COVER_HINT_FILE = RearCover.HINT_FILE
+        /** The shell's own first health look: after the start's own work. */
+        private const val HEALTH_FIRST_LOOK_MS = 30_000L
         private const val SCENE_CURTAIN_CHECK_MS = 400L
+        /** The rear's light read this often while a display listener is wanted: the system may hold its events back. */
+        private const val LIGHT_POLL_MS = 250L
+        /**
+         * The oldest reading of the rear's light a look at every picture takes (rearLitRecently): the dust's own look was
+         * ten times a second. A dark reading is read again before anything ends on it.
+         */
+        private const val LIGHT_LOOK_MS = 100L
         /**
          * StayOn.Level by its ordinal: how much of the picture's level each shows. Dim (lying face
          * down, or a still in battery saver) is about a seventh of the light; in use is "a little
@@ -8101,6 +9896,10 @@ dumpsys power 2>/dev/null | sed -n '/^Wake Locks:/,/^${'$'}/p' | head -12
         private const val STAY_STILL = 1
         /** How long a double tap holds the picture still, at most. */
         private const val STAY_TICK_MS = 2_000L
+        /** The logs the permanent reader follows: ActivityTaskManager's lines are the system log's, the wm_ lines the event log's. */
+        private const val FOCUS_LOG_BUFFERS = "system,events"
+        /** Xiaomi's pin lines are followed this long after a pin is handed over (PinVia's lines all come within about 6 s). */
+        private const val PIN_LOG_MS = 8_000L
         /** How long after the last finger on the back the scene comes back over Xiaomi's screen. */
         private const val STAY_RETURN_MS = 8_000L
         private const val STAY_REWAKE_MS = 6_000L
@@ -8108,9 +9907,6 @@ dumpsys power 2>/dev/null | sed -n '/^Wake Locks:/,/^${'$'}/p' | head -12
         private const val TOUCH_TELL_MS = 3_000L
         private const val CAMERA_OPEN_SETTLE_MS = 700L
         private const val CAMERA_OPEN_POLL_MS = 2_000L
-        private const val CAMERA_STANDBY_LOOKS = 10
-        private const val CAMERA_STANDBY_FIRST_MS = 250L
-        private const val CAMERA_STANDBY_STEP_MS = 300L
         /** The longest a band-tap watch runs, in case the camera's end is never seen. */
         private const val BAND_WATCH_MS = 30 * 60_000L
         private const val CAMERA_EXIT_SETTLE_MS = 900L
@@ -8174,6 +9970,10 @@ dumpsys power 2>/dev/null | sed -n '/^Wake Locks:/,/^${'$'}/p' | head -12
         private const val POKE_EVERY_MS = 1_000L
         /** A capture waits this long for the control centre to have gone from the picture. */
         private const val CAPTURE_CLEAR_MS = 500L
+        /** After the scanner broadcast, before the media store is asked again for the shell's screenshot. */
+        private const val SCAN_WAIT_MS = 600L
+        /** A hold's check comes this late after the time it said, so the hold is complete when it is asked. */
+        private const val THREE_CHECK_LATE_MS = 10L
         /** A recording's longest, the owner's minute. */
         private const val RECORD_SECONDS = 60
         private const val RECORD_POLL_MS = 400L

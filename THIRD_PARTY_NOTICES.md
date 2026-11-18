@@ -7,12 +7,15 @@ copyright notice is kept in [LICENSE](LICENSE). What this fork changed is listed
 
 ## Libraries in the APK
 
-Resolved from `:app:releaseRuntimeClasspath` (157 artifacts). All are Apache-2.0 except where noted.
+Selected libraries from `:app:releaseRuntimeClasspath`. All are Apache-2.0 except where noted.
 
 | Library | Version | Licence |
 |---|---|---|
-| AndroidX (core, appcompat, activity, lifecycle, and their dependencies) | core-ktx 1.16.0, appcompat 1.7.0, activity 1.9.3, lifecycle 2.9.4 | Apache-2.0 |
+| AndroidX (core, activity, lifecycle, and their dependencies) | core-ktx 1.16.0, activity 1.9.3, lifecycle 2.9.4 | Apache-2.0 |
 | Jetpack Compose (ui, foundation, runtime, animation), BOM 2025.08.00 | 1.10.3 | Apache-2.0 |
+| AndroidX CameraX (Camera2, lifecycle, view, video, extensions) | 1.4.2 | Apache-2.0 |
+| MapLibre Native for Android, OpenGL | 13.7.1 | BSD-2-Clause, see below |
+| Google Play services location | 21.3.0 | [Android SDK terms](https://developer.android.com/studio/terms) |
 | AndroidX Media3 (transformer, effect, common and their dependencies) | 1.11.1 | Apache-2.0 |
 | Kotlin standard library, kotlinx.coroutines, kotlinx.serialization | 2.3.10, 1.9.0, 1.7.3 | Apache-2.0 |
 | OkHttp, Okio (Square) | 4.12.0, 3.6.0 | Apache-2.0 |
@@ -24,6 +27,39 @@ Resolved from `:app:releaseRuntimeClasspath` (157 artifacts). All are Apache-2.0
 
 The MIT licence's text, which both MIT entries above are under with their own copyright lines, is
 the one in [LICENSE](LICENSE). The Apache License 2.0 is in `assets/licenses/Apache-2.0-MaterialSymbols.txt`.
+
+### MapLibre Native licence
+
+BSD 2-Clause License
+
+Copyright (c) 2021 MapLibre contributors
+
+Copyright (c) 2018-2021 MapTiler.com
+
+Copyright (c) 2014-2020 Mapbox
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+* Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+* Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in
+  the documentation and/or other materials provided with the
+  distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## Code taken into the source
 
@@ -39,6 +75,9 @@ the one in [LICENSE](LICENSE). The Apache License 2.0 is in `assets/licenses/Apa
 - **Snowfall** adapted from Lumine's multilayer snowfall on Godot Shaders, CC0.
 - **Material Symbols / Material Icons** (Google), Apache-2.0: the glyphs in `res/drawable`
   and `rear/GlassIcons.kt`.
+
+- **Material Color Utilities** (Google), Apache-2.0: cover colour quantization and HCT
+  in `app/src/main/java/dev/kb896/aiusage/color/mcu`.
 
 ## Fonts
 
@@ -61,6 +100,8 @@ Apache License 2.0 and the two fonts' SIL Open Font License texts.
 
 ## Data
 
+- Maps from [OpenFreeMap](https://openfreemap.org/) and place search by
+  [Photon](https://photon.komoot.io/), using [OpenStreetMap](https://www.openstreetmap.org/copyright) data.
 - Weather by [Open-Meteo](https://open-meteo.com/), CC BY 4.0. Lyrics from [LRCLIB](https://lrclib.net/), in code inherited from upstream that this
   fork's settings do not switch on.
 

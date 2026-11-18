@@ -201,10 +201,13 @@ private fun lerpColor(a: Color, b: Color, t: Float) = androidx.compose.ui.graphi
  * A slider from -1 to 1 with its middle marked: a plain well and a white knob, as the switch is; no
  * colour. [onChange] is told as the knob is dragged (some ten times a second at most) and once more
  * where it is let go. A tap on the well moves the knob there. Near the middle it rests on the middle.
+ * With [from] 0 it is the same slider from 0 to 1 (an amount, as "Fluid size"): no middle, nowhere it rests.
  */
 @Composable
-fun Slide(value: Float, name: String, enabled: Boolean = true, modifier: Modifier = Modifier, onChange: (Float) -> Unit) {
+fun Slide(value: Float, name: String, enabled: Boolean = true, modifier: Modifier = Modifier, from: Float = -1f, onChange: (Float) -> Unit) {
     val tone = LocalTone.current
+    val centred = from < 0f
+    val span = 1f - from
     var live by remember { androidx.compose.runtime.mutableFloatStateOf(value) }
     var dragging by remember { androidx.compose.runtime.mutableStateOf(false) }
     if (!dragging && live != value) live = value
@@ -221,18 +224,18 @@ fun Slide(value: Float, name: String, enabled: Boolean = true, modifier: Modifie
                 drawRoundRect(tone.well, cornerRadius = r)
                 drawRoundRect(tone.edge, cornerRadius = r, style = Stroke(1.dp.toPx()))
                 // The middle: where nothing is changed.
-                drawRect(tone.edge, Offset(size.width / 2f - 0.5.dp.toPx(), size.height * 0.3f), Size(1.dp.toPx(), size.height * 0.4f))
+                if (centred) drawRect(tone.edge, Offset(size.width / 2f - 0.5.dp.toPx(), size.height * 0.3f), Size(1.dp.toPx(), size.height * 0.4f))
             },
     ) {
         val room = maxWidth - knob - 6.dp
         val roomPx = with(androidx.compose.ui.platform.LocalDensity.current) { room.toPx() }
-        fun snap(v: Float) = if (kotlin.math.abs(v) < 0.06f) 0f else v.coerceIn(-1f, 1f)
+        fun snap(v: Float) = if (centred && kotlin.math.abs(v) < 0.06f) 0f else v.coerceIn(from, 1f)
         Box(
             Modifier.fillMaxWidth().height(36.dp)
                 .then(if (!enabled) Modifier else Modifier
                     .pointerInput(roomPx) {
                         detectTapGestures { at ->
-                            live = snap(((at.x - size.width / 2f) / (roomPx / 2f)))
+                            live = snap(if (centred) ((at.x - size.width / 2f) / (roomPx / 2f)) else 0.5f + (at.x - size.width / 2f) / roomPx)
                             change(live)
                         }
                     }
@@ -243,7 +246,7 @@ fun Slide(value: Float, name: String, enabled: Boolean = true, modifier: Modifie
                             onDragCancel = { dragging = false; change(live) },
                         ) { c, dx ->
                             c.consume()
-                            live = (live + dx / (roomPx / 2f)).coerceIn(-1f, 1f)
+                            live = (live + dx / (roomPx / span)).coerceIn(from, 1f)
                             val now = android.os.SystemClock.uptimeMillis()
                             if (now - told[0] >= 100L) { told[0] = now; change(snap(live)) }
                         }
@@ -251,7 +254,7 @@ fun Slide(value: Float, name: String, enabled: Boolean = true, modifier: Modifie
         ) {
             Box(
                 Modifier
-                    .offset(x = 3.dp + room * ((live.coerceIn(-1f, 1f) + 1f) / 2f), y = 3.dp)
+                    .offset(x = 3.dp + room * ((live.coerceIn(from, 1f) - from) / span), y = 3.dp)
                     .size(knob, 30.dp)
                     .shadow(3.dp, CircleShape)
                     .background(Color.White, CircleShape),
@@ -262,7 +265,7 @@ fun Slide(value: Float, name: String, enabled: Boolean = true, modifier: Modifie
 
 /** A row of choices, one chosen. */
 @Composable
-fun Segmented(options: List<String>, chosen: Int, enabled: Boolean = true, modifier: Modifier = Modifier, onChoose: (Int) -> Unit) {
+fun Segmented(options: List<String>, chosen: Int, enabled: Boolean = true, modifier: Modifier = Modifier, size: Int = 14, onChoose: (Int) -> Unit) {
     val tone = LocalTone.current
     Row(
         modifier.fillMaxWidth().graphicsLayer { alpha = if (enabled) 1f else 0.4f }
@@ -277,7 +280,7 @@ fun Segmented(options: List<String>, chosen: Int, enabled: Boolean = true, modif
                     .clickable(enabled = enabled, role = Role.RadioButton) { onChoose(i) },
                 contentAlignment = Alignment.Center,
             ) {
-                Label(text, size = 14, weight = if (sel) 650 else 500, color = if (sel) tone.ink else tone.ink2)
+                Label(text, size = size, weight = if (sel) 650 else 500, color = if (sel) tone.ink else tone.ink2)
             }
         }
     }

@@ -27,10 +27,19 @@ class NoticeShade(private val left: Float) {
         val time: Long = 0L, val actions: List<String> = emptyList(),
         /** The app's own colour for this notification (its accent, or its icon's), 0 for none: the pop-up's (NoticePop). */
         val color: Int = 0,
+        /**
+         * It may be dismissed or snoozed from the back (NoticeThrow.throwable: clearable, not ongoing, no call, timer,
+         * player…). One that may not springs back where it is thrown and stays.
+         */
+        val clearable: Boolean = true,
     )
 
     sealed interface Effect {
         data class Dismissed(val key: String) : Effect
+        /** Thrown the other way (NoticeThrow): snoozed for [ms], on the phone too; it comes back by itself after. */
+        data class Snoozed(val key: String, val ms: Long = NoticeThrow.SNOOZE_MS) : Effect
+        /** Thrown, but it may not be dismissed or snoozed (Item.clearable): it sprang back and stays. For the log. */
+        data class Refused(val key: String) : Effect
         /** It will be settled shut at [atMs]. */
         data class ShutAt(val atMs: Long) : Effect
         /** The row of [key] tapped. */

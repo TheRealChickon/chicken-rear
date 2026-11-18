@@ -6,6 +6,29 @@ Versions are the upstream release this fork is based on plus the fork's own coun
 
 Nothing yet.
 
+## 1.2.1-cr2
+
+### Added
+
+- Rear face picker for installed Xiaomi themes, local clips and the built-in Dust in Light
+  face, with an optional motion response.
+- Rear navigation from ongoing navigation notifications, plus an optional rear camera for
+  photo, video and Portrait where supported.
+- Two message-island styles, swipe-to-snooze, and actions from rear notifications.
+- Image pins, note reordering, place search with a map, and notes that appear on arrival.
+- Earbud connection effects and configurable three-finger actions for rear capture or sleep.
+- The installed ChatGPT app icon on the usage page. The optional Dots animation uses artwork
+  from the installed app when available.
+
+### Changed
+
+- Weekly usage bars are shown by default. The five-hour bars can be enabled separately.
+- Music can respond to audio with fluid peaks and an adjustable minimum fluid size.
+- Rear layers use hardware composition where available. Frame pacing and resource use were
+  improved during idle and screen transitions.
+- Improved recovery after a restart, notification and camera transitions, and browser sign-in.
+- Added the Shizuku setup guide and updated the install steps.
+
 ## 1.2.1-cr1
 
 The first release of Chicken Rear, a fork of Magic Rear 1.2.1 for the Xiaomi 17 Pro Max.
@@ -16,7 +39,7 @@ The first release of Chicken Rear, a fork of Magic Rear 1.2.1 for the Xiaomi 17 
   Xiaomi's rear app, and the old tabbed settings, are removed. A stored "replace" setting is read
   as companion mode.
 - Application id `dev.chicken.rear` (debug builds: `dev.chicken.rear.dev`), label "Chicken Rear".
-- Built for the 17 Pro Max (`2509FPN0BC`, 976x596 rear panel) only.
+- Rear layout designed around the 17 Pro Max’s 976×596 display.
 
 ### Added
 

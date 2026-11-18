@@ -152,7 +152,7 @@ class UsagePollService : Service() {
             // The table watch follows the front's own power, not only SCREEN_OFF/ON: with the
             // back lit the phone stays interactive as the front times out, and that broadcast
             // need not come. Its sync is cheap and does nothing when nothing changed.
-            if (displayId == android.view.Display.DEFAULT_DISPLAY) { table?.sync(); stayOn?.sync(); return }
+            if (displayId == android.view.Display.DEFAULT_DISPLAY) { table?.sync(); stayOn?.sync(); runCatching { dev.kb896.aiusage.place.PlaceWatch.front(this@UsagePollService) }; return }
             if (displayId != Panel.DISPLAY_ID) return
             stayOn?.sync()
             // Pocket mode hears every change, and keeps only the power (PocketMode.lit).
@@ -229,11 +229,29 @@ class UsagePollService : Service() {
             notification(),
             android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
+        // OpenAI's Dots character for ChatGPT's vessel on the back's usage page (rear/dots), handed to the shell;
+        // bound only while it is switched on and ChatGPT is signed in (told again at each config write and tick).
+        runCatching {
+            val bridge = Graph.of(this).bridge
+            dev.kb896.aiusage.rear.dots.DotsLink.onBinder { b -> bridge.setDots(b) }
+            syncDots()
+        }
+        // The restart's own lines (RestartLog) and the health check, from the start.
+        ShizukuArrival.serviceStarted()
+        HealthCheck.start(this)
         val app = Graph.of(this)
         leaveReplaceIfStored(app)
+        // Pinned pictures' files that no note has (data/PinImage): swept, off the main thread. The place prompt's waiting
+        // picture is kept, and so is one being read right now.
+        Thread({
+            runCatching {
+                dev.kb896.aiusage.data.PinImageFiles.sweep(this, ConfigStore(this).load().pins,
+                    setOfNotNull(dev.kb896.aiusage.place.PlaceStore(this).load().draft?.image))
+            }
+        }, "pin-pictures-sweep").apply { isDaemon = true; start() }
         // The pinned apps' icons and names go to the shell: now, and on every config write.
         val loader = PortalAppsLoader(this) { app.bridge.setPortalApps(it) }.also { portalApps = it }
-        stopConfigWatch = ConfigStore(this).listen { loader.refresh(); pocket?.setSwitch(config().pocketMode); config().let { table?.setConfig(it.tableMode, it.tableChargingOnly, it.offOnBack, liftWakes(it)); camera?.setSwitch(it.cameraLight) }; stayOn?.sync() }
+        stopConfigWatch = ConfigStore(this).listen { loader.refresh(); pocket?.setSwitch(config().pocketMode); config().let { table?.setConfig(it.tableMode, it.tableChargingOnly, it.offOnBack, liftWakes(it)); camera?.setSwitch(it.cameraLight) }; stayOn?.sync(); syncDots() }
         ContextCompat.registerReceiver(this, portalAppsReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
             addAction(Intent.ACTION_PACKAGE_REMOVED)
@@ -360,6 +378,8 @@ class UsagePollService : Service() {
         // the user has granted access — whereas this service is the app's one long-lived
         // component and is already the thing that talks to the panel.
         media = MediaWatcher(this).also { it.start() }
+        // Earbuds connecting: the card on the front and the back's moment, once per connection (service/EarbudsWatch).
+        earbuds = EarbudsWatch(this).also { it.start() }
         // Place the panel NOW, before either loop's first delay.
         //
         // This is the whole recovery story for an app that has been killed: the panel
@@ -393,8 +413,8 @@ class UsagePollService : Service() {
         }
         // A finger on a back that is not held lit: the stay-on rule looks again (it has stopped looking by then).
         app.bridge.onRearTouch = { stayOn?.sync() }
-        // The watches for notes with a place, again in every new process (the system forgets them with the old one).
-        runCatching { PlaceNotes.sync(this) }
+        // The fences for notes with a place, set again in every new process; Location switched on and off heard (place/PlaceWatch).
+        runCatching { dev.kb896.aiusage.place.PlaceWatch.start(this) }
         // The playing card's buttons on the back: the same commands the panel's media page gave.
         app.bridge.onMediaCommand = { action -> runCatching { media?.command(action) } }
         // The usage page was opened on the back: the figures fetched again (the repository's own floor
@@ -582,6 +602,8 @@ class UsagePollService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             // The front going on or off, the lock opening: the stay-on rule looks again.
             when (intent?.action) { Intent.ACTION_SCREEN_ON, Intent.ACTION_SCREEN_OFF, Intent.ACTION_USER_PRESENT -> stayOn?.sync() }
+            // A place note waiting: one look of ours as the front comes on (place/PlaceWatch keeps its limits).
+            if (intent?.action == Intent.ACTION_SCREEN_ON) runCatching { dev.kb896.aiusage.place.PlaceWatch.front(this@UsagePollService) }
             // The camera is not a placement problem, so it does not go through the
             // supervisor: that path exists to get the panel back where it belongs, and
             // running it here would have a camera tap second-guessing the panel's
@@ -1003,9 +1025,16 @@ class UsagePollService : Service() {
      */
     private fun config() = ConfigStore(this).load()
 
+    /** The ":dots" process bound or let go by the switch and ChatGPT's sign-in (rear/dots/DotsLink.wanted). */
+    private fun syncDots() = runCatching {
+        val signedIn = runCatching { Graph.of(this).store.load(dev.kb896.aiusage.data.Account.CHATGPT) != null }.getOrDefault(false)
+        dev.kb896.aiusage.rear.dots.DotsLink.sync(this, dev.kb896.aiusage.rear.dots.DotsLink.wanted(config().usageDots, signedIn))
+    }
+
     private suspend fun tick() {
         val app = Graph.of(this)
         app.repository.refresh()
+        syncDots()
         // UsageRepository.refresh() keeps each account's last good snapshot when a
         // fetch degrades (see its KDoc), so this is never a blank/empty payload
         // just because one fetch failed — the panel keeps showing the last real
@@ -1185,9 +1214,11 @@ class UsagePollService : Service() {
 
     /** The active media session, or null when notification access has not been granted. */
     private var media: MediaWatcher? = null
+    private var earbuds: EarbudsWatch? = null
 
     override fun onDestroy() {
         Graph.of(this).bridge.onConnected = {}
+        HealthCheck.stop(this)
         stopTilt()
         stopConfigWatch?.invoke()
         stopConfigWatch = null
@@ -1203,7 +1234,10 @@ class UsagePollService : Service() {
         camera = null
         media?.stop()
         media = null
+        earbuds?.stop()
+        earbuds = null
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+        runCatching { dev.kb896.aiusage.place.PlaceWatch.stop(this) }
         try { unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(chargeNews) } catch (_: Exception) {}
         runCatching { contentResolver.unregisterContentObserver(brightnessWatch) }

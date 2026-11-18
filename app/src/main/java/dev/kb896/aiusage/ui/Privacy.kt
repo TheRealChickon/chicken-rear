@@ -32,7 +32,7 @@ object Privacy {
      * that leaves this alone does not. Stored as the last version seen, not a "seen" flag,
      * so the first notice and every later one are the same mechanism.
      */
-    const val NOTICE_VERSION = 2
+    const val NOTICE_VERSION = 3
 
     /**
      * Short on purpose: what leaves the phone, what stays, and what is not there at all.
@@ -46,7 +46,11 @@ object Privacy {
             "• Only if you add it: ChatGPT's Codex limits, with your own account (sign-in at " +
             "auth.openai.com, the figures from chatgpt.com).\n" +
             "• Only with \"Lightning when it storms\" on: the phone's approximate position, " +
-            "rounded to about a kilometre, to Open-Meteo for the weather.\n\n" +
+            "rounded to about a kilometre, to Open-Meteo for the weather.\n" +
+            "• Only while \"Pin to location\" is open: the map of the area it shows, from " +
+            "OpenFreeMap (tiles.openfreemap.org), and what you type in its search, with the map's " +
+            "middle rounded to a tenth of a degree, to Photon (photon.komoot.io). Arrivals at a " +
+            "note's place are watched by Google Play services on the phone.\n\n" +
             "What stays on it: your sign-in tokens, encrypted; your pinned notes, and the place of " +
             "a note you tie to one (for that the app asks for the precise position, all the time); " +
             "the last rough position, to a tenth of a degree, for the weather; the home Wi-Fi's " +
@@ -155,7 +159,8 @@ object Privacy {
                 "each update, every 5 minutes while the back is lit, and sent to Open-Meteo " +
                 "rounded to about a kilometre; the last one is kept on the phone to a tenth of " +
                 "a degree. A note tied to a place needs the precise position, all the time: its " +
-                "place stays on the phone, and Android tells the app when you arrive there.",
+                "place stays on the phone, and Android tells the app when you arrive there. " +
+                "While you choose that place, its map and search fetch from OpenFreeMap and Photon.",
         ),
         TILE(
             "Add the \"Send to back\" tile?",

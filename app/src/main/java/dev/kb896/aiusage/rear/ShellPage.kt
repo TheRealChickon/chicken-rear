@@ -32,6 +32,13 @@ class ShellPage(
     private val stayMs: Long = STAY_MS,
     /** Left alone for its time: asked to go (the navigation decides and hides it: RearNav). Null: it hides itself. */
     private val onAlone: (() -> Unit)? = null,
+    /**
+     * Its being IN ITS PLACE has changed ([inPlace]), on [handler]'s thread: told BEFORE its layer moves out of its
+     * place (what is under it can be drawn first) and after it has come into it. For HiddenFrames.
+     */
+    private val onPlace: (Boolean) -> Unit = {},
+    /** Its slide's steps on the vsync, placed by the frame's own time (FramePacer); null: a 12 ms timer, as before. */
+    private val pacer: FramePacer? = null,
 ) {
     enum class Edge { RIGHT, BOTTOM }
 
@@ -40,12 +47,25 @@ class ShellPage(
     /** 0 off the right edge, 1 in place. Only [handler]'s thread moves it. */
     private var at = 0f
     private var goal = 0f
+    /** The time (System.nanoTime) its slide last stepped to; 0: not moving. */
     private var movedAt = 0L
     @Volatile private var touchedAt = 0L
 
     /** On the back, or on its way in. */
     @Volatile var isUp = false
         private set
+
+    /** Up, in its place and staying there, not under a finger: the whole back is this page (HiddenFrames.inPlace). */
+    @Volatile var inPlace = false
+        private set
+
+    /** On [handler]'s thread: [inPlace] as it is now, told to [onPlace] when it changed. */
+    private fun placedNow() {
+        val now = HiddenFrames.inPlace(isUp, at, goal, peeking)
+        if (now == inPlace) return
+        inPlace = now
+        runCatching { onPlace(now) }
+    }
 
     /** In, to stay [forMs] untouched (the page's own time when 0). Already up: drawn again, and its time starts over. [atOnce]: no slide. */
     fun show(forMs: Long = 0L, atOnce: Boolean = false) = handler.post {
@@ -60,7 +80,7 @@ class ShellPage(
         runCatching { onShown() }
         handler.removeCallbacks(minute); handler.postDelayed(minute, minOf(MINUTE_MS, stayFor))
         // IN ITS PLACE AT ONCE (a pinned note's card has just grown into exactly this picture: PinBeam), or by its slide.
-        if (atOnce) { handler.removeCallbacks(stepper); at = 1f; movedAt = 0L; place() } else step()
+        if (atOnce) { unstep(); at = 1f; movedAt = 0L; place(); placedNow() } else step()
     }
 
     fun hide(why: String) = handler.post {
@@ -70,6 +90,8 @@ class ShellPage(
         peeking = false
         goal = 0f
         handler.removeCallbacks(minute)
+        // Out of its place before it moves: what is under it is drawn first.
+        placedNow()
         step()
     }
 
@@ -84,7 +106,9 @@ class ShellPage(
         if (!ensure()) return@post
         if (!isUp && !peeking) draw()
         peeking = true
-        handler.removeCallbacks(stepper)
+        // Under the finger it is not in its place: told before it moves, so what is under it is drawn first.
+        placedNow()
+        unstep()
         movedAt = 0L
         at = PageDrag.unease(inPart)
         place()
@@ -102,7 +126,7 @@ class ShellPage(
     fun touched() { touchedAt = SystemClock.uptimeMillis() }
 
     /** What is on it has changed. Any thread. */
-    fun changed() = handler.post { if (isUp) draw() }
+    fun changed() = handler.post { if (drawnWhenChanged(isUp, peeking)) draw() }
 
     private var stayFor = stayMs
 
@@ -145,36 +169,40 @@ class ShellPage(
         }.onFailure { Log.w(TAG, "$name: not drawn: ${it.message}") }
     }
 
-    private val stepper = Runnable { step() }
+    /** A step of its slide: on the pacer's vsync it is placed by that frame's time, so every refresh moves it alike. */
+    private val stepper = Runnable { step(pacer?.frameNs ?: System.nanoTime()) }
 
-    private fun step() {
+    private fun unstep() { handler.removeCallbacks(stepper); pacer?.cancel(stepper) }
+
+    private fun step(now: Long = System.nanoTime()) {
         val sc = layer ?: return
-        val now = SystemClock.uptimeMillis()
         if (movedAt == 0L) movedAt = now
-        val d = (now - movedAt).toFloat() / SLIDE_MS
-        movedAt = now
+        val d = FramePace.share(movedAt, now, SLIDE_MS)
+        movedAt = maxOf(movedAt, now)
         at = if (goal > at) minOf(goal, at + d) else maxOf(goal, at - d)
+        // Leaving its place is told before the move, arriving in it after.
+        if (inPlace) placedNow()
         place()
-        if (at != goal) handler.postDelayed(stepper, FRAME_MS) else movedAt = 0L
+        if (!inPlace) placedNow()
+        if (at != goal) { if (pacer != null) pacer.post(stepper, 0f) else handler.postDelayed(stepper, FRAME_MS) } else movedAt = 0L
     }
 
     /** The layer where [at] says. Eased: quick off the edge, settling into place. */
     private fun place() {
         val sc = layer ?: return
-        val e = ease(at)
         val rear = geometry()
         runCatching {
             SurfaceControl.Transaction().use {
-                if (from == Edge.RIGHT) it.setPosition(sc, (1f - e) * rear.widthPx, 0f) else it.setPosition(sc, 0f, (1f - e) * rear.heightPx)
-                ShellLayer.round(it, sc, rear, moving = e < 1f)
+                RearShape.place(it, sc, rear, xAt(from, at, rear.widthPx.toFloat()), yAt(from, at, rear.heightPx.toFloat()))
                 it.setVisibility(sc, at > 0f).apply()
             }
         }
     }
 
     fun close() {
-        handler.removeCallbacks(minute); handler.removeCallbacks(stepper)
+        handler.removeCallbacks(minute); unstep()
         isUp = false
+        if (inPlace) { inPlace = false; runCatching { onPlace(false) } }
         runCatching { surface?.release() }
         ShellLayer.remove(layer); layer = null; surface = null
     }
@@ -185,6 +213,15 @@ class ShellPage(
         const val SLIDE_MS = 260f
         /** [at] 0 (off its edge) to 1 (in place), eased: quick off the edge, settling into place. */
         fun ease(at: Float): Float { val t = at.coerceIn(0f, 1f); return 1f - (1f - t) * (1f - t) * (1f - t) }
+        /** Where a page that comes [from] its edge stands at [at] (0 off it, 1 in place) on a back [w] wide, [h] high. */
+        fun xAt(from: Edge, at: Float, w: Float): Float = if (from == Edge.RIGHT) (1f - ease(at)) * w else 0f
+        fun yAt(from: Edge, at: Float, h: Float): Float = if (from == Edge.BOTTOM) (1f - ease(at)) * h else 0f
+        /**
+         * Whether a page is drawn again when what is on it changes: up, or UNDER A FINGER on its way in ([peek] draws it
+         * once as the finger takes it, and it is not up yet). A note's picture read while the notes page is pulled up
+         * comes onto it under the finger, not only when the finger lets go. Pure.
+         */
+        fun drawnWhenChanged(isUp: Boolean, peeking: Boolean): Boolean = isUp || peeking
         private const val FRAME_MS = 12L
         private const val MINUTE_MS = 20_000L
         /** Left alone this long, a page gives the back to the scene again. */

@@ -6,8 +6,8 @@ import org.junit.Test
 
 class SurfaceDumpTopTest {
 
-    private val rear = "4630946949513469332"
-    private val main = "4630946949513469331"
+    private val rear = "4000000000000004332"
+    private val main = "4000000000000003331"
     private val rule = "-".repeat(80)
 
     private fun section(id: String, vararg layers: String) = buildString {
@@ -58,7 +58,7 @@ class SurfaceDumpTopTest {
         assertEquals("dev.kb896.aiusage", SurfaceDump.topPackage(dump, ::isRear))
     }
 
-    @Test fun `the real OS 4_0_5 dump has our panel on top of the rear`() {
+    @Test fun `a representative HWC table shows the app on the rear`() {
         val dump = javaClass.getResource("/surfaceflinger-rear-panel-os4.0.5.txt")!!.readText()
         assertEquals("dev.kb896.aiusage", SurfaceDump.topPackage(dump, ::isRear))
     }

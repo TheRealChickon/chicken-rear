@@ -58,14 +58,17 @@ class PinGlassService : AccessibilityService() {
          * (Circle Search is one: an activity's window would lie under it), for the two seconds it plays: it takes
          * no touch and no focus, so whatever he was in stays as it was, and is taken away when it has played. The
          * picture of the page behind is taken first, before the overlay is there. False: the service is off, or
-         * the overlay could not be added; the caller plays it in its own window.
+         * the overlay could not be added; the caller plays it in its own window. [picture] (its file [image]): a
+         * picture's pin, the picture where the words would be.
          */
-        fun beam(text: String, origin: android.graphics.RectF?, run: dev.kb896.aiusage.ui.PinRun): Boolean {
+        fun beam(text: String, origin: android.graphics.RectF?, run: dev.kb896.aiusage.ui.PinRun, light: dev.kb896.aiusage.rear.XiaomiPin.Light? = null, slow: Float = 1f,
+                 picture: Bitmap? = null, image: String? = null): Boolean {
             val s = live ?: return false
             return runCatching {
                 val wm = s.getSystemService(android.view.WindowManager::class.java)
                 val bounds = wm.maximumWindowMetrics.bounds
                 var view: dev.kb896.aiusage.ui.PinBeamView? = null
+                var bView: dev.kb896.aiusage.ui.PinBView? = null
                 var host: android.view.SurfaceControlViewHost? = null
                 var gone = false
                 val end = {
@@ -75,6 +78,7 @@ class PinGlassService : AccessibilityService() {
                         runCatching { host?.surfacePackage?.surfaceControl?.let { sc -> android.view.SurfaceControl.Transaction().reparent(sc, null).apply() } }
                         runCatching { host?.release() }
                         view?.behind?.recycle(); view?.behind = null
+                        bView?.behind?.recycle(); bView?.behind = null
                         Log.i(TAG, "beam: the overlay is gone")
                     }
                 }
@@ -82,8 +86,12 @@ class PinGlassService : AccessibilityService() {
                 // accessibility-overlay window of ours lay UNDER Circle Search's on the emulator (which of two
                 // services' windows is on top goes by which service was bound first). No window of its own, so no
                 // window blur: what is behind is the picture of the page, blurred here, once it has come.
-                val v = dev.kb896.aiusage.ui.PinBeamView(s, text, origin, run, blur = {}, touchEnds = true, end = end)
-                view = v
+                // "Ours" is draft B where Xiaomi's light pictures were read (rear/PinB), the plain drawing otherwise. Should
+                // OpenGL fail, the pin simply ends. A TOUCH ENDS EITHER AT ONCE: the embedded window is touchable over the whole
+                // screen (setView's own flags), so a view that let touches "go through" ate every one for 4.4 s.
+                val v: android.view.View = if (light != null) dev.kb896.aiusage.ui.PinBView(
+                    s, text, origin, run, light, blur = {}, touchEnds = true, onFailed = { end() }, end = end, slow = slow, picture = picture, image = image,
+                ).also { bView = it } else dev.kb896.aiusage.ui.PinBeamView(s, text, origin, run, blur = {}, touchEnds = true, picture = picture, image = image, end = end).also { view = it }
                 val h = android.view.SurfaceControlViewHost(s, s.getSystemService(android.hardware.display.DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY), android.os.Binder())
                 host = h
                 h.setView(v, bounds.width(), bounds.height())
@@ -93,13 +101,19 @@ class PinGlassService : AccessibilityService() {
                 android.view.SurfaceControl.Transaction().setVisibility(sc, true).setPosition(sc, 0f, 0f).setLayer(sc, 1).apply()
                 // The page behind (Circle Search as he sees it): asked for only now that the overlay is sure, in the
                 // same instant, before its first frame is on the screen. The animation does not wait for it.
-                shot { picture -> if (gone) picture?.recycle() else v.behind = picture }
+                shot { picture -> if (gone) picture?.recycle() else { view?.behind = picture; bView?.behind = picture } }
                 Log.i(TAG, "beam: in an overlay above every window")
                 // Should it never draw (the screen went off): gone all the same.
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ end() }, dev.kb896.aiusage.rear.PinBeam.FRONT_MS + 1_500L)
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ end() }, ((if (light != null) dev.kb896.aiusage.rear.PinB.FRONT_MS * slow else dev.kb896.aiusage.rear.PinBeam.FRONT_MS.toFloat()) + 1_500f).toLong())
                 true
             }.onFailure { Log.w(TAG, "beam: no overlay: ${it.javaClass.simpleName} ${it.message.orEmpty().take(80)}; ${it.cause?.message.orEmpty().take(120)}") }.getOrDefault(false)
         }
+
+        /**
+         * The running service as a context to add a window of TYPE_ACCESSIBILITY_OVERLAY with (the earbuds' card,
+         * ui/EarbudsOverlay: a trusted window that takes no touch). Null: the service is off.
+         */
+        fun windowContext(): Context? = live
 
         /**
          * One picture of the front as it is now, to [done] on the main thread (null: off, too soon, or refused).

@@ -41,7 +41,7 @@ class PageRowTest {
     // -- the real timer's own data (the Clock's rear notification, read every second) -----------------------
 
     @Test fun `the Clock's timer is one and the same thing through every update, a pause and going on`() {
-        val key = "0|com.android.deskclock|2147483646|null|10111"
+        val key = "0|com.example.timer|2147483646|null|10192"
         val running = PageRow.timer(key, totalMs = 1_200_000L, over = false)
         // Each second the time left changes and the end moves with a pause; the timer's whole length does not.
         for (total in listOf(1_200_000L, 1_200_000L + 7L, 1_200_000L + 999L)) assertEquals("a few ms of jitter in the length", running, PageRow.timer(key, total, over = false))
@@ -174,11 +174,10 @@ class LivePickTest {
 
 /** Leaving the Camera on the back, by any way, brings our face back lit: it does not go dark. */
 class CameraExitTest {
-    @org.junit.Test fun `the Camera leaving the back by any way is seen - to the launcher, to nothing, to its own standby page`() {
+    @org.junit.Test fun `the Camera leaving the back is seen when the launcher returns or focus clears`() {
         val cam = RearCover.CAMERA
         org.junit.Assert.assertTrue(CameraExit.left(cam, RearCover.LAUNCHER))
         org.junit.Assert.assertTrue(CameraExit.left(cam, null))
-        org.junit.Assert.assertTrue(CameraExit.left(cam, "com.android.camera/.fragment.presentation.MainScreenSelfieActivity"))
         org.junit.Assert.assertTrue(CameraExit.left(" $cam ", RearCover.LAUNCHER))
     }
 

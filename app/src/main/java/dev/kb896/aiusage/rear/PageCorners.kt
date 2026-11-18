@@ -12,8 +12,8 @@ object PageCorners {
     private val path = Path()
     private val black = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF000000.toInt() }
 
-    /** Black over what of a page [w] x [h] at the canvas's origin lies outside its four corners of radius [r]. One thread. */
-    fun cut(c: Canvas, w: Float, h: Float, r: Float) {
+    /** Black over what of a page [w] x [h] at the canvas's origin lies outside its four corners of radius [r]. Any thread (one path, held while it is drawn). */
+    @Synchronized fun cut(c: Canvas, w: Float, h: Float, r: Float) {
         if (r <= 0f) return
         path.rewind()
         path.fillType = Path.FillType.EVEN_ODD
@@ -29,7 +29,7 @@ object PageCorners {
      * The same for a page that lies over OTHER PAGES in one picture (the notifications' pile): what is outside its
      * corners is taken out of the layer it was drawn into (the caller's saveLayer), so what is under it shows there.
      */
-    fun clear(c: Canvas, w: Float, h: Float, r: Float) {
+    @Synchronized fun clear(c: Canvas, w: Float, h: Float, r: Float) {
         if (r <= 0f) return
         path.rewind()
         path.fillType = Path.FillType.EVEN_ODD

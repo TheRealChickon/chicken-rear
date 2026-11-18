@@ -110,8 +110,123 @@ class ShellBeam(
         ShellLayer.remove(glLayer); glLayer = null; glSurface = null
     }
 
+    // ---- "PIN ANIMATION: OURS", DRAFT B (rear/PinB): Xiaomi's rear entry with its own light, pin_show.pag ----------
+    //
+    // The old face blurs out (the layer's background blur, the system's own), the notes page with the new note fades in
+    // under pin_show.pag's frames (read from Xiaomi's package on the phone: rear/XiaomiPin.veil), comes into focus and
+    // is the notes page: from [B_LAND_AT] the real notes page is under it (the same picture, so nothing jumps), and when
+    // the light is done ([PinB.BACK_MS]) the layer is gone. Without Xiaomi's file, or without OpenGL here: the plain
+    // arrival below, as before.
+
+    private var bLayer: SurfaceControl? = null
+    private var bSurface: Surface? = null
+    private var bHost: PinGl.Host? = null
+    private var bRear: PinBGl.Rear? = null
+    private var bVeil: VeilFrames? = null
+    private var bShown: android.graphics.Bitmap? = null
+    private var bBlur = -1
+    private var bAlpha = -1f
+    private val levelsWork by lazy { java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "pin-levels").apply { isDaemon = true } } }
+
+    /** Draft B's arrival, on [handler]'s thread; false where it cannot be had here (nothing was left behind). */
+    private fun playB(demoText: String?): Boolean {
+        val seq = XiaomiPin.veil() ?: return false
+        // One arrival at a time: one before it still playing is let go (its surface takes one OpenGL context only).
+        if (bHost != null) releaseB()
+        val rear = geometry()
+        val w = rear.widthPx; val h = rear.heightPx
+        val made = runCatching {
+            if (bLayer == null) {
+                val sc = ShellLayer.create("pin-beam-b", layerStack(), ShellLayer.Z_WAKE, w, h, trusted = false, visible = false, alpha = 1f, format = PixelFormat.RGBA_8888, opaque = false)
+                bLayer = sc; bSurface = Surface(sc)
+            }
+            val pic = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { page(Canvas(it), w.toFloat(), h.toFloat(), demoText) }
+            val bytes = PinBGl.rgba(pic)
+            pic.recycle()
+            val host = PinGl.Host(bSurface!!)
+            check(host.make()) { "no OpenGL on the layer" }
+            bHost = host
+            val levels = PinBGl.Levels(w, h).also { it.putAll(bytes) }
+            val r = PinBGl.Rear(w, h, levels)
+            bRear = r
+            // Its blurred levels off this thread (the content is out of focus from 100 ms on; made in tens of ms).
+            levelsWork.execute {
+                val lv = BlurLevels.levels(bytes, w, h, w / 976f)
+                handler.post { if (bRear === r && bHost?.current() == true) runCatching { levels.putLevels(lv) } }
+            }
+            bVeil = VeilFrames(seq)
+        }.onFailure { Log.w(TAG, "beam: draft B's arrival not set up: ${it.message}") }.isSuccess
+        if (!made) { closeB(); return false }
+        demo = demoText
+        began = SystemClock.uptimeMillis(); landed = false; stays = true; frames = 0; worst = 0L; lastAt = 0L
+        bBlur = -1; bAlpha = -1f; bShown = null
+        isUp = true
+        Log.i(TAG, "beam: a pinned note arrives (draft B, Xiaomi's light${if (demoText != null) ", a demo" else ""})")
+        handler.removeCallbacks(bFrame)
+        bFrame.run()
+        return true
+    }
+
+    private val bFrame: Runnable = object : Runnable {
+        override fun run() {
+            val sc = bLayer ?: return; val host = bHost ?: return; val r = bRear ?: return
+            val now = SystemClock.uptimeMillis()
+            if (lastAt != 0L) worst = maxOf(worst, now - lastAt)
+            lastAt = now; frames++
+            val t = now - began
+            val hold = if (demo != null) DEMO_HOLD_MS else 0L
+            val b = PinB.back(t.toFloat())
+            if (!landed && t >= B_LAND_AT) { landed = true; stays = runCatching { onLanded(demo != null) }.getOrDefault(false) }
+            // Done: with its page under it, it is simply gone; with none (a demo, the back another's), it goes with a short fade.
+            val goneAt = PinB.BACK_MS + hold
+            val alpha = if (t < goneAt || (landed && stays && demo == null)) 1f else 1f - ((t - goneAt) / B_FADE_MS.toFloat()).coerceIn(0f, 1f)
+            runCatching {
+                check(host.current()) { "the layer's context is gone" }
+                val frame = if (b.veil >= 0) bVeil?.at(b.veil) else null
+                if (frame != null && frame !== bShown) { r.veil(frame); bShown = frame }
+                r.draw(b, frame != null)
+                host.swap()
+            }.onFailure { Log.w(TAG, "beam: draft B frame: ${it.message}") }
+            // The old face blurs out under it: the system's blur of what is under the layer, in the panel's pixels.
+            val blur = Math.round(b.pageBlur * geometry().widthPx / 976f)
+            if (blur != bBlur || alpha != bAlpha || frames == 1) runCatching {
+                SurfaceControl.Transaction().use { tx ->
+                    if (blur != bBlur) ShellOverlay.blurUnder(tx, sc, blur)
+                    if (alpha != bAlpha) tx.setAlpha(sc, alpha)
+                    if (frames == 1) tx.setVisibility(sc, true)
+                    tx.apply()
+                }
+                bBlur = blur; bAlpha = alpha
+            }
+            val over = if (landed && stays && demo == null) t >= PinB.BACK_MS else t >= goneAt + B_FADE_MS
+            if (!over) handler.postDelayed(this, FRAME_MS)
+            else {
+                runCatching { SurfaceControl.Transaction().use { tx -> ShellOverlay.blurUnder(tx, sc, 0); tx.setVisibility(sc, false).apply() } }
+                isUp = false
+                Log.i(TAG, "beam: landed (draft B)${if (stays) ", the notes page under it" else ", no page"}; $frames pictures, $worst ms at most between two")
+                releaseB()
+            }
+        }
+    }
+
+    /** The GL side let go (the layer is kept for the next pin, hidden). */
+    private fun releaseB() {
+        handler.removeCallbacks(bFrame)
+        runCatching { bVeil?.close() }; bVeil = null; bShown = null
+        runCatching { if (bHost?.current() == true) bRear?.release() }; bRear = null
+        runCatching { bHost?.release() }; bHost = null
+    }
+
+    private fun closeB() {
+        releaseB()
+        runCatching { bSurface?.release() }
+        ShellLayer.remove(bLayer); bLayer = null; bSurface = null
+    }
+
     /** The arrival, from its start. [demoText]: a made-up note (nothing of his), held a little longer for a look. */
     fun play(demoText: String? = null) = handler.post {
+        // "Ours" is draft B where Xiaomi's light can be read and drawn here; the plain drawing otherwise.
+        if (playB(demoText)) return@post
         val rear = geometry()
         if (layer == null) {
             runCatching {
@@ -149,12 +264,7 @@ class ShellBeam(
             runCatching {
                 val c = runCatching { s.lockHardwareCanvas() }.getOrNull() ?: s.lockCanvas(null)
                 try {
-                    c.drawColor(0, PorterDuff.Mode.CLEAR)
-                    c.drawColor(((b.shade * out * 255).toInt().coerceIn(0, 255)) shl 24)
-                    // Out of the middle of what he sees (the lenses cover the left), to the middle of the panel as it fills it.
-                    val grown = ((b.scale - 0.06f) / 0.94f).coerceIn(0f, 1f)
-                    val cx = SEEN_CX / 976f * w + (w / 2f - SEEN_CX / 976f * w) * grown
-                    art.card(c, face, cx, h / 2f, w * b.scale, h * b.scale, b.turn, b.alpha * out, 1f, b.glow, 0.012f, b.corner)
+                    drawBack(c, art, face, w, h, b, out, rear.cornerPx.toFloat())
                 } finally { s.unlockCanvasAndPost(c) }
             }.onFailure { Log.w(TAG, "beam: not drawn: ${it.message}") }
             if (frames == 1) runCatching { SurfaceControl.Transaction().use { it.setVisibility(sc, true).apply() } }
@@ -171,6 +281,8 @@ class ShellBeam(
     fun cut() = handler.post {
         if (!isUp) return@post
         closeGl()
+        bLayer?.let { sc -> runCatching { SurfaceControl.Transaction().use { tx -> ShellOverlay.blurUnder(tx, sc, 0); tx.setVisibility(sc, false).apply() } } }
+        releaseB()
         handler.removeCallbacks(frame)
         isUp = false
         layer?.let { sc -> runCatching { SurfaceControl.Transaction().use { it.setVisibility(sc, false).apply() } } }
@@ -178,6 +290,7 @@ class ShellBeam(
 
     fun close() {
         closeGl()
+        closeB()
         handler.removeCallbacks(frame)
         isUp = false
         runCatching { surface?.release() }
@@ -190,7 +303,29 @@ class ShellBeam(
         private const val FRAME_MS = 8L
         /** The middle of what he sees of the back, across (the lenses cover the left 296 px of 976). */
         const val SEEN_CX = 636f
+
+        /** One picture of the back's half: the shade over what is under, and the card where [b] has it ([out]: how much is left of it). */
+        fun drawBack(c: android.graphics.Canvas, art: PinBeamArt, face: Bitmap?, w: Float, h: Float, b: PinBeam.Back, out: Float, displayCorner: Float) {
+            c.drawColor(0, PorterDuff.Mode.CLEAR)
+            c.drawColor(((b.shade * out * 255).toInt().coerceIn(0, 255)) shl 24)
+            // Out of the middle of what he sees (the lenses cover the left), to the middle of the panel as it fills it.
+            val cx = cardX(b, w)
+            // THE CARD IS THE BACK'S SHAPE AT ANY SIZE (RearShape): never less round than the display's corners grown to
+            // its size, so it lands on the page with exactly the display's (it had none left at the end, square on the way).
+            val corner = maxOf(b.corner, displayCorner / h)
+            art.card(c, face, cx, h / 2f, w * b.scale, h * b.scale, b.turn, b.alpha * out, 1f, b.glow, 0.012f, corner)
+        }
+
+        /** Where the card's middle stands across a back [w] wide. */
+        fun cardX(b: PinBeam.Back, w: Float): Float {
+            val grown = ((b.scale - 0.06f) / 0.94f).coerceIn(0f, 1f)
+            return SEEN_CX / 976f * w + (w / 2f - SEEN_CX / 976f * w) * grown
+        }
         /** A demo's card stays whole this long after landing, for a look, before it goes. */
         const val DEMO_HOLD_MS = 2_200L
+        /** Draft B: the real notes page goes under the arriving one here (it is opaque and in focus from 600 ms). */
+        const val B_LAND_AT = 600L
+        /** Draft B with no page to land on: its picture goes in this long, after the light is done. */
+        const val B_FADE_MS = 200L
     }
 }

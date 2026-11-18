@@ -13,12 +13,6 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import java.io.File
 
-/**
- * The notifications' pages drawn for real (Robolectric's native graphics) at the rear's size. A page is its
- * pop-up's own picture; the line of logos stands at the right edge, clear of the words; a button's word is where
- * a finger finds it. Pictures kept in build/ for a look without the phone (not for showing as the real page: the
- * icons here are plain squares, stand-ins a test may have and the back may not).
- */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [34])
@@ -104,10 +98,18 @@ class NoticePagesRenderTest {
     }
 
     @Test fun `pictures of the rest, and nothing drawn outside the panel's size`() {
+        // A stroke up takes the whole pile up with the finger: page 1 alone, nothing under it, black below it.
+        val up = pages()
+        up.fingerDown(600f, 400f, 1000)
+        for (i in 1..10) { up.fingerMove(600f, 400f - i * 18f, 1000 + i * 20L); up.progress(1000 + i * 20L) }
+        assertEquals(1, up.scene(1200).pages.size)
+        val going = render(up.scene(1200), progress = up.progress(1200), name = "pile-going-up")
+        assertEquals(Color.BLACK, going.getPixel(636, 590))
+        // The pages gone through sideways: page 1 thrown out over page 2, then page 2 over page 3.
         val s = pages()
-        s.fingerDown(600f, 400f, 1000); s.fingerMove(600f, 220f, 1200)
-        render(s.scene(1200), name = "page-1-going-up-over-page-2")
-        s.fingerUp(600f, 220f, 1200)
+        s.fingerDown(700f, 300f, 1000); s.fingerMove(480f, 300f, 1100)
+        render(s.scene(1100), name = "page-1-thrown-sideways-over-page-2")
+        s.fingerUp(480f, 300f, 1150)
         render(s.scene(2000), name = "page-2")
         s.fingerDown(700f, 300f, 2000); s.fingerMove(480f, 300f, 2100)
         render(s.scene(2100), name = "page-2-thrown-sideways-over-page-3")
@@ -118,5 +120,42 @@ class NoticePagesRenderTest {
         assertTrue(Color.red(logos.getPixel(950, 298)) < 60)
         val none = NoticePages(rear.cutoutUnits).apply { beginPull(10f, 30f, 0); movePull(500f, 200); endPull(500f, 200) }
         render(none.scene(1000), name = "none-waiting")
+    }
+
+    /**
+     * The sheet's picture as ShellOverlay posts it, on a CLEAR layer: cleared, the dim at [progress], then the pages.
+     * Where its alpha is under 255, what lies under the sheet shows through.
+     */
+    private fun sheet(scene: NoticePages.Scene, progress: Float): Bitmap {
+        val bmp = Bitmap.createBitmap(976, 596, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        c.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
+        c.scale(rear.fitX, rear.fitY)
+        c.drawRect(0f, 0f, Panel.WIDTH.toFloat(), Panel.HEIGHT.toFloat(), android.graphics.Paint().apply { color = ShellOverlay.dimColor(progress) })
+        NoticePagesArt().draw(c, rear, scene, progress, words = true, icon = { icons[it] })
+        return bmp
+    }
+
+    private fun seeThrough(bmp: Bitmap): Int {
+        var n = 0
+        for (y in 0 until bmp.height) for (x in 0 until bmp.width) if (Color.alpha(bmp.getPixel(x, y)) != 255) n++
+        return n
+    }
+
+    @Test fun `SETTLED, THE PILE HIDES EVERYTHING UNDER IT - every pixel opaque, so the scene under it may be held`() {
+        val page = pages()
+        assertTrue(page.covers(page.progress(1000), page.moving(1000), page.scene(1000)))
+        assertEquals("a page", 0, seeThrough(sheet(page.scene(1000), 1f)))
+        val logos = pages(logos = true)
+        assertTrue(logos.covers(logos.progress(1000), logos.moving(1000), logos.scene(1000)))
+        assertEquals("the logos' page", 0, seeThrough(sheet(logos.scene(1000), 1f)))
+        val none = NoticePages(rear.cutoutUnits).apply { beginPull(10f, 30f, 0); movePull(500f, 200); endPull(500f, 200) }
+        assertTrue(none.covers(none.progress(1000), none.moving(1000), none.scene(1000)))
+        assertEquals("nothing waiting", 0, seeThrough(sheet(none.scene(1000), 1f)))
+        // And the test sees through where the pile does not cover: part of the way down, or a page thrown aside.
+        assertTrue(seeThrough(sheet(pages().scene(1000), 0.9f)) > 0)
+        val one = NoticePages(rear.cutoutUnits).apply { items(listOf(this@NoticePagesRenderTest.items[0])); beginPull(10f, 30f, 0); movePull(500f, 200); endPull(500f, 200) }
+        one.fingerDown(700f, 300f, 1000); one.fingerMove(480f, 300f, 1100)
+        assertTrue(seeThrough(sheet(one.scene(1100), 1f)) > 0)
     }
 }

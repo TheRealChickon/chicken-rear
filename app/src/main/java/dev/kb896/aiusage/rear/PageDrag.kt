@@ -16,6 +16,7 @@ import kotlin.math.abs
  * - anything short of that: the page goes back where it was, and nothing has happened.
  *
  * A finger whose way turns no page is not this one's: the old reader (SceneTouch) has it, taps and all.
+ * With a second finger down ([crowded]) nothing is followed or turned: the page goes back.
  * Pure: panel units in, as RearTouches gives them. One finger.
  */
 class PageDrag {
@@ -44,6 +45,17 @@ class PageDrag {
 
     /** This finger is being followed. */
     val following: Boolean get() = down && way != null
+
+    /**
+     * ANOTHER FINGER IS DOWN WITH THIS ONE (RearTouches.crowded): nothing more comes of this finger, no turn at its lift.
+     * True when a page was following it: the caller puts that page back where it was (a drag in progress goes back).
+     */
+    @Synchronized
+    fun crowded(): Boolean {
+        val was = down && way != null
+        down = false; way = null; decided = true
+        return was
+    }
 
     @Synchronized
     fun feed(e: RearTouches.Event, tracks: (way: Way, downX: Float, downY: Float, downAt: Long) -> Boolean): List<Out> = when (e) {

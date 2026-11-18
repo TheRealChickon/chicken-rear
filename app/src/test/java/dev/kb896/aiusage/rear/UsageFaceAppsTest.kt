@@ -32,41 +32,54 @@ class UsageFaceAppsTest {
     )
     // A made-up "icon" for this test's arithmetic only: one colour nothing else on the page has.
     private val mark = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888).apply { eraseColor(0xFF00FFFF.toInt()) }
-    private fun marks(m: UsageFace.Model): List<Int> {
+    private fun marks(m: UsageFace.Model, icon: (String) -> Bitmap? = { mark }): List<Int> {
         val bmp = Bitmap.createBitmap(976, 596, Bitmap.Config.ARGB_8888)
-        UsageFace.draw(Canvas(bmp), 976f, 596f, m, now, 10_000L, null) { mark }
+        UsageFace.draw(Canvas(bmp), 976f, 596f, m, now, 10_000L, null, icon = icon)
         val xs = ArrayList<Int>()
         for (y in 0 until 596 step 2) for (x in 0 until 976 step 2) {
             val c = bmp.getPixel(x, y)
             if (Color.blue(c) > 150 && Color.green(c) > 150 && Color.red(c) < 60) xs += x
         }
+        bmp.recycle()
         return xs
     }
 
-    @Test fun `ChatGPT takes the second half of the page, in the same vessels, with a mascot of its own`() {
+    @Test fun `ChatGPT takes the second half of the page - by default its week alone, like Claude's`() {
         val m = UsageFace.model(DashboardState(now, listOf(status(Account.PERSONAL, 0.3f, 0.5f), status(Account.CHATGPT, 0.37f, 0.62f))), now)
         assertEquals(2, m.columns.size)
         assertEquals(listOf("com.anthropic.claude", "com.openai.chatgpt"), m.columns.map { it.app })
-        assertEquals(listOf(0.37f, 0.62f), m.columns[1].limits.map { it.used })
+        assertEquals(listOf(0.5f), m.columns[0].limits.map { it.used })
+        assertEquals(listOf(0.62f), m.columns[1].limits.map { it.used })
+        assertEquals(listOf(false, true), m.columns.map { it.chatGpt })
         assertEquals(MascotMood.WALK, m.columns[1].mood)
-        val tanks = UsageFace.tanks(m)
-        assertEquals("two vessels each", listOf(0, 0, 1, 1), tanks.map { it.account })
+        assertEquals("one vessel each", listOf(0, 1), UsageFace.tanks(m).map { it.account })
+        val five = UsageFace.model(DashboardState(now, listOf(status(Account.PERSONAL, 0.3f, 0.5f), status(Account.CHATGPT, 0.37f, 0.62f))), now, fiveHours = true)
+        assertEquals(listOf(0.37f, 0.62f), five.columns[1].limits.map { it.used })
+        assertEquals("with the switch, two vessels each", listOf(0, 0, 1, 1), UsageFace.tanks(five).map { it.account })
     }
 
-    @Test fun `two apps together are told apart by their icons, one in each account's first vessel`() {
-        val m = UsageFace.model(DashboardState(now, listOf(status(Account.PERSONAL, 0.3f, 0.5f), status(Account.CHATGPT, 0.37f, 0.62f))), now)
-        val xs = marks(m)
-        val tanks = UsageFace.tanks(m)
-        assertTrue("an icon in each half", xs.any { it < tanks[2].vessel.left } && xs.any { it >= tanks[2].vessel.left })
-        // Inside the first vessel of each account, in its corner, clear of the lenses.
-        assertTrue(xs.all { x -> tanks.filter { it.which == 0 }.any { x >= it.vessel.left && x <= it.vessel.left + 40f } })
-        assertTrue(xs.min() >= 296)
-    }
-
-    @Test fun `one app alone needs no icon - Claude by itself, two Claude accounts, ChatGPT by itself`() {
-        for (accounts in listOf(listOf(Account.PERSONAL), listOf(Account.PERSONAL, Account.WORK), listOf(Account.CHATGPT))) {
-            val m = UsageFace.model(DashboardState(now, accounts.map { status(it, 0.3f, 0.5f) }), now)
-            assertTrue("$accounts", marks(m).isEmpty())
+    @Test fun `the installed ChatGPT icon renders inside its usage vessel with or without Claude`() {
+        for (accounts in listOf(listOf(Account.CHATGPT), listOf(Account.PERSONAL, Account.CHATGPT))) {
+            for (five in listOf(false, true)) {
+                val m = UsageFace.model(DashboardState(now, accounts.map { status(it, 0.3f, 0.5f) }), now, fiveHours = five)
+                val week = UsageFace.tanks(m).last()
+                val xs = marks(m) { pkg -> mark.takeIf { pkg == "com.openai.chatgpt" } }
+                assertTrue(xs.size > 400)
+                assertTrue(xs.all { it > week.vessel.left && it < week.vessel.right })
+                assertTrue(marks(m) { null }.isEmpty())
+            }
         }
+    }
+
+    @Test fun `Claude's app icon appears only in the mixed-provider header`() {
+        for (accounts in listOf(listOf(Account.PERSONAL), listOf(Account.PERSONAL, Account.WORK))) {
+            val m = UsageFace.model(DashboardState(now, accounts.map { status(it, 0.3f, 0.5f) }), now)
+            assertTrue(marks(m).isEmpty())
+        }
+        val m = UsageFace.model(DashboardState(now, listOf(status(Account.PERSONAL, 0.3f, 0.5f), status(Account.CHATGPT, 0.37f, 0.62f))), now)
+        val left = UsageFace.tanks(m).first().vessel.left
+        val xs = marks(m) { pkg -> mark.takeIf { pkg == Account.PERSONAL.app } }
+        assertTrue(xs.isNotEmpty())
+        assertTrue(xs.all { it >= left && it <= left + 40f })
     }
 }

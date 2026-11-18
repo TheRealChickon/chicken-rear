@@ -48,12 +48,34 @@ class UsageFaceTest {
         assertEquals("3d4h", UsageFace.until(now + (3 * 24 + 4) * 3_600_000L + 60_000, now))
     }
 
-    @Test fun `an account is its five hours, its week, and each model's own week, with its mascot's mood`() {
+    @Test fun `by default an account is its week and each model's own week, with its mascot's mood`() {
         val m = UsageFace.model(DashboardState(now, listOf(status(Account.PERSONAL), status(Account.WORK, session = 0.08f, week = 0.23f, mood = MascotMood.SLEEP))), now)
+        assertEquals(listOf("Week", "Fable"), m.columns[0].limits.map { it.name })
+        assertEquals(listOf(false, true), m.columns[0].limits.map { it.model })
+        assertEquals("3d4h", m.columns[0].limits[0].until)
+        assertEquals(MascotMood.SLEEP, m.columns[1].mood)
+        assertTrue(m.columns.none { it.split })
+    }
+
+    @Test fun `with the switch, an account is its five hours, its week, and each model's own week`() {
+        val m = UsageFace.model(DashboardState(now, listOf(status(Account.PERSONAL), status(Account.WORK, session = 0.08f, week = 0.23f, mood = MascotMood.SLEEP))), now, fiveHours = true)
         assertEquals(listOf("5 h", "Week", "Fable"), m.columns[0].limits.map { it.name })
+        assertEquals(listOf(true, false, false), m.columns[0].limits.map { it.five })
         assertEquals(listOf(false, false, true), m.columns[0].limits.map { it.model })
         assertEquals("2h14m", m.columns[0].limits[0].until)
-        assertEquals(MascotMood.SLEEP, m.columns[1].mood)
+        assertTrue(m.columns.all { it.split })
+    }
+
+    @Test fun `an account with no week at all shows its five hours rather than an empty vessel`() {
+        val m = UsageFace.model(DashboardState(now, listOf(AccountStatus(Account.PERSONAL, Health.OK, UsageSnapshot(listOf(UsageWindow(WindowKind.SESSION, "All 5h", 0.3f, now + 60_000L)), now), mascot = MascotMood.WALK))), now)
+        assertEquals(listOf("5 h"), m.columns[0].limits.map { it.name })
+        assertEquals("", m.columns[0].note)
+        assertEquals(listOf(0), UsageFace.tanks(m).map { it.which })
+    }
+
+    @Test fun `the made-up page follows the switch too`() {
+        assertTrue(UsageFace.demo(now).columns.all { c -> c.limits.none { it.five } })
+        assertTrue(UsageFace.demo(now, fiveHours = true).columns.all { it.split })
     }
 
     @Test fun `nobody signed in is one button`() {
@@ -66,18 +88,44 @@ class UsageFaceTest {
 
     private val one = UsageFace.model(DashboardState(now, listOf(status(Account.PERSONAL, session = 0.04f, week = 0.18f))), now)
     private val two = UsageFace.model(DashboardState(now, listOf(status(Account.PERSONAL), status(Account.WORK, session = 0.93f, week = 0.6f, mood = MascotMood.FLAG))), now)
+    private val oneFive = UsageFace.model(DashboardState(now, listOf(status(Account.PERSONAL, session = 0.04f, week = 0.18f))), now, fiveHours = true)
+    private val twoFive = UsageFace.model(DashboardState(now, listOf(status(Account.PERSONAL), status(Account.WORK, session = 0.93f, week = 0.6f, mood = MascotMood.FLAG))), now, fiveHours = true)
 
     @Test fun `all models are the neutral fluid, a model its own colour, and none is purple`() {
         assertEquals(UsageFace.ALL, UsageFace.color(0)); assertEquals(UsageFace.ALL, UsageFace.color(1))
         assertEquals("Fable: the first model's amber", 0xFFF2A93B.toInt(), UsageFace.color(2))
+        // An account without its five hours: its week neutral, its first model amber.
+        assertEquals(UsageFace.ALL, UsageFace.color(one.columns[0], 0))
+        assertEquals(UsageFace.MODELS[0], UsageFace.color(one.columns[0], 1))
+        assertEquals(UsageFace.ALL, UsageFace.color(oneFive.columns[0], 1))
+        assertEquals(UsageFace.MODELS[0], UsageFace.color(oneFive.columns[0], 2))
         for (c in UsageFace.MODELS.toList() + UsageFace.ALL) {
             assertFalse("purple", Color.blue(c) > 120 && Color.red(c) > 90 && Color.blue(c) - Color.green(c) > 60)
             assertTrue("not the mascot's own colour, which would hide it", c != OriginalUsage.CLAUDE)
         }
     }
 
-    @Test fun `two vessels an account, the week's holding the week and the models, filling the panel right of the lenses`() {
+    @Test fun `by default one vessel an account, holding the week and the models - one account the whole panel, two a half each`() {
         for ((name, m) in mapOf("one account" to one, "two accounts" to two)) {
+            val tanks = UsageFace.tanks(m)
+            assertEquals("$name: one vessel each account", m.columns.indices.toList(), tanks.map { it.account })
+            for (t in tanks) assertEquals("$name: the week and Fable in it", listOf(0, 1), t.limits)
+            for (t in tanks) assertEquals(1, t.which)
+            for (t in tanks) assertTrue("$name: a head inside its vessel", t.vessel.contains(t.reading))
+            val boxes = tanks.map { it.vessel }
+            for (b in boxes) assertTrue("$name: right of the lenses, inside the panel", b.left >= 326f && b.right <= 956f && b.top >= 20f && b.bottom <= 580f)
+            for (i in boxes.indices) for (j in i + 1 until boxes.size) assertFalse("$name: $i and $j overlap", RectF.intersects(boxes[i], boxes[j]))
+            assertEquals(UsageFace.LEFT, tanks.minOf { it.vessel.left }, 0.5f)
+            assertEquals(UsageFace.RIGHT, tanks.maxOf { it.vessel.right }, 0.5f)
+            // Two accounts: the same width each, a half of the room less the gap.
+            assertEquals(boxes.first().width(), boxes.last().width(), 0.5f)
+            if (boxes.size == 1) assertEquals(UsageFace.RIGHT - UsageFace.LEFT, boxes[0].width(), 0.5f)
+            for (t in tanks) assertTrue("$name: the mascot fits across any vessel", UsageFace.mascotHeight(t.vessel.width()) * 1.3f <= t.vessel.width())
+        }
+    }
+
+    @Test fun `with the switch, two vessels an account, the week's holding the week and the models, filling the panel right of the lenses`() {
+        for ((name, m) in mapOf("one account" to oneFive, "two accounts" to twoFive)) {
             val tanks = UsageFace.tanks(m)
             assertEquals("$name: the five hours and the week, each account", m.columns.size * 2, tanks.size)
             for (t in tanks.filter { it.which == 0 }) assertEquals(listOf(0), t.limits)
@@ -94,7 +142,7 @@ class UsageFaceTest {
 
     @Test fun `the page is drawn with no rings, no purple, no mascot on a figure, and two colours in the week`() {
         File("build").mkdirs()
-        for ((name, m) in mapOf("one" to one, "two" to two, "demo" to UsageFace.demo(now), "empty" to UsageFace.model(DashboardState.EMPTY, now))) {
+        for ((name, m) in mapOf("one" to one, "two" to two, "one-five" to oneFive, "two-five" to twoFive, "demo" to UsageFace.demo(now), "demo-five" to UsageFace.demo(now, fiveHours = true), "empty" to UsageFace.model(DashboardState.EMPTY, now))) {
             val bmp = Bitmap.createBitmap(976, 596, Bitmap.Config.ARGB_8888)
             UsageFace.draw(Canvas(bmp), 976f, 596f, m, now, sinceShown = 5_000L)
             File("build/usage-$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }

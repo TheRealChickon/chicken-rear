@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Coarse only: the weather is per city, and a finer fix would name nothing more. -->
@@ -24,6 +26,14 @@
     <!-- so the app may ask whether HyperOS's rear-screen app is installed (Setup.kt) -->
     <queries>
         <package android:name="com.xiaomi.subscreencenter" />
+        <!-- The health check (service/Health.WATCHED): their versions, and Shizuku's page for its button. -->
+        <package android:name="com.android.incallui" />
+        <package android:name="com.android.deskclock" />
+        <package android:name="com.android.camera" />
+        <package android:name="com.miui.home" />
+        <package android:name="moe.shizuku.privileged.api" />
+        <!-- OpenAI's Dots characters, read from the ChatGPT app where they lie (rear/dots/DotsSource). -->
+        <package android:name="com.openai.chatgpt" />
         <!-- App Portal: the apps a person can pin, and their icons on the back. -->
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -33,7 +43,14 @@
         <!-- Notes with a place (PlaceNotes): asked for only when the first such note is made. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- Pin to location: whether there is a connection (no search while offline, the GPS try on waking without one). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Earbuds connecting (service/EarbudsWatch, ui/EarbudsOverlay): the ripple over other apps (his to allow), the
+         battery level the earbuds report for the back (Nearby devices, his to allow). -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 <application
+        android:name=".App"
         android:label="${appLabel}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -58,8 +75,8 @@
         -->
         <meta-data android:name="moe.shizuku.client.V3_SUPPORT" android:value="true" />
         <!-- SettingsTheme follows the phone's light or dark mode (values / values-night). -->
-        <!-- A note's place reached (PlaceNotes): the system's own word, to this app alone. -->
-        <receiver android:name=".service.PlaceReceiver" android:exported="false" />
+        <!-- A note's place reached or left (place/Fences): Play services' word, to this app alone. -->
+        <receiver android:name=".place.FenceReceiver" android:exported="false" />
         <!--
           "Pin to back": text shared here, or picked in a text-selection menu, becomes a note on the
           back's notes page. exported: other apps start it (Circle Search's "Pin to back", any share sheet).
@@ -89,7 +106,71 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
+            <!-- A picture pinned (ui/PinShare): one, or several (one note each, the first three). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
         </activity>
+        <!--
+          "Pin to location" (ui/place): from the same text-selection menu and share sheet, a little prompt with his quick
+          tiles and a map (MapLibre on OpenFreeMap: no key); the note waits, and stands on the back when he reaches the
+          place. It ends the way a plain pin does, through .ui.PinActivity.
+        -->
+        <activity
+            android:name=".ui.place.PlacePinActivity"
+            android:exported="true"
+            android:label="Pin to location"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- A picture for a place: one (a note for a place is one note). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+        <!--
+          A pinned picture, opened on the front by a tap on it on the back (ui/PinViewActivity). Started by the back's
+          shell (`am start`, rear/PictureTap.command), which reaches only an exported screen; and so ONLY A HOLDER OF DUMP
+          may start it: adb's shell (our Shizuku processes) has it, an app cannot get it but from adb. It takes one number
+          (a note's time) and shows that note's own picture: nothing else of the intent is read. Its own task, not in
+          Recents, gone when closed or left; never over the lock screen (it asks for the unlock first).
+          screenOrientation="user" is LOAD-BEARING: the window is translucent, and a translucent screen that asks for no
+          orientation is passed over, so the screen under it (the launcher, held upright) would keep a turned phone's
+          picture upright and small. "user" turns with the phone as the phone's own settings allow, as a photo does.
+        -->
+        <activity
+            android:name=".ui.PinViewActivity"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="${applicationId}.pinview"
+            android:showWhenLocked="false"
+            android:enableOnBackInvokedCallback="true"
+            android:screenOrientation="user"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density"
+            android:theme="@style/PinViewTheme" />
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
@@ -98,6 +179,50 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+
+        <!--
+          The way back from the browser after a sign-in (auth/SignInPage's one button). A browser in front cannot
+          be left by the app itself (Android refuses an activity start from the background), so the page that
+          says "Signed in" links to this address and his tap opens it. It reads nothing from the link and only
+          brings the settings forward: no page on the web can make this app do anything else through it.
+          The scheme is this build's own package name, so a debug and a release build each get their own.
+        -->
+        <activity
+            android:name=".ui.SignInReturnActivity"
+            android:exported="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="${applicationId}" android:host="signin" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          Our camera page on the back (ui/camera/RearCameraActivity), started by the back's shell on the stroke from the
+          left (rear/RearCameraRoute): `am start` reaches only an exported screen, so ONLY A HOLDER OF DUMP may start it
+          (adb's shell, our Shizuku processes). It reads nothing of its intent, never asks for a permission (the settings'
+          Camera section does), and closes at once on the front screen or without the camera permission. Its own process
+          and task, not in Recents, never over the lock screen. miui.rear.policy lets HyperOS start it on the back, as
+          RearActivity. Opaque and black (RearCameraTheme).
+        -->
+        <activity
+            android:name=".ui.camera.RearCameraActivity"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:process=":camera"
+            android:taskAffinity="${applicationId}.rearcamera"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="false"
+            android:hardwareAccelerated="true"
+            android:screenOrientation="nosensor"
+            android:configChanges="density|screenSize|smallestScreenSize|screenLayout|orientation|uiMode|keyboardHidden"
+            android:theme="@style/RearCameraTheme">
+            <meta-data android:name="miui.rear.policy" android:value="1" />
         </activity>
 
         <!-- Rear panel window. exported=true because HyperOS denies shell
@@ -141,6 +266,17 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!--
+          OpenAI's Dots character for ChatGPT's vessel on the usage page (rear/dots/DotsService): the ChatGPT app's
+          own renderer, loaded from that app's APK, in a process of its own, since a crash in its native code cannot
+          be caught. Bound only by this app (DotsLink), and only while "ChatGPT's character" is switched on (off by
+          default) and ChatGPT is signed in.
+        -->
+        <service
+            android:name=".rear.dots.DotsService"
+            android:exported="false"
+            android:process=":dots" />
 
         <!--
           The pin's glass: one picture of the screen as a note is pinned (service/PinGlassService). It asks for no
@@ -240,6 +376,18 @@
             </intent-filter>
         </activity>
 
+        <!--
+          The pinned pictures (data/PinImageFiles, the external files folder's pins/), each handed to Xiaomi's own pin as
+          a content address of ours, that one address readable by its package alone. Not exported: nothing reads it
+          without a grant.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.pins"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/pin_files" />
+        </provider>
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"

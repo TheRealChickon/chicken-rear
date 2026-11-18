@@ -5,6 +5,7 @@ import android.os.SystemClock
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import androidx.core.graphics.drawable.toBitmap
 import dev.kb896.aiusage.data.ConfigStore
 import dev.kb896.aiusage.rear.RearActivity
 
@@ -36,6 +37,7 @@ class NotificationRelay : NotificationListenerService() {
             this, matching,
             android.content.IntentFilter().apply {
                 addAction(RearActivity.ACTION_DISMISS_NOTIFICATION)
+                addAction(RearActivity.ACTION_SNOOZE_NOTIFICATION)
                 addAction(RearActivity.ACTION_NOTIFICATIONS_SYNC)
                 addAction(RearActivity.ACTION_NOTIFICATION_ACT)
             },
@@ -44,10 +46,11 @@ class NotificationRelay : NotificationListenerService() {
         matchingRegistered = true
         // Debug builds only: `adb shell am broadcast -a dev.kb896.aiusage.DEBUG_UNBIND -p <pkg>`
         // drops the binding with access still granted — the state HyperOS left the release
-        // in — so RelayWatch's rebind can be watched doing its job.
+        // in — so RelayWatch's rebind can be watched doing its job. Exported (adb's broadcast comes from outside), so
+        // only a sender holding DUMP is heard, as for the debug manifest's receivers: adb's shell has it, apps do not.
         if (dev.kb896.aiusage.BuildConfig.DEBUG && !debugRegistered) {
             androidx.core.content.ContextCompat.registerReceiver(
-                this, debugUnbind, android.content.IntentFilter(DEBUG_UNBIND),
+                this, debugUnbind, android.content.IntentFilter(DEBUG_UNBIND), DEBUG_SENDER, null,
                 androidx.core.content.ContextCompat.RECEIVER_EXPORTED,
             )
             debugRegistered = true
@@ -62,6 +65,7 @@ class NotificationRelay : NotificationListenerService() {
         // restarted (an update, a crash) a running timer was never shown again (found with a six-hour timer running
         // through four installs).
         seedLive()
+        seedNavigation()
         // And whatever is on the front already has been seen: an alert-once update of it is
         // not news, however long ago the relay last heard of it. See NotificationAlert.
         runCatching { activeNotifications }.getOrNull()?.let { all -> seen.seed(all.map { it.key }) }
@@ -83,6 +87,10 @@ class NotificationRelay : NotificationListenerService() {
         if (matchingRegistered) runCatching { unregisterReceiver(matching) }
         matchingRegistered = false
         callHandler.removeCallbacks(callAgain); callHold.drop()
+        // Not listening, the route's end would not be heard: the page goes (seedNavigation brings it back on connecting).
+        navigationRoutes.replace(emptyList())
+        navigationKeysSaid.clear()
+        runCatching { publishNavigation() }
     }
 
     // ---- what is going on now, as a page of its own on the back: a call (rear/CallFace), a timer or stopwatch (rear/TimerFace) ----
@@ -291,6 +299,59 @@ class NotificationRelay : NotificationListenerService() {
         if (next != null) publishLive(next) else Graph.of(this).bridge.setLive(android.os.Bundle())
     }
 
+    // ---- a route being followed (rear/NavFace): any app's ongoing "navigation" notification, Google Maps first ----
+    //
+    // ITS OWN PACKET (NavigationNotification.KIND), beside the call's and the timer's: a call or a timer never takes the
+    // route's place in what the back was told, and the route's end is said by an empty packet of its kind.
+
+    private val navigationRoutes = NavigationNotification.Routes()
+    /** The apps' own icons, drawn once per app. */
+    private val navigationIcons = HashMap<String, android.graphics.Bitmap>()
+    private val navigationArt = NavigationNotification.Art()
+    /** What the back was last sent, so an unchanged post is not sent again. */
+    private var navigationPacket: android.os.Bundle? = null
+    private val navigationKeysSaid = HashSet<String>()
+
+    private fun seedNavigation() {
+        val all = runCatching { activeNotifications }.getOrNull() ?: return
+        navigationRoutes.replace(all.mapNotNull { runCatching { readNavigation(it) }.getOrNull() })
+        runCatching { publishNavigation(force = true) }
+    }
+
+    private fun readNavigation(sbn: StatusBarNotification): dev.kb896.aiusage.rear.NavFace.Model? {
+        val n = sbn.notification
+        if (!NavigationNotification.eligible(n)) return null
+        val key = sbn.key
+        val pkg = sbn.packageName
+        if (dev.kb896.aiusage.BuildConfig.DEBUG && navigationKeysSaid.add(key)) {
+            Log.i(TAG, "navigation: a route from $pkg, ${NavigationNotification.shape(n)}")
+        }
+        val icon = navigationIcons[pkg] ?: runCatching {
+            packageManager.getApplicationIcon(pkg).toBitmap(NAV_ICON_PX, NAV_ICON_PX, android.graphics.Bitmap.Config.ARGB_8888)
+        }.getOrNull()?.also { navigationIcons[pkg] = it }
+        return NavigationNotification.parse(key, pkg, n, icon) { source ->
+            runCatching {
+                val drawable = source.loadDrawable(this) ?: return@runCatching null
+                val w = drawable.intrinsicWidth.coerceAtLeast(1)
+                val h = drawable.intrinsicHeight.coerceAtLeast(1)
+                val scale = NAV_ART_PX.toFloat() / maxOf(w, h)
+                drawable.toBitmap((w * scale).toInt().coerceAtLeast(1), (h * scale).toInt().coerceAtLeast(1), android.graphics.Bitmap.Config.ARGB_8888)
+            }.getOrNull()
+        }
+    }
+
+    /** The route shown (or none), to the back, if it differs from what the back was last sent. */
+    private fun publishNavigation(force: Boolean = false) {
+        val model = navigationRoutes.current()
+        val packet = NavigationNotification.toBundle(model, navigationArt::png)
+        if (force || !NavigationNotification.samePacket(navigationPacket, packet)) {
+            if ((navigationPacket?.containsKey("key") == true) != (model != null)) Log.i(TAG, if (model != null) "navigation: a route is followed (${model.pkg})" else "navigation: no route any more")
+            Graph.of(this).bridge.setLive(packet)
+            navigationPacket = packet
+        }
+        if (model == null) navigationArt.clear()
+    }
+
     // ---- who a message is from, what it says, and its app's colour (the pop-up's: NoticePop) ----
 
     /**
@@ -334,6 +395,15 @@ class NotificationRelay : NotificationListenerService() {
         n.actions.orEmpty().filter { it.actionIntent != null && it.remoteInputs.isNullOrEmpty() && !it.title.isNullOrBlank() }
             .take(dev.kb896.aiusage.rear.NoticeShade.ACTIONS)
 
+    @Suppress("DEPRECATION")
+    @androidx.annotation.RequiresApi(34)
+    private fun lendActivityStarts(): android.os.Bundle = android.app.ActivityOptions.makeBasic().apply {
+        setPendingIntentBackgroundActivityStartMode(
+            if (android.os.Build.VERSION.SDK_INT >= 36) android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
+            else android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED,
+        )
+    }.toBundle()
+
     private fun actionWords(n: android.app.Notification): List<String> = pressable(n).map { it.title.toString().trim() }
 
     /** Button [index] of the notification of [key], pressed as its own shade would press it. */
@@ -341,8 +411,10 @@ class NotificationRelay : NotificationListenerService() {
         val sbn = runCatching { activeNotifications }.getOrNull()?.firstOrNull { it.key == key }
         val action = sbn?.let { (if (live) liveButtons(it.notification) else pressable(it.notification)).getOrNull(index) }
         if (action == null) { Log.i(TAG, "a button on the back: no such notification or button any more"); return }
-        runCatching { action.actionIntent.send() }
-            .onSuccess { Log.i(TAG, "a button on the back pressed: ${sbn.packageName}") }
+        val opens = runCatching { action.actionIntent.isActivity }.getOrDefault(false)
+        val options = if (android.os.Build.VERSION.SDK_INT >= 34) lendActivityStarts() else null
+        runCatching { action.actionIntent.send(this, 0, null, null, null, null, options) }
+            .onSuccess { Log.i(TAG, "a button on the back pressed: ${sbn.packageName}${if (opens) " (it opens the app; may start: ${android.provider.Settings.canDrawOverlays(this)})" else ""}") }
             .onFailure { Log.w(TAG, "a button on the back: ${it.message}") }
     }
 
@@ -361,17 +433,49 @@ class NotificationRelay : NotificationListenerService() {
                 return
             }
             val c = ConfigStore(this@NotificationRelay).load()
-            if (!c.matchFrontNotifications && !(c.companion && intent.action == RearActivity.ACTION_DISMISS_NOTIFICATION)) return
+            val thrown = intent.action == RearActivity.ACTION_DISMISS_NOTIFICATION || intent.action == RearActivity.ACTION_SNOOZE_NOTIFICATION
+            if (!c.matchFrontNotifications && !(c.companion && thrown)) return
             when (intent.action) {
                 // Swiped away on the back: cleared on the front.
                 RearActivity.ACTION_DISMISS_NOTIFICATION ->
                     intent.getStringExtra(RearActivity.EXTRA_NOTIFICATION_KEY)?.takeIf { it.isNotEmpty() }?.let { key ->
-                        runCatching { cancelNotification(key) }.onFailure { Log.w(TAG, "dismiss failed: ${it.message}") }
-                        BackNotices.removed(this@NotificationRelay, key)
+                        thrownOnBack(key, PhoneThrow.dismiss(phone, key), "dismissed")
+                    }
+                // Thrown the other way on the back: snoozed for the hour; Android posts it again after by itself.
+                RearActivity.ACTION_SNOOZE_NOTIFICATION ->
+                    intent.getStringExtra(RearActivity.EXTRA_NOTIFICATION_KEY)?.takeIf { it.isNotEmpty() }?.let { key ->
+                        val ms = intent.getLongExtra(RearActivity.EXTRA_SNOOZE_MS, dev.kb896.aiusage.rear.NoticeThrow.SNOOZE_MS)
+                        thrownOnBack(key, PhoneThrow.snooze(phone, key, ms), "snoozed for ${PhoneThrow.duration(ms) / 60_000L} min")
                     }
                 RearActivity.ACTION_NOTIFICATIONS_SYNC -> sendActive()
             }
         }
+    }
+
+    /** This listener as PhoneThrow asks for one: the phone's own notifications, its own cancel and snooze. */
+    private val phone = object : PhoneThrow.Listener {
+        override fun find(key: String): PhoneThrow.Facts? =
+            runCatching { activeNotifications }.getOrNull()?.firstOrNull { it.key == key }?.let(::factsOf)
+        override fun cancel(key: String) { runCatching { cancelNotification(key) }.onFailure { Log.w(TAG, "dismiss failed: ${it.message}") } }
+        override fun snooze(key: String, ms: Long) { runCatching { snoozeNotification(key, ms) }.onFailure { Log.w(TAG, "snooze failed: ${it.message}") } }
+    }
+
+    private fun factsOf(sbn: StatusBarNotification) = PhoneThrow.Facts(
+        ongoing = sbn.isOngoing, clearable = sbn.isClearable, category = sbn.notification.category,
+        media = sbn.notification.extras.containsKey(android.app.Notification.EXTRA_MEDIA_SESSION),
+    )
+
+    /** Whether the back may throw this one out (NoticeThrow.throwable): what the back's list says of it. */
+    private fun throwable(sbn: StatusBarNotification): Boolean = factsOf(sbn).let { dev.kb896.aiusage.rear.NoticeThrow.throwable(it.ongoing, it.clearable, it.category, it.media) }
+
+    /** What came of a throw on the back, said in the log; one refused goes back on the back's list as the phone has it. */
+    private fun thrownOnBack(key: String, result: PhoneThrow.Result, what: String) {
+        when (result) {
+            PhoneThrow.Result.DONE -> Log.i(TAG, "thrown out on the back: $what")
+            PhoneThrow.Result.GONE -> Log.i(TAG, "thrown out on the back: no longer on the phone")
+            PhoneThrow.Result.REFUSED -> Log.i(TAG, "thrown out on the back: not one to be $what — left on the phone")
+        }
+        if (result == PhoneThrow.Result.REFUSED) runCatching { seedActive() } else BackNotices.removed(this, key)
     }
 
     /**
@@ -403,7 +507,7 @@ class NotificationRelay : NotificationListenerService() {
             val isTest = TestNotice.isTest(sbn.packageName, packageName, sbn.tag)
             if (sbn.packageName == packageName && !isTest) return@mapNotNull null
             if (!NoticeFilter.appAllowed(sbn.packageName, config, alwaysPass = isTest)) return@mapNotNull null
-            if (sbn.isOngoing || !sbn.isClearable) return@mapNotNull null
+            if (sbn.isOngoing || !sbn.isClearable || NavigationNotification.eligible(sbn.notification)) return@mapNotNull null
             if (NoticeFilter.secret(locked, sbn.notification.visibility)) return@mapNotNull null
             if (sbn.notification.flags and android.app.Notification.FLAG_GROUP_SUMMARY != 0) return@mapNotNull null
             when (sbn.notification.category) {
@@ -418,7 +522,7 @@ class NotificationRelay : NotificationListenerService() {
             val (who, what) = whoAndWhat(extras, title.orEmpty(), text.orEmpty())
             dev.kb896.aiusage.rear.NoticeShade.Item(
                 sbn.key, sbn.packageName, appLabel(sbn.packageName), who, if (showText) what else "",
-                time = sbn.postTime, actions = actionWords(sbn.notification), color = colorOf(sbn),
+                time = sbn.postTime, actions = actionWords(sbn.notification), color = colorOf(sbn), clearable = throwable(sbn),
             )
         }
         Log.i(TAG, "the back's list starts with the ${items.size} on the front now")
@@ -440,6 +544,11 @@ class NotificationRelay : NotificationListenerService() {
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         // Gone, so the same key posted again later is new again — whatever the switches say.
         seen.forget(sbn.key)
+        // The route shown has ended (or another app's takes its place).
+        val wasRoute = navigationRoutes.selected == sbn.key
+        navigationKeysSaid.remove(sbn.key)
+        navigationRoutes.posted(sbn.key, null)
+        if (wasRoute) runCatching { publishNavigation() }
         runCatching { clearLive(sbn.key) }
         if (!tracksFront(ConfigStore(this).load())) return
         BackNotices.removed(this, sbn.key)
@@ -455,6 +564,14 @@ class NotificationRelay : NotificationListenerService() {
         // not ongoing — must still be known as an update of something already seen.
         val seenBefore = seen.see(sbn.key)
         sweepTests()
+        // A route: its next step (or its first post) to the back's navigation page. It is ongoing, so nothing below takes it.
+        val wasRoute = navigationRoutes.selected == sbn.key
+        val navigationNote = NavigationNotification.eligible(sbn.notification)
+        if (wasRoute || navigationNote || navigationRoutes.contains(sbn.key)) {
+            navigationRoutes.posted(sbn.key, runCatching { readNavigation(sbn) }.getOrNull())
+            if (wasRoute || navigationRoutes.selected == sbn.key) runCatching { publishNavigation() }
+        }
+        if (navigationNote) return
         // A timer, a stopwatch, a call: the live card's, and nothing of the list's or the pop-up's
         // (a call does not pop up as a message would; its card has its buttons).
         if (ConfigStore(this).load().companion && isLive(sbn)) {
@@ -624,7 +741,7 @@ class NotificationRelay : NotificationListenerService() {
             whoAndWhat(sbn.notification.extras, title.orEmpty(), body.orEmpty()).let { (who, what) ->
                 dev.kb896.aiusage.rear.NoticeShade.Item(
                     sbn.key, sbn.packageName, app, who, if (body == null) "" else what,
-                    time = sbn.postTime, actions = actionWords(sbn.notification), color = colorOf(sbn),
+                    time = sbn.postTime, actions = actionWords(sbn.notification), color = colorOf(sbn), clearable = throwable(sbn),
                 )
             },
             pop = pop,
@@ -727,6 +844,10 @@ class NotificationRelay : NotificationListenerService() {
         const val WAKE_SETTLE_MS = 200L
 
         const val TAG = "AiUsageNotif"
+        /** A route's app icon, drawn this size (the navigation page shows it at 110 px). */
+        const val NAV_ICON_PX = 160
+        /** A route's other pictures (the maneuver, the tracker), at most this along their longer side. */
+        const val NAV_ART_PX = 192
         /** The clocks whose ongoing notification is a timer or a stopwatch: Xiaomi's (on this phone) and Google's. */
         val CLOCKS = setOf("com.android.deskclock", "com.google.android.deskclock")
         /** A headset of any kind: a call answered from the back then goes to it, not to the speaker. */
@@ -736,6 +857,8 @@ class NotificationRelay : NotificationListenerService() {
         )
 
         const val DEBUG_UNBIND = "dev.kb896.aiusage.DEBUG_UNBIND"
+        /** What a sender of [DEBUG_UNBIND] must hold (adb's shell does). */
+        const val DEBUG_SENDER = "android.permission.DUMP"
 
         /**
          * How long an identical notification is treated as the same one.

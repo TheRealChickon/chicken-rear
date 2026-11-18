@@ -4,15 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.provider.MediaStore
 import android.util.Log
-import java.io.File
 
-/**
- * A screenshot or recording of the back, made by the shell (RearUserService.capture) and handed
- * here open, copied into the gallery: Pictures/Screenshots, or Movies/Screen recordings, as the
- * phone's own land. The app's to do: an app adds to the media store without any permission
- * (scoped storage). Handed over open, not by a path: a file the shell wrote into this app's
- * external files was the shell's, and this app could not read it (2026-11-09).
- */
 object CaptureStore {
     private const val TAG = "AiUsageRear"
 
@@ -30,22 +22,40 @@ object CaptureStore {
         }, "capture-bin").apply { isDaemon = true; start() }
     }
 
-    /** [file] into the gallery, off the caller's thread; closed after. */
-    fun save(context: Context, file: android.os.ParcelFileDescriptor, video: Boolean) {
+    /** [file] into the gallery, off the caller's thread; closed after. [name]: the screenshot's (BackShots.name); null makes one. */
+    fun save(context: Context, file: android.os.ParcelFileDescriptor, video: Boolean, name: String? = null) {
         Thread({
-            runCatching { copy(context.applicationContext, file, video) }
+            runCatching { copy(context.applicationContext, file, video, name) }
                 .onFailure { Log.w(TAG, "capture: not saved: ${it.message}") }
             runCatching { file.close() }
         }, "capture-store").apply { isDaemon = true; start() }
     }
 
-    private fun copy(context: Context, file: android.os.ParcelFileDescriptor, video: Boolean) {
+    /**
+     * The shell saved screenshot [name] itself while this app was frozen (ShotKeeper.Claim.SCAN): the media store asked
+     * to look at its file (the public way to MediaProvider's scan, harmless if it is in already).
+     */
+    fun scanShellShot(context: Context, name: String) {
+        if (!BackShots.isName(name)) return
+        val path = BackShots.shellPath(name)
+        android.media.MediaScannerConnection.scanFile(context.applicationContext, arrayOf(path), arrayOf(BackShots.MIME)) { _, uri ->
+            Log.i(TAG, "capture: the shell had saved $name while the app was away — ${if (uri != null) "in the media store" else "the media store did not take it"}")
+        }
+    }
+
+    private fun copy(context: Context, file: android.os.ParcelFileDescriptor, video: Boolean, name: String?) {
         val resolver = context.contentResolver
-        val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
         val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, "Back_$stamp.${if (video) "mp4" else "png"}")
-            put(MediaStore.MediaColumns.MIME_TYPE, if (video) "video/mp4" else "image/png")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, if (video) "Movies/Screen recordings" else "Pictures/Screenshots")
+            if (video) {
+                val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "Back_$stamp.mp4")
+                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "Movies/Screen recordings")
+            } else {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name?.takeIf { BackShots.isName(it) } ?: BackShots.name(System.currentTimeMillis()))
+                put(MediaStore.MediaColumns.MIME_TYPE, BackShots.MIME)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, BackShots.RELATIVE_PATH)
+            }
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val collection = if (video) MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)

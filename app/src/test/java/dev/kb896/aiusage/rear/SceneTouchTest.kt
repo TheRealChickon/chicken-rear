@@ -91,34 +91,92 @@ class SceneTouchTest {
         t.feed(up(500f, 300f, 60), scene)
         assertEquals(listOf(Out.SecondDown), t.feed(down(500f, 300f, 200), scene))
         assertFalse("too soon", t.held(400))
-        assertFalse("not the next face", t.heldAlone(200 + SceneTouch.SWITCH_MS))
+        assertFalse("not the picker", t.heldAlone(200 + SceneTouch.PICKER_HOLD_MS))
         assertTrue(t.held(200 + SceneTouch.HOLD_MS))
         assertFalse(t.held(200 + SceneTouch.HOLD_MS + 50))
         assertEquals(none, t.feed(up(500f, 300f, 1200), scene))
     }
 
-    @Test fun `a press and hold picks the next face, once, and is no tap as it lifts`() {
+    @Test fun `a press and hold opens the picker, once, and is no tap as it lifts`() {
         val t = SceneTouch()
         assertEquals(listOf(Out.FirstDown), t.feed(down(500f, 300f, 0), scene))
         t.feed(move(503f, 302f, 200), scene)
-        assertFalse("too soon", t.heldAlone(400))
-        assertTrue(t.heldAlone(SceneTouch.SWITCH_MS))
-        assertFalse(t.heldAlone(SceneTouch.SWITCH_MS + 100))
+        assertFalse("too soon", t.heldAlone(499))
+        assertTrue(t.heldAlone(500))
+        assertFalse(t.heldAlone(600))
         assertEquals(none, t.feed(up(503f, 302f, 1500), scene))
+    }
+
+    @Test fun `the hold is 500 ms, longer than a tap may be down, within Xiaomi's 20 units`() {
+        assertEquals(500L, SceneTouch.PICKER_HOLD_MS)
+        // Longer than a tap, as the notes' hold is: a slow tap is never the picker.
+        assertTrue(SceneTouch.PICKER_HOLD_MS > SceneTouch.TAP_MS)
+        val at499 = SceneTouch(); at499.feed(down(500f, 300f, 0), scene); assertFalse(at499.heldAlone(499))
+        val at500 = SceneTouch(); at500.feed(down(500f, 300f, 0), scene); assertTrue(at500.heldAlone(500))
+        // 19 units off is still held (past SLOP's 16, which other readers use); 21 is not.
+        val near = SceneTouch(); near.feed(down(500f, 300f, 0), scene); near.feed(move(519f, 300f, 100), scene); assertTrue(near.heldAlone(500))
+        val off = SceneTouch(); off.feed(down(500f, 300f, 0), scene); off.feed(move(521f, 300f, 100), scene); assertFalse(off.heldAlone(500))
+    }
+
+    @Test fun `a slow tap is a tap, and a double tap or a double tap held whose first tap is slow is still that`() {
+        // Every first tap from 300 ms (Xiaomi's long press) to the longest a tap may be down.
+        for (downMs in listOf(300L, 303L, 350L, 400L, SceneTouch.TAP_MS)) {
+            // Alone: a tap, and the picker's hold, asked as the shell asks it (PICKER_HOLD_MS after landing), says no.
+            val tap = SceneTouch()
+            tap.feed(down(500f, 300f, 0), scene)
+            assertFalse("held $downMs ms: no picker while down", tap.heldAlone(downMs))
+            assertEquals("held $downMs ms", listOf(Out.Tap(500f, 300f, Mode.SCENE)), tap.feed(up(500f, 300f, downMs), scene))
+            assertFalse("held $downMs ms: no picker after the lift", tap.heldAlone(SceneTouch.PICKER_HOLD_MS))
+            // The double tap's dim: the first tap slow, the second quick.
+            val dim = SceneTouch()
+            dim.feed(down(500f, 300f, 0), scene); dim.feed(up(500f, 300f, downMs), scene)
+            assertFalse(dim.heldAlone(SceneTouch.PICKER_HOLD_MS))
+            assertEquals(listOf(Out.SecondDown), dim.feed(down(505f, 300f, downMs + 200), scene))
+            assertTrue("first tap $downMs ms: a double tap", dim.feed(up(505f, 300f, downMs + 260), scene).single() is Out.DoubleTap)
+            // The double tap held: off.
+            val off = SceneTouch()
+            off.feed(down(500f, 300f, 0), scene); off.feed(up(500f, 300f, downMs), scene)
+            assertEquals(listOf(Out.SecondDown), off.feed(down(505f, 300f, downMs + 200), scene))
+            assertFalse(off.heldAlone(downMs + 200 + SceneTouch.PICKER_HOLD_MS))
+            assertTrue("first tap $downMs ms: held is off", off.held(downMs + 200 + SceneTouch.HOLD_MS))
+        }
+    }
+
+    @Test fun `a double tap's second held is still the back off at 550 ms, not the picker`() {
+        val t = SceneTouch()
+        t.feed(down(500f, 300f, 0), scene); t.feed(up(500f, 300f, 60), scene)
+        assertEquals(listOf(Out.SecondDown), t.feed(down(500f, 300f, 200), scene))
+        assertFalse(t.heldAlone(200 + SceneTouch.PICKER_HOLD_MS))
+        assertFalse(t.held(200 + 549))
+        assertTrue(t.held(200 + 550))
+    }
+
+    @Test fun `in the picker nothing comes of a finger here, and its tap is not the first of a double tap`() {
+        val t = SceneTouch()
+        val picker = { Mode.PICKER }
+        assertEquals(none, t.feed(down(500f, 300f, 0), picker))
+        assertEquals(none, t.feed(move(200f, 305f, 100), picker))
+        assertEquals(none, t.feed(up(200f, 305f, 150), picker))
+        assertEquals(none, t.feed(down(500f, 300f, 300), picker))
+        assertEquals(none, t.feed(up(500f, 300f, 360), picker))
+        assertFalse(t.heldAlone(1000))
+        // The picker shut by that tap; the next tap on the face is a first tap, not a double tap's second.
+        assertEquals(listOf(Out.FirstDown), t.feed(down(500f, 300f, 450), scene))
+        assertEquals(listOf(Out.Tap(500f, 300f, Mode.SCENE)), t.feed(up(500f, 300f, 500), scene))
     }
 
     @Test fun `a hold that wanders, a lifted finger, or one on a page picks nothing`() {
         val moved = SceneTouch()
         moved.feed(down(500f, 300f, 0), scene)
         moved.feed(move(540f, 300f, 300), scene)
-        assertFalse(moved.heldAlone(SceneTouch.SWITCH_MS))
+        assertFalse(moved.heldAlone(SceneTouch.PICKER_HOLD_MS))
         val lifted = SceneTouch()
         lifted.feed(down(500f, 300f, 0), scene)
         lifted.feed(up(500f, 300f, 100), scene)
-        assertFalse(lifted.heldAlone(SceneTouch.SWITCH_MS))
+        assertFalse(lifted.heldAlone(SceneTouch.PICKER_HOLD_MS))
         val page = SceneTouch()
         assertEquals(none, page.feed(down(500f, 300f, 0)) { Mode.USAGE })
-        assertFalse(page.heldAlone(SceneTouch.SWITCH_MS))
+        assertFalse(page.heldAlone(SceneTouch.PICKER_HOLD_MS))
     }
 
     @Test fun `a swipe says which way and on what, once, whatever the page`() {
@@ -143,6 +201,35 @@ class SceneTouchTest {
         assertEquals(none, t.feed(up(500f, 300f, 60)) { Mode.NONE })
     }
 
+    @Test fun `held on the notes page it is the note lifted to be put in order - not a tap, not the face picker, and only there`() {
+        val notes = { Mode.NOTES }
+        val t = SceneTouch()
+        assertEquals(listOf(Out.NotesDown), t.feed(down(600f, 300f, 0), notes))
+        assertFalse("too soon", t.heldOnNotes(SceneTouch.NOTE_HOLD_MS - 50))
+        assertFalse("not the face picker's hold", t.heldAlone(SceneTouch.PICKER_HOLD_MS))
+        assertTrue(t.heldOnNotes(SceneTouch.NOTE_HOLD_MS))
+        assertFalse("once", t.heldOnNotes(SceneTouch.NOTE_HOLD_MS + 100))
+        // The finger then goes sideways and lifts: no swipe, no tap of this reader's (the carousel has it).
+        assertEquals(none, t.feed(move(900f, 300f, 700), notes))
+        assertEquals(none, t.feed(up(900f, 300f, 760), notes))
+        // A tap is no hold; nor is a finger that wandered.
+        val tap = SceneTouch()
+        tap.feed(down(600f, 300f, 0), notes)
+        assertEquals(listOf(Out.Tap(600f, 300f, Mode.NOTES)), tap.feed(up(600f, 300f, 120), notes))
+        assertFalse(tap.heldOnNotes(SceneTouch.NOTE_HOLD_MS))
+        val wander = SceneTouch()
+        wander.feed(down(600f, 300f, 0), notes); wander.feed(move(640f, 300f, 200), notes)
+        assertFalse(wander.heldOnNotes(SceneTouch.NOTE_HOLD_MS))
+        // Longer than a tap may be down.
+        assertTrue(SceneTouch.NOTE_HOLD_MS > SceneTouch.TAP_MS)
+        // The moon's hold is untouched by it, and on usage nothing is armed.
+        val moon = SceneTouch()
+        assertEquals(listOf(Out.FirstDown), moon.feed(down(600f, 300f, 0), scene))
+        assertFalse(moon.heldOnNotes(SceneTouch.NOTE_HOLD_MS))
+        assertTrue(moon.heldAlone(SceneTouch.PICKER_HOLD_MS))
+        assertEquals(none, SceneTouch().feed(down(600f, 300f, 0)) { Mode.USAGE })
+    }
+
     @Test fun `a tap on a page says where, for its buttons`() {
         val t = SceneTouch()
         val notes = { Mode.NOTES }
@@ -150,14 +237,10 @@ class SceneTouchTest {
         assertEquals(listOf(Out.Tap(810f, 476f, Mode.NOTES)), t.feed(up(810f, 476f, 80), notes))
     }
 
-    @Test fun `the faces are the loop clips by name, round and round`() {
+    @Test fun `our faces are the loop clips by name`() {
         val faces = SceneFaces.list(arrayOf("falling.loop.mp4", "rain.wake.mp4", "david-moon.loop.mp4", "falling.loop.json"))
         assertEquals(listOf("david-moon.loop.mp4", "falling.loop.mp4"), faces)
-        assertEquals("falling.loop.mp4", SceneFaces.next(faces, "david-moon.loop.mp4"))
-        assertEquals("david-moon.loop.mp4", SceneFaces.next(faces, "falling.loop.mp4"))
-        assertEquals("a face that is gone: the first", "david-moon.loop.mp4", SceneFaces.next(faces, "gone.loop.mp4"))
-        assertEquals("the only face stays", null, SceneFaces.next(listOf("david-moon.loop.mp4"), "david-moon.loop.mp4"))
-        assertEquals(null, SceneFaces.next(SceneFaces.list(null), "x"))
+        assertEquals(emptyList<String>(), SceneFaces.list(null))
     }
 
     @Test fun `a notification's buttons are found where they are drawn`() {

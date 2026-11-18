@@ -7,52 +7,20 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.hardware.display.DisplayManager
 import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import android.view.Display
+import dev.kb896.aiusage.Panel
 import dev.kb896.aiusage.rear.FaceDown
 import dev.kb896.aiusage.rear.LyingOnBack
 import dev.kb896.aiusage.rear.RearActivity
 import dev.kb896.aiusage.rear.ShizukuBridge
 import java.util.concurrent.Executors
 
-/**
- * THE TABLE'S WATCH, in the poll service, for the back's posture (RearPosture):
- *
- * - FACE DOWN ("Dim when face down", PanelConfig.tableMode): laid on its face, the panel is told
- *   (RearActivity.ACTION_TABLE) and the back woken for it; the panel puts up the dim. Lifted, the
- *   panel is told that too.
- * - ON ITS BACK ("Off when lying on its back", PanelConfig.offOnBack): settled and still on its
- *   back (LyingOnBack), the bridge declines wakes (ShizukuBridge.lyingOnBack) and the panel is
- *   told ([RearActivity.EXTRA_TABLE_BACK]) and lets the back go. Picked up, the panel is told and
- *   the back woken — the one way it comes back on by itself, the panel's process perhaps frozen.
- *
- * IN THE POLL SERVICE'S PROCESS, for PocketWatch's reason: a dark back stops the panel's
- * activity and its :rear process can be frozen, and a frozen process hears no sensor. The
- * panel keeps its own watch while it is lit (the same rule, FaceDown); this one is what sees
- * a table with the back off.
- *
- * THE WAKE-UP ACCELEROMETER where the phone has one: with both screens off the processor
- * suspends, and only a wake-up sensor's events wake it. Read in batches — the settle rule reads
- * the events' own timestamps, so a batch delivered at once still counts its second as it
- * happened. Delivery holds a wakelock only until the listener returns; the guest check, the
- * panel's word and the shell's wake run after it, under a short one of our own ([WAKE_HOLD_MS]).
- *
- * THREE CADENCES (TableCadence). LIFT while it lies settled either way: [LIFT_SAMPLING_US] in
- * [LIFT_BATCH_US] batches, so picking it up is heard within about half a second — battery is
- * not the concern there, the back coming on in the hand is. ACTIVE for [ACTIVE_MS] after the
- * watch starts and after a lift: [SAMPLING_US] in [BATCH_US] batches, a lie seen within a couple
- * of seconds of settling. Then IDLE: one reading a second in batches of [IDLE_BATCH_US], and only
- * where the sensor hub can hold that batch (its FIFO); where it cannot, the idle watch reads the
- * ordinary, non-wake-up accelerometer, which never wakes the processor.
- *
- * Watching while either switch is on — the front on or off: lying on its back is as much a
- * posture with the front in use. Not in a pocket (pocket mode switched the back off; PocketWatch
- * says when that changes). Face down, two refusals: "Only while charging" with no charger in, and
- * a guest app over the panel.
- */
 class TableWatch(private val context: Context, private val bridge: ShizukuBridge) {
 
     private val sensors = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -94,6 +62,8 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
 
     /** The cadence registered now, and until when ACTIVE lasts (elapsedRealtime: it counts the suspend too). */
     private var cadence: TableCadence.Mode? = null
+    /** IDLE was chosen for a settled lie (both screens dark), not for nothing happening: for the log alone. */
+    private var slowWhileSettled = false
     private var activeUntil = 0L
 
     private var switchOn = false
@@ -113,8 +83,13 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
 
     /** The switches, from the config: read once per write. */
     fun setConfig(on: Boolean, chargingOnly: Boolean, backOn: Boolean, liftWakes: Boolean = true) {
+        val liftChanged = liftWakes != this.liftWakes
         this.liftWakes = liftWakes
-        if (on == switchOn && chargingOnly == this.chargingOnly && backOn == this.backOn) return
+        if (on == switchOn && chargingOnly == this.chargingOnly && backOn == this.backOn) {
+            // Only whether a lift wakes the back: that is the cadence's question alone.
+            if (liftChanged && watching) recadence()
+            return
+        }
         switchOn = on
         this.chargingOnly = chargingOnly
         if (this.backOn && !backOn && back.down) {
@@ -137,6 +112,8 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
         }
         // Lying there already, and a refusal gone (the charger in): now.
         if (watching && face.down && !told) deliver()
+        // The front on or off (the service's display listener and screen broadcasts come here): the lift's cadence.
+        if (watching) { dark = screensDark(); recadence() }
     }
 
     /**
@@ -196,10 +173,14 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
         if (on) {
             activeUntil = android.os.SystemClock.elapsedRealtime() + ACTIVE_MS
             register(TableCadence.Mode.ACTIVE)
+            dark = screensDark()
+            runCatching { displays?.registerDisplayListener(screens, handler) }
             Log.i(TAG, "table: watching")
         } else {
             sensors.unregisterListener(listener)
+            runCatching { displays?.unregisterDisplayListener(screens) }
             cadence = null
+            slowWhileSettled = false
             // Not a lift: the switch went, or a pocket. Nothing known until it reads again.
             face.reset()
             told = false
@@ -227,14 +208,53 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
 
     /** The cadence for now, registered if it is not the one already (posted: never from inside the listener's own call). */
     private fun recadence() {
-        val want = TableCadence.mode(android.os.SystemClock.elapsedRealtime(), activeUntil, settled = face.down || back.down)
-        if (want == cadence) return
+        if (wanted() == cadence) return
         handler.post {
             if (!watching) return@post
-            val now = TableCadence.mode(android.os.SystemClock.elapsedRealtime(), activeUntil, settled = face.down || back.down)
+            val now = wanted()
             if (now == cadence) return@post
-            if (now == TableCadence.Mode.IDLE) Log.i(TAG, "table: nothing for a while — the slow watch")
+            val settled = face.down || back.down
+            if (now == TableCadence.Mode.IDLE) {
+                Log.i(TAG, if (settled) "table: lying still, both screens dark — the slow watch" else "table: nothing for a while — the slow watch")
+            } else if (now == TableCadence.Mode.LIFT && slowWhileSettled) {
+                Log.i(TAG, "table: lying still, a screen on — listening for the lift")
+            }
+            slowWhileSettled = now == TableCadence.Mode.IDLE && settled
             register(now)
+        }
+    }
+
+    /** TableCadence.mode for now; the screens as last read ([dark]), so a sensor batch makes no display call. */
+    private fun wanted(): TableCadence.Mode = TableCadence.mode(
+        android.os.SystemClock.elapsedRealtime(), activeUntil, settled = face.down || back.down,
+        liftWakes = liftWakes, screensDark = dark,
+    )
+
+    /** Both screens dark, as last read: when the watch starts, at every display change and at every [sync]. */
+    private var dark = false
+
+    private val displays: DisplayManager? by lazy { context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager }
+
+    /** Both screens dark: the front (FrontScreen's own rule, dozing counts as dark) and the back. Where it cannot be read: not dark. */
+    private fun screensDark(): Boolean = runCatching {
+        val dm = displays ?: return@runCatching false
+        val front = dm.getDisplay(Display.DEFAULT_DISPLAY) ?: return@runCatching false
+        // No rear display at all: nothing lit there.
+        val rear = dm.getDisplay(Panel.DISPLAY_ID)
+        !FrontScreen.isOn(front.state) && (rear == null || !FrontScreen.isOn(rear.state))
+    }.getOrDefault(false)
+
+    /**
+     * The screens going on and off, while watching: the lift's cadence follows them (LIFT back the moment one comes on).
+     * Every change of a display comes here (refresh rates too); what it does is cheap and changes nothing then.
+     */
+    private val screens = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            if (!watching || (displayId != Display.DEFAULT_DISPLAY && displayId != Panel.DISPLAY_ID)) return
+            dark = screensDark()
+            recadence()
         }
     }
 
@@ -344,12 +364,23 @@ internal object TableCadence {
 
     fun stillActive(now: Long, activeUntil: Long): Boolean = now < activeUntil
 
-    /** LIFT while a lie is settled (face down or on its back), else ACTIVE until its time, then IDLE. */
-    fun mode(now: Long, activeUntil: Long, settled: Boolean): Mode = when {
-        settled -> Mode.LIFT
+    /**
+     * LIFT while a lie is settled (face down or on its back) and its lift is to be heard at once ([liftAtOnce]); a
+     * settled lie whose lift is not (both screens dark, and a lift that wakes nothing) is IDLE; not settled, ACTIVE
+     * until its time, then IDLE. The defaults are a lift that wakes the back: LIFT whenever settled, as before.
+     */
+    fun mode(now: Long, activeUntil: Long, settled: Boolean, liftWakes: Boolean = true, screensDark: Boolean = false): Mode = when {
+        settled -> if (liftAtOnce(liftWakes, screensDark)) Mode.LIFT else Mode.IDLE
         stillActive(now, activeUntil) -> Mode.ACTIVE
         else -> Mode.IDLE
     }
+
+    /**
+     * A lift heard within half a second: where it wakes the back ([liftWakes]: Replace mode, or "wake on lift"), or
+     * where a screen is on (somebody may be looking, and the processor is awake anyway). Both screens dark and a lift
+     * that wakes nothing (companion mode's default): the lift can wait for an IDLE batch.
+     */
+    fun liftAtOnce(liftWakes: Boolean, screensDark: Boolean): Boolean = liftWakes || !screensDark
 
     /** Events a FIFO must hold for one whole idle batch. */
     fun eventsPerBatch(samplingUs: Int, batchUs: Int): Int = (batchUs / samplingUs).coerceAtLeast(1)

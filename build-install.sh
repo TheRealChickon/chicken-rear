@@ -71,7 +71,14 @@ if [ -z "${ANDROID_SERIAL:-}" ]; then
 fi
 
 ./gradlew :app:assembleDebug
-"$ADB" -s "$DEVICE" push app/build/outputs/apk/debug/app-debug.apk "$STAGE" >/dev/null
+APK=app/build/outputs/apk/debug/app-debug.apk
+# An emulator build (-PwithX86) writes to the same file and carries about 12 MB of x86_64 libraries the phone
+# never loads. Refuse it rather than push and store them there.
+if unzip -l "$APK" | grep -q ' lib/x86'; then
+  echo "✗ $APK holds x86 libraries (an emulator build, -PwithX86). Build it again without that and retry." >&2
+  exit 1
+fi
+"$ADB" -s "$DEVICE" push "$APK" "$STAGE" >/dev/null
 "$ADB" -s "$DEVICE" shell pm install -r "$STAGE"
 "$ADB" -s "$DEVICE" shell rm -f "$STAGE"
 

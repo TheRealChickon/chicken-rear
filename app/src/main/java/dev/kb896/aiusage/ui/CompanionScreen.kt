@@ -94,6 +94,32 @@ class CompanionScreen(
         postAnswer = null
     }
 
+    private val cameraPermissionHistory = activity.getSharedPreferences("camera_permission_requests", android.content.Context.MODE_PRIVATE)
+    private val askCamera = activity.registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        cameraPermissionResult(Manifest.permission.CAMERA, it)
+    }
+    private val askMicrophone = activity.registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        cameraPermissionResult(Manifest.permission.RECORD_AUDIO, it)
+    }
+
+    private fun cameraPermissionResult(permission: String, granted: Boolean) {
+        cameraPermissionHistory.edit().putBoolean(permission, !granted).apply()
+        model.refreshCameraPermissions()
+    }
+
+    override fun askCameraPermission(permission: String) {
+        val launcher = when (permission) {
+            Manifest.permission.CAMERA -> askCamera
+            Manifest.permission.RECORD_AUDIO -> askMicrophone
+            else -> return
+        }
+        if (cameraPermissionHistory.getBoolean(permission, false) && !activity.shouldShowRequestPermissionRationale(permission)) {
+            fix(CompanionRows.Fix.OPEN_APP_INFO)
+        } else {
+            launcher.launch(permission)
+        }
+    }
+
     init {
         scroll.addView(column, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         // Advanced keeps the older rows, in a pane of its own so the window insets stay the page's.

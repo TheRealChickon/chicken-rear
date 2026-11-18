@@ -10,23 +10,23 @@ class PortalFrameTest {
     // The Pro Max's size; its lenses and corner stand-ins (unmeasured).
     private val proMax = RearGeometry(976, 596, 296, 110, 450)
 
-    @Test fun `on the 17 Pro it is the edge right of the lenses, rounded as the glass`() {
+    @Test fun `on the 17 Pro it is the edge right of the lenses, every corner rounded as the glass`() {
         assertEquals(
-            listOf(ElectricBorder.Shape.Rounded(296f, 0f, 904f, 572f, 97f, leftR = 0f)),
+            listOf(ElectricBorder.Shape.Rounded(296f, 0f, 904f, 572f, 97f, leftR = 97f)),
             PortalFrame.shapesFor(RearGeometry.PRO17),
         )
     }
 
     @Test fun `on a Pro Max it runs along that display's own edges and corners`() {
         assertEquals(
-            listOf(ElectricBorder.Shape.Rounded(296f, 0f, 976f, 596f, 110f, leftR = 0f)),
+            listOf(ElectricBorder.Shape.Rounded(296f, 0f, 976f, 596f, 110f, leftR = 110f)),
             PortalFrame.shapesFor(proMax),
         )
     }
 
     @Test fun `the front's preview draws it in panel units, the lenses and corner scaled with them`() {
         assertEquals(
-            listOf(ElectricBorder.Shape.Rounded(274f, 0f, 904f, 572f, 102f, leftR = 0f)),
+            listOf(ElectricBorder.Shape.Rounded(274f, 0f, 904f, 572f, 102f, leftR = 102f)),
             PortalFrame.shapesFor(proMax.inPanelUnits()),
         )
     }
@@ -36,9 +36,9 @@ class PortalFrameTest {
         assertEquals(400f / 160f, PortalFrame.cssPx(RearGeometry.PRO17.copy(dpi = 400)), 1e-6f)
     }
 
-    @Test fun `round a letterboxed app the frame is square on both sides, and its outline is all numbers`() {
+    @Test fun `round a letterboxed app the frame has the glass's corners too, and its outline is all numbers`() {
         val shape = PortalFrame.shapesFor(RearGeometry.PRO17, GuestShape.Bounds(366, 0, 835, 572)).single()
-        assertEquals(ElectricBorder.Shape.Rounded(366f, 0f, 835f, 572f, 0f, leftR = 0f), shape)
+        assertEquals(ElectricBorder.Shape.Rounded(366f, 0f, 835f, 572f, 97f, leftR = 97f), shape)
         val outline = ElectricBorder.outline(shape)
         assertTrue(outline.isNotEmpty() && outline.none { it.isNaN() })
         for (i in outline.indices step 2) {

@@ -45,6 +45,7 @@ class BootReceiver : BroadcastReceiver() {
         // broadcasts are among the few from which a foreground service may be started from the background.
         if (intent?.action != Intent.ACTION_BOOT_COMPLETED && intent?.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
         android.util.Log.i("AiUsageBoot", "starting the service after ${intent.action?.substringAfterLast('.')}")
+        RestartLog.say(if (intent.action == Intent.ACTION_BOOT_COMPLETED) "boot received" else "app updated")
         runCatching { UsagePollService.start(context) }.onFailure { android.util.Log.w("AiUsageBoot", "not started: ${it.message}") }
     }
 }

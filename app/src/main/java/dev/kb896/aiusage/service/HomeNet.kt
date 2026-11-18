@@ -30,6 +30,10 @@ object HomeNet {
     fun atHome(config: PanelConfig, context: Context): Boolean =
         config.homeDetect && config.homeNet.isNotEmpty() && current(context) == config.homeNet
 
+    /** The same, for a Wi-Fi already read ([current]; null for none, or not read). */
+    fun atHome(config: PanelConfig, current: String?): Boolean =
+        config.homeDetect && config.homeNet.isNotEmpty() && current != null && current == config.homeNet
+
     /** About to sleep: the night's hours ([NIGHT_FROM] to [NIGHT_TO]), or Do Not Disturb on at any hour. */
     fun bedtime(hourOfDay: Int, doNotDisturb: Boolean): Boolean = doNotDisturb || hourOfDay >= NIGHT_FROM || hourOfDay < NIGHT_TO
 

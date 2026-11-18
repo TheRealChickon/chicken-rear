@@ -52,4 +52,29 @@ class LogWatchTest {
         // As ps shows it (the quotes gone), under init: known as ours.
         assertEquals(listOf(7), LogWatch.stale("7 1 logcat -b events -T 1 -v brief wm_set_resumed_activity:I wm_task_moved:I *:S"))
     }
+
+    @Test fun `the system and event logs' watcher and a pin's short main-log watcher are ours, a main-log watcher of anything else is not`() {
+        val focus = LogWatch.command("system,events", listOf("ActivityTaskManager:I", "wm_set_resumed_activity:I", "wm_task_moved:I", "wm_on_top_resumed_gained_called:I"))
+        assertTrue(focus.startsWith("logcat -b system,events -T 1 -v brief ActivityTaskManager:I "))
+        val pin = LogWatch.command("main", listOf("SubScreenCenter_PinAnimationSurfaceView:W", "SubScreenCenter_SmartAssistantPanel:W"))
+        assertTrue(pin.startsWith("logcat -b main -T 1 -v brief SubScreenCenter_PinAnimationSurfaceView:W SubScreenCenter_SmartAssistantPanel:W '*:S'"))
+        val listing = """
+              PID  PPID ARGS
+               11     1 logcat -b system,events -T 1 -v brief ActivityTaskManager:I wm_set_resumed_activity:I wm_task_moved:I wm_on_top_resumed_gained_called:I *:S
+               12     1 logcat -b main -T 1 -v brief SubScreenCenter_PinAnimationSurfaceView:W SubScreenCenter_SmartAssistantPanel:W *:S
+               13     1 logcat -b all -T 1 -v brief ActivityTaskManager:I wm_set_resumed_activity:I wm_task_moved:I wm_on_top_resumed_gained_called:I SubScreenCenter_PinAnimationSurfaceView:W SubScreenCenter_SmartAssistantPanel:W *:S
+               14     1 logcat -b main -T 1 -v brief ActivityTaskManager:I *:S
+               15  9000 logcat -b main -T 1 -v brief SubScreenCenter_PinAnimationSurfaceView:W SubScreenCenter_SmartAssistantPanel:W *:S
+               16     1 logcat -b system -T 1 -v brief ActivityTaskManager:I *:S
+        """.trimIndent()
+        // 13: the build before this one's watcher (all logs, the pin's tags at W): an orphan of ours too.
+        assertEquals(listOf(11, 12, 13), LogWatch.stale(listing))
+    }
+
+    @Test fun `only a buffer's name, or names by commas, is taken`() {
+        LogWatch.command("system,events", listOf("wm_task_moved:I"))
+        for (bad in listOf("", "main;reboot", "all events")) {
+            assertTrue(bad, runCatching { LogWatch.command(bad, listOf("wm_task_moved:I")) }.isFailure)
+        }
+    }
 }

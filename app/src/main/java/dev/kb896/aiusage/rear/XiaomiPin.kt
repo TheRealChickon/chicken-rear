@@ -26,7 +26,12 @@ object XiaomiPin {
     const val ENV = "assets/images/env-blur-3.png"
     const val LIGHT = "assets/images/xiaoai-light.png"
     const val NOISE = "assets/images/noise.png"
-    val FILES = listOf(CARD, EDGE, SHEET, ENV, LIGHT, NOISE)
+    /** Its rear light for a new pin (a baked picture sequence: rear/PagSequence), which "Pin animation: Ours" lays over the back. */
+    const val PAG = "assets/pin_show.pag"
+    /** What the models' path reads. */
+    private val MODEL_FILES = listOf(CARD, EDGE, SHEET, ENV, LIGHT, NOISE)
+    /** Every file of Xiaomi's that a pin of ours may read (the health check looks for each). */
+    val FILES = MODEL_FILES + PAG
 
     class Assets(val card: Glb.Mesh, val edge: Glb.Mesh, val sheet: Glb.Mesh, val env: Bitmap, val light: Bitmap, val noise: Bitmap?)
 
@@ -50,16 +55,50 @@ object XiaomiPin {
         if (tried && apk == null) return null
         tried = true
         val began = android.os.SystemClock.uptimeMillis()
-        val got = bytes(FILES, listOfNotNull(apk) + APKS)
+        val got = bytes(MODEL_FILES, listOfNotNull(apk) + APKS)
         fun mesh(n: String) = got[n]?.let { Glb.mesh(it) }
         fun picture(n: String) = got[n]?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
         val card = mesh(CARD); val edge = mesh(EDGE); val sheet = mesh(SHEET); val env = picture(ENV); val light = picture(LIGHT)
         if (card == null || edge == null || sheet == null || env == null || light == null) {
-            Log.i(TAG, "Xiaomi's pin models and pictures are not all to be had (${got.size} of ${FILES.size} files): the plain drawing")
+            Log.i(TAG, "Xiaomi's pin models and pictures are not all to be had (${got.size} of ${MODEL_FILES.size} files): the plain drawing")
             return null
         }
         Log.i(TAG, "Xiaomi's pin: card ${card.vertices} vertices, rim ${edge.vertices}, sheet ${sheet.vertices}; pictures ${env.width} x ${env.height} and ${light.width} x ${light.height}; read in ${android.os.SystemClock.uptimeMillis() - began} ms")
         return Assets(card, edge, sheet, env, light, picture(NOISE)).also { kept = it }
+    }
+
+    /** What draft B's front is lit by: Xiaomi's environment picture and its light picture. */
+    class Light(val env: Bitmap, val light: Bitmap)
+
+    @Volatile private var keptLight: Light? = null
+    @Volatile private var triedLight = false
+
+    /** The two pictures alone (draft B ray-marches its own slab, so the models are not needed), read once and kept; null where not to be had. */
+    @Synchronized
+    fun light(apk: String? = null): Light? {
+        keptLight?.let { return it }
+        if (triedLight && apk == null) return null
+        triedLight = true
+        val got = bytes(listOf(ENV, LIGHT), listOfNotNull(apk) + APKS)
+        fun picture(n: String) = got[n]?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
+        val env = picture(ENV); val light = picture(LIGHT)
+        if (env == null || light == null) { Log.i(TAG, "Xiaomi's pin pictures are not to be had: the plain drawing"); return null }
+        return Light(env, light).also { keptLight = it }
+    }
+
+    @Volatile private var keptVeil: PagSequence.Sequence? = null
+    @Volatile private var triedVeil = false
+
+    /** pin_show.pag's frames as WebP patches (not yet decoded), read once and kept (about 1 MB); null where not to be had. */
+    @Synchronized
+    fun veil(apk: String? = null): PagSequence.Sequence? {
+        keptVeil?.let { return it }
+        if (triedVeil && apk == null) return null
+        triedVeil = true
+        val seq = bytes(listOf(PAG), listOfNotNull(apk) + APKS)[PAG]?.let { PagSequence.parse(it) }
+        if (seq == null || seq.frames.isEmpty()) { Log.i(TAG, "Xiaomi's pin_show.pag is not to be had or not read: the plain arrival on the back"); return null }
+        Log.i(TAG, "Xiaomi's pin_show.pag: ${seq.width} x ${seq.height}, ${seq.frames.size} frames at ${seq.rate}")
+        return seq.also { keptVeil = it }
     }
 
     private const val MOST = 8L * 1024 * 1024

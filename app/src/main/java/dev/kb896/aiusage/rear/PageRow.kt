@@ -27,7 +27,7 @@ object PageRow {
         Page.USAGE -> if (goRight) null else if (live) Page.LIVE else Page.HOME
     }
 
-    enum class Kind { CALL, TIMER, MUSIC }
+    enum class Kind { CALL, NAVIGATION, TIMER, MUSIC }
 
     /**
      * What the live page is of, as far as "is this still the one he sent away" goes: equal tokens are
@@ -37,6 +37,9 @@ object PageRow {
 
     /** A call: another call is new, and so is its being answered. */
     fun call(key: String, ringing: Boolean) = Token(Kind.CALL, key, if (ringing) 0L else 1L)
+
+    /** A route (NavFace): each step of it is the same route (its notification's key stays); another key is a new route. */
+    fun navigation(key: String) = Token(Kind.NAVIGATION, key, 0L)
 
     /** A timer: another timer (its key, or how long it is in all) is new, and so is its running out. Paused or going on: the same. */
     fun timer(key: String, totalMs: Long, over: Boolean) = Token(Kind.TIMER, key, ((totalMs + TIMER_STEP_MS / 2) / TIMER_STEP_MS) * 2L + if (over) 1L else 0L)
@@ -51,8 +54,8 @@ object PageRow {
     /** What is playing: new each time playing starts after it had stopped ([starts] counts those). The next track: the same. */
     fun music(starts: Long) = Token(Kind.MUSIC, "", starts)
 
-    /** The live page that shows: a call before a timer before what is playing. */
-    fun top(call: Token?, timer: Token?, music: Token?): Token? = call ?: timer ?: music
+    /** The live page that shows: a call, then navigation, then a timer, then what is playing. */
+    fun top(call: Token?, timer: Token?, music: Token?, navigation: Token? = null): Token? = call ?: navigation ?: timer ?: music
 
     /**
      * ONE STROKE, ONE PAGE. What the log showed when one swipe went two pages: the timer brought back, and 0.8 s

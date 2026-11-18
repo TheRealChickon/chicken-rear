@@ -13,6 +13,12 @@ import org.junit.Test
  * removed.)
  */
 class PanelConfigCameraTest {
+    @Test fun `our camera preference defaults on and an explicit opt out survives storage`() {
+        assertTrue(PanelConfig().cameraOwnRear)
+        assertTrue(PanelConfig.decode("{}").cameraOwnRear)
+        assertFalse(PanelConfig.decode(PanelConfig.encode(PanelConfig(cameraOwnRear = false))).cameraOwnRear)
+    }
+
     @Test fun `camera mode is on by default, also in a config written before it`() {
         assertTrue(PanelConfig().cameraLight)
         assertTrue(PanelConfig.decode("""{"rearMode":"COMPANION"}""").cameraLight)

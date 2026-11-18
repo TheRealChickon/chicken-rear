@@ -18,12 +18,12 @@ class LiveWatchTest {
         val watch = LiveWatch()
         var nav = RearNav.State(lit = true)
         val anims = ArrayList<Anim>()
-        var call: String? = null; var timer: String? = null; var music: String? = null; var charge: String? = null
+        var navigation: String? = null; var call: String? = null; var timer: String? = null; var music: String? = null; var charge: String? = null
         var timerOver = false
         var again = 0L
         fun look(now: Long, atOnce: Boolean = false) {
-            val marks = arrayOfNulls<String>(4)
-            marks[Live.CALL.ordinal] = call; marks[Live.TIMER.ordinal] = timer; marks[Live.MUSIC.ordinal] = music; marks[Live.CHARGE.ordinal] = charge
+            val marks = arrayOfNulls<String>(Live.values().size)
+            marks[Live.NAVIGATION.ordinal] = navigation; marks[Live.CALL.ordinal] = call; marks[Live.TIMER.ordinal] = timer; marks[Live.MUSIC.ordinal] = music; marks[Live.CHARGE.ordinal] = charge
             val told = watch.look(now, marks, nav, atOnce) { it == Live.CALL || (it == Live.TIMER && timerOver) }
             again = told.againAt
             for (i in told.inputs) go(i)
@@ -34,6 +34,57 @@ class LiveWatchTest {
     }
     private fun timerMark(key: String, total: Long, over: Boolean) = PageRow.timer(key, total, over).let { "${it.key}#${it.phase}" }
     private fun musicMark(starts: Long) = PageRow.music(starts).let { "${it.key}#${it.phase}" }
+
+    private fun routeMark(key: String) = PageRow.navigation(key).let { "${it.key}#${it.phase}" }
+
+    @Test fun `a route is the live page over a timer, music and the charger, and each step of it is nothing new`() {
+        val b = Back()
+        b.charge = "charge"; b.music = musicMark(1); b.timer = timerMark("clock", 600_000L, false); b.look(0)
+        assertEquals(Live.TIMER, b.nav.live)
+        b.navigation = routeMark("maps|1"); b.look(1_000)
+        assertEquals(Live.NAVIGATION, b.nav.live); assertEquals(Seen.LIVE, b.seen)
+        assertEquals(listOf(Anim.LIVE_IN, Anim.LIVE_SWAP), b.anims)
+        // Maps posts every step under the same key: the same route, nothing moves.
+        repeat(60) { b.look(2_000L + it * 1_000L) }
+        assertEquals(listOf(Anim.LIVE_IN, Anim.LIVE_SWAP), b.anims)
+    }
+
+    @Test fun `a call comes over the route, and the route is back under it when the call ends`() {
+        val b = Back()
+        b.navigation = routeMark("maps|1"); b.look(0)
+        b.call = "call#0"; b.look(1_000)
+        assertEquals(Live.CALL, b.nav.live)
+        b.call = null; b.look(2_000); b.look(2_000 + LiveWatch.GRACE_MS)
+        assertEquals(Live.NAVIGATION, b.nav.live); assertEquals(Seen.LIVE, b.seen)
+        assertEquals(listOf(Anim.LIVE_IN, Anim.LIVE_SWAP, Anim.LIVE_SWAP), b.anims)
+    }
+
+    @Test fun `the route ends - after a moment the timer under it has the page, and a post again within that moment is no end`() {
+        val b = Back()
+        b.timer = timerMark("clock", 600_000L, false); b.navigation = routeMark("maps|1"); b.look(0)
+        // Taken down and posted again at once (an app re-posting its notification): no slide out and in.
+        b.navigation = null; b.look(1_000)
+        assertEquals(Live.NAVIGATION, b.nav.live)
+        b.navigation = routeMark("maps|1"); b.look(1_300)
+        assertEquals(listOf(Anim.LIVE_IN), b.anims)
+        // Gone for good: the timer takes its place, without a slide.
+        b.navigation = null; b.look(5_000); b.look(5_000 + LiveWatch.GRACE_MS)
+        assertEquals(Live.TIMER, b.nav.live)
+        assertEquals(listOf(Anim.LIVE_IN, Anim.LIVE_SWAP), b.anims)
+    }
+
+    @Test fun `a route he sent away stays away while it goes on, and a new route comes up by itself`() {
+        val b = Back()
+        b.navigation = routeMark("maps|1"); b.look(0)
+        b.stroke(RearNav.Way.RIGHT)
+        assertEquals(Seen.MOON, b.seen)
+        repeat(120) { b.look(1_000L + it * 1_000L); assertEquals(Seen.MOON, b.seen) }
+        // The route ends; another is started later (another key).
+        b.navigation = null; b.look(200_000); b.look(200_000 + LiveWatch.FORGET_MS)
+        assertEquals(0, b.nav.lives)
+        b.navigation = routeMark("maps|2"); b.look(300_000)
+        assertEquals(Seen.LIVE, b.seen)
+    }
 
     @Test fun `a timer comes up, and sent away it stays away while it runs, is paused and goes on`() {
         val b = Back()

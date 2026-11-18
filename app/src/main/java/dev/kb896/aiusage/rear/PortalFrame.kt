@@ -310,33 +310,10 @@ class PortalFrame(private val layerStack: Int, private val rear: RearGeometry) {
          * margin ray should be less visible"), so it is drawn at half.
          */
         internal const val ALPHA = 0.5f
-        /**
-         * The usable screen's edge only, right of the lenses ([RearGeometry.cutoutPx]): the frame
-         * neither runs round the lenses nor along the strip beside them. Square on the left,
-         * where the screen meets the strip; round on the right, as the glass is.
-         *
-         * The line's middle runs ON the app's edge, not inside it ("the center of the electric
-         * lines should fall exactly on the edge of the apps"): half of it, and of its glow, is
-         * off the glass at the display's edges, and over the lens strip on the left.
-         *
-         * In [rear]'s own pixels, rounded by its own corner (dumpsys display: RoundedCorner
-         * radius=97 on the 17 Pro): on a wider display the edge is that display's, not the
-         * panel's 904x572 drawn where it would be. The front's preview passes the rear in panel
-         * units (RearGeometry.inPanelUnits).
-         *
-         * [app]: the rectangle it hugs, when an app on a private display does not fill the area
-         * (GuestShape.appOnRear). Round on the right only where it meets the glass's corners, by
-         * reaching the display's right edge, top and bottom; a letterboxed one meets none, and is
-         * square on both sides.
-         */
         fun shapesFor(rear: RearGeometry, app: GuestShape.Bounds = GuestShape.appArea(rear)): List<ElectricBorder.Shape> {
-            val meetsGlass = app.right == rear.widthPx && app.top == 0 && app.bottom == rear.heightPx
+            val r = minOf(rear.cornerPx.toFloat(), app.width / 2f, app.height / 2f).coerceAtLeast(0f)
             return listOf(
-                ElectricBorder.Shape.Rounded(
-                    app.left.toFloat(), app.top.toFloat(), app.right.toFloat(), app.bottom.toFloat(),
-                    if (meetsGlass) rear.cornerPx.toFloat() else 0f,
-                    leftR = 0f,
-                ),
+                ElectricBorder.Shape.Rounded(app.left.toFloat(), app.top.toFloat(), app.right.toFloat(), app.bottom.toFloat(), r, leftR = r),
             )
         }
     }

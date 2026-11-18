@@ -11,7 +11,7 @@ import android.util.Log
  * animation has FINISHED (the card gone into the top edge) it posts a notification "Pinned" on its channel `pin`
  * (importance 3, the channel's sound `content://settings/system/notification_sound`, vibration off, not allowed
  * through Do Not Disturb), which the system shows as an island on the front and PLAYS AS THE PHONE'S OWN NOTIFICATION
- * SOUND (WaterDrop, unless changed). No vibration is asked for anywhere in its pin code.
+ * SOUND. No vibration is asked for anywhere in its pin code.
  *
  * So ours plays that same sound, the phone's notification sound as it is set, as a notification's sound
  * (USAGE_NOTIFICATION: its volume, silent in the silent and vibrate modes), at the moment Xiaomi's would
@@ -35,11 +35,6 @@ object PinChime {
     private var ringing: Ringtone? = null
 
     // ---- MADE READY AS THE PIN BEGINS, so that it sounds WHEN IT IS ASKED FOR ----
-    // Measured on one pin (`dumpsys audio`'s player events against the animation's own clock): asked for
-    // 2066 ms after the pin began, a Ringtone made then (two MediaPlayers, one after the other), "started" at 2108,
-    // its track at 2140, its first decoded sound by 2291; and the file itself (WaterDrop_preview.ogg, 1045 ms)
-    // is silent for its first 30 ms, with its attack at 34 to 41 ms. So the drop was heard 2.2 to 2.3 s in: a tenth to
-    // a quarter of a second after the card had gone and the front was over.
     // Now a SoundPool holds the sound decoded from the pin's first moment, and [play] is asked for [LEAD_MS] before
     // the moment the attack is to be heard.
 
@@ -47,8 +42,10 @@ object PinChime {
     private var sound = 0
     private var soundOf: String? = null
     @Volatile private var ready = false
+    /** The sound is decoded and waiting (place/ArrivalChime waits for it, half a second at most). */
+    fun isReady(): Boolean = ready
 
-    /** The file's own silence before its attack (35 ms in WaterDrop) and a ready pool's way to the speaker: asked for this long before it is to be heard. */
+    /** Lead time for a decoded notification sound to reach the speaker. */
     const val LEAD_MS = 60L
 
     /** The phone's notification sound decoded and waiting; called as the pin begins. The same sound as last time is kept. */

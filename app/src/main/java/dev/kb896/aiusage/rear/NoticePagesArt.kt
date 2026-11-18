@@ -26,6 +26,7 @@ class NoticePagesArt {
         typeface = Typeface.create(Typeface.DEFAULT, 400, false)
     }
     private val box = RectF()
+    private val label = NoticeThrowArt()
 
     /**
      * Onto [canvas], which is in panel units as ShellOverlay hands it. [progress] is how far down the pile is.
@@ -46,8 +47,8 @@ class NoticePagesArt {
         canvas.translate(0f, -(1f - progress) * h)
         // Nothing waiting: the one line, set as a pop-up's message is (its face, its size, the middle of what he
         // sees), on the pop-up's ground with no app's colour and kept dark: black down to a dark grey.
-        // A PAGE THAT IS NOT IN ITS PLACE HAS THE DISPLAY'S CORNERS (PageCorners): the pile on its way down or up, a
-        // page going up and away or thrown out sideways. In its place its corners are the display's own.
+        // A PAGE THAT IS NOT IN ITS PLACE HAS THE DISPLAY'S CORNERS (PageCorners): the pile on its way down or up, the
+        // logos' page going up and away, a page thrown out sideways. In its place its corners are the display's own.
         val corner = PageCorners.radius(rear, w)
         val pulled = progress < 0.999f
         if (s.empty) {
@@ -113,6 +114,8 @@ class NoticePagesArt {
                 canvas.drawBitmap(logo, null, box, bitmap)
             }
         }
+        // A page just thrown out: "Dismissed" or "Snoozed 1 h" rising over the one that came up (NoticeThrow).
+        s.label?.let { label.draw(canvas, h, it) }
         canvas.restore()
     }
 

@@ -12,13 +12,13 @@ class DisplayDumpTest {
         Logical Displays: size=2
           Display 0:
             mDisplayId=0
-            mPrimaryDisplayDevice=Built-in Screen(local:4619827260271452928)
+            mPrimaryDisplayDevice=Built-in Screen(local:4000000000000001928)
             mIsEnabled=true
             mIsInTransition=false
             mLayerStack=0
           Display 1:
             mDisplayId=1
-            mPrimaryDisplayDevice=Built-in Screen(local:4630947037102180609)
+            mPrimaryDisplayDevice=Built-in Screen(local:4000000000000002609)
             mIsEnabled=true
             mIsInTransition=false
             mLayerStack=1
@@ -29,9 +29,9 @@ class DisplayDumpTest {
     // section's mDisplayId, some spelled "=: 1" and "= 1".
     private val pro = """
             mDisplayId=0
-            mPrimaryDisplayDevice=Built-in Screen(local:4630946949513469331)
+            mPrimaryDisplayDevice=Built-in Screen(local:4000000000000003331)
             mDisplayId=1
-            mPrimaryDisplayDevice=Built-in Screen(local:4630946949513469332)
+            mPrimaryDisplayDevice=Built-in Screen(local:4000000000000004332)
           mDisplayId=0
           mDisplayId=: 0
           mDisplayId= 0
@@ -43,23 +43,23 @@ class DisplayDumpTest {
     """.trimIndent()
 
     @Test fun `reads the 17 Pro's rear display, the one the old constant named`() {
-        assertEquals("4630946949513469332", DisplayDump.physicalId(pro, 1))
-        assertEquals("4630946949513469331", DisplayDump.physicalId(pro, 0))
+        assertEquals("4000000000000004332", DisplayDump.physicalId(pro, 1))
+        assertEquals("4000000000000003331", DisplayDump.physicalId(pro, 0))
     }
 
     @Test fun `reads the rear display's physical id`() {
-        assertEquals("4630947037102180609", DisplayDump.physicalId(full, 1))
+        assertEquals("4000000000000002609", DisplayDump.physicalId(full, 1))
     }
 
     @Test fun `reads the main display's physical id`() {
-        assertEquals("4619827260271452928", DisplayDump.physicalId(full, 0))
+        assertEquals("4000000000000001928", DisplayDump.physicalId(full, 0))
     }
 
     @Test fun `reads the grepped form the service asks for`() {
         val grepped = full.lineSequence()
             .filter { it.contains("mDisplayId=") || it.contains("mPrimaryDisplayDevice=") }
             .joinToString("\n")
-        assertEquals("4630947037102180609", DisplayDump.physicalId(grepped, 1))
+        assertEquals("4000000000000002609", DisplayDump.physicalId(grepped, 1))
     }
 
     @Test fun `display 10 is not display 1`() {
@@ -98,27 +98,27 @@ class DisplayDumpTest {
     // The two DisplayDeviceInfo lines of the 17 Pro, cut down to what is read: off the phone
     // (OS4.0.5.0, 2026-10-29), the rear's 904 x 572 at 450 dpi, its 296 inset and 97 corners.
     private val devices = """
-        DisplayDeviceInfo{"Built-in Screen": uniqueId="local:4630946949513469331", 1220 x 2656, modeId 2, density 520, cutout DisplayCutout{insets=Rect(0, 150 - 0, 0) waterfall=Insets{left=0, top=0, right=0, bottom=0}}, touch INTERNAL}
-        DisplayDeviceInfo{"Built-in Screen": uniqueId="local:4630946949513469332", 904 x 572, modeId 7, renderFrameRate 120.00001, density 450, 400.02786 x 400.24243 dpi, cutout DisplayCutout{insets=Rect(296, 0 - 0, 0) waterfall=Insets{left=0, top=0, right=0, bottom=0}}, roundedCorners RoundedCorners{[RoundedCorner{position=TopLeft, radius=97, center=Point(97, 97)}, RoundedCorner{position=TopRight, radius=97, center=Point(807, 97)}]}, touch INTERNAL}
+        DisplayDeviceInfo{"Built-in Screen": uniqueId="local:4000000000000003331", 1220 x 2656, modeId 2, density 520, cutout DisplayCutout{insets=Rect(0, 150 - 0, 0) waterfall=Insets{left=0, top=0, right=0, bottom=0}}, touch INTERNAL}
+        DisplayDeviceInfo{"Built-in Screen": uniqueId="local:4000000000000004332", 904 x 572, modeId 7, renderFrameRate 120.00001, density 450, 400.02786 x 400.24243 dpi, cutout DisplayCutout{insets=Rect(296, 0 - 0, 0) waterfall=Insets{left=0, top=0, right=0, bottom=0}}, roundedCorners RoundedCorners{[RoundedCorner{position=TopLeft, radius=97, center=Point(97, 97)}, RoundedCorner{position=TopRight, radius=97, center=Point(807, 97)}]}, touch INTERNAL}
     """.trimIndent()
 
     @Test fun `the rear display's size, lenses, corner and density`() {
-        assertEquals(RearGeometry.Reading(904, 572, 296, 97, 450), DisplayDump.device(devices, "4630946949513469332"))
+        assertEquals(RearGeometry.Reading(904, 572, 296, 97, 450), DisplayDump.device(devices, "4000000000000004332"))
     }
 
     @Test fun `the front display - no left inset, no corners`() {
-        assertEquals(RearGeometry.Reading(1220, 2656, null, null, 520), DisplayDump.device(devices, "4630946949513469331"))
+        assertEquals(RearGeometry.Reading(1220, 2656, null, null, 520), DisplayDump.device(devices, "4000000000000003331"))
     }
 
     @Test fun `a Pro Max-shaped line`() {
-        val line = "DisplayDeviceInfo{\"Built-in Screen\": uniqueId=\"local:4630947037102180609\", 976 x 596, modeId 7, density 450, " +
+        val line = "DisplayDeviceInfo{\"Built-in Screen\": uniqueId=\"local:4000000000000002609\", 976 x 596, modeId 7, density 450, " +
             "cutout DisplayCutout{insets=Rect(296, 0 - 0, 0) waterfall=Insets{left=0, top=0, right=0, bottom=0}}, " +
             "roundedCorners RoundedCorners{[RoundedCorner{position=TopLeft, radius=110, center=Point(110, 110)}]}, touch INTERNAL}"
-        assertEquals(RearGeometry.Reading(976, 596, 296, 110, 450), DisplayDump.device(line, "4630947037102180609"))
+        assertEquals(RearGeometry.Reading(976, 596, 296, 110, 450), DisplayDump.device(line, "4000000000000002609"))
     }
 
     @Test fun `no line for the display, nothing read`() {
         assertNull(DisplayDump.device(devices, "1"))
-        assertNull(DisplayDump.device("", "4630946949513469332"))
+        assertNull(DisplayDump.device("", "4000000000000004332"))
     }
 }

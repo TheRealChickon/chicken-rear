@@ -25,13 +25,30 @@ class RearNavTest {
     private fun usage(vararg k: Live) = State(lit = true, row = Row.USAGE, lives = bits(*k))
     /** The live page (the highest of [k]) sent away: the moon. */
     private fun away(vararg k: Live) = State(lit = true, row = Row.HOME, lives = bits(*k), sent = 1 shl k.maxOf { it.ordinal })
-    private fun stroke(way: Way, from: From = From.MIDDLE, sliding: Boolean = false) = Input.Stroke(way, from, sliding)
+    private fun stroke(way: Way, from: From = From.MIDDLE, sliding: Boolean = false, aimed: Boolean = true) = Input.Stroke(way, from, sliding, aimed)
     private val L = Way.LEFT; private val R = Way.RIGHT; private val U = Way.UP; private val D = Way.DOWN
 
     private fun State.go(vararg inputs: Input): State = inputs.fold(this) { s, i -> RearNav.next(s, i).state }
     private fun check(from: State, input: Input, to: State, anim: Anim = Anim.NONE, does: Does = Does.NOTHING) {
         val step = RearNav.next(from, input)
         assertEquals("$from + $input", RearNav.Step(to, anim, does), step)
+    }
+
+    /** What a pop-up thrown out going [way] does to its notification: by the one constant (RearNav.DISMISS_WAY). */
+    private fun thrownDoes(way: Way) = if (way == RearNav.DISMISS_WAY) Does.DISMISS else Does.SNOOZE
+
+    @Test fun `our camera uses the existing activity ownership and returns to the moon`() {
+        val launch = RearNav.next(moon, stroke(R))
+        assertEquals(Does.OPEN_CAMERA, launch.does)
+        // A launch request is not proof of focus: a failed launch leaves the moon usable.
+        assertEquals(moon, launch.state)
+        val camera = moon.copy(ours = false)
+        check(moon, Input.OthersTake, camera, Anim.CUT)
+        for (way in Way.entries) check(camera, stroke(way), camera)
+        check(camera, Input.Tap, camera)
+        check(camera, Input.OthersLeave, moon, Anim.CUT)
+        check(camera, Input.Dark, camera.copy(lit = false), Anim.CUT)
+        check(camera.copy(lit = false), Input.OthersLeave, moon.copy(lit = false), Anim.CUT)
     }
 
     /** Every state that can be reached from a dark back with nothing live. */
@@ -98,10 +115,12 @@ class RearNavTest {
         assertEquals(0, notes(3, 2).go(Input.Dark, Input.Lit, stroke(U)).pin)
     }
 
-    @Test fun `not on the pop-up - a stroke there only takes the pop-up away`() {
+    @Test fun `not on the pop-up - a stroke there only takes the pop-up away, or throws it out, and the notes stay as they were`() {
         val popped = notes(3, 1).copy(pop = true)
-        check(popped, stroke(L), notes(3, 1), Anim.POP_OUT)
-        check(popped, stroke(R), notes(3, 1), Anim.POP_OUT)
+        check(popped, stroke(U), notes(3, 1), Anim.POP_OUT)
+        check(popped, stroke(D), notes(3, 1), Anim.POP_OUT)
+        check(popped, stroke(L), notes(3, 1), Anim.POP_THROWN_LEFT, thrownDoes(L))
+        check(popped, stroke(R), notes(3, 1), Anim.POP_THROWN_RIGHT, thrownDoes(R))
     }
 
     @Test fun `a note's bin - the next older one shows in its place, the last if it was the oldest, and a note before his moves him with it`() {
@@ -133,12 +152,144 @@ class RearNavTest {
         check(moon, Input.PinsAre(3), moon.copy(pins = 3))
     }
 
+    @Test fun `the list changes elsewhere than in front - he stays on his note wherever it went`() {
+        // One more behind him (a note for a place he has reached): where he was.
+        check(notes(3, 1), Input.PinsAre(4, keep = 1), notes(4, 1))
+        // One more in front of the first: one further back, also from the first place.
+        check(notes(3, 0), Input.PinsAre(4, keep = 1), notes(4, 1))
+        // One fewer in front of him (a note for a place he has left): one nearer.
+        check(notes(3, 2), Input.PinsAre(2, keep = 1), notes(2, 1))
+        // As many as before, his note moved (one came, another went).
+        check(notes(3, 2), Input.PinsAre(3, keep = 1), notes(3, 1))
+        check(arranging(3, 2), Input.PinsAre(3, keep = 1), notes(3, 1), Anim.ARRANGE_OUT)
+        // Where it was already, nothing; past the end, or the notes not up, by the count's rule.
+        check(notes(3, 1), Input.PinsAre(3, keep = 1), notes(3, 1))
+        check(notes(3, 2), Input.PinsAre(4, keep = 9), notes(4, 3))
+        check(moon.copy(pins = 3), Input.PinsAre(2, keep = 1), moon.copy(pins = 2))
+    }
+
+    @Test fun `what the shell tells of a new list - where his note is, by its own name`() {
+        val a = 10L; val b = 9L; val c = 8L; val p = 7L
+        // Not on the notes: only a count, and only when it changed.
+        assertEquals(Input.PinsAre(4), RearNav.pinsAre(moon.copy(pins = 3), null, listOf(a, b, c, p), fresh = false))
+        assertEquals(null, RearNav.pinsAre(moon.copy(pins = 3), null, listOf(a, b, c), fresh = false))
+        // On b: wherever b is now.
+        assertEquals(Input.PinsAre(4, keep = 1), RearNav.pinsAre(notes(3, 1), b, listOf(a, b, c, p), fresh = false))
+        assertEquals(Input.PinsAre(3, keep = 0), RearNav.pinsAre(notes(3, 1), b, listOf(b, c, p), fresh = false))
+        assertEquals(null, RearNav.pinsAre(notes(3, 1), b, listOf(a, b, p), fresh = false))
+        // His own note gone: the count's rule.
+        assertEquals(Input.PinsAre(2, keep = -1), RearNav.pinsAre(notes(3, 1), b, listOf(a, c), fresh = false))
+        // A note just pinned in front: on the first he stays on the first (the new one), further back on his own.
+        assertEquals(Input.PinsAre(4, keep = -1), RearNav.pinsAre(notes(3, 0), a, listOf(p, a, b, c), fresh = true))
+        assertEquals(Input.PinsAre(4, keep = 2), RearNav.pinsAre(notes(3, 1), b, listOf(p, a, b, c), fresh = true))
+    }
+
     @Test fun `the note shown is always one that is there, and the newest whenever the notes are not up - in every state that can be reached`() {
         for (s in reachable) {
             assertTrue("$s", s.pins >= 0 && s.pin >= 0 && s.pin <= maxOf(s.pins - 1, 0))
             if (!s.notes) assertEquals("$s", 0, s.pin)
         }
         assertTrue("notes on an older note are reached", reachable.any { it.notes && it.pin == 2 })
+    }
+
+
+    private fun arranging(pins: Int, pin: Int = 0, under: State = moon) = notes(pins, pin, under).copy(arrange = true)
+
+    @Test fun `held on the notes with two or more, the note shown is lifted to be put in order - with one it gives, with none nothing`() {
+        for (n in 2..3) for (pin in 0 until n) check(notes(n, pin), Input.NoteHold, arranging(n, pin), Anim.ARRANGE_IN)
+        check(notes(1), Input.NoteHold, notes(1), does = Does.GIVE)
+        check(notes(0), Input.NoteHold, notes(0))
+        // Over whatever page lies under the notes.
+        for (under in listOf(live(Live.TIMER), away(Live.MUSIC), live(Live.CHARGE))) check(notes(3, 1, under), Input.NoteHold, arranging(3, 1, under), Anim.ARRANGE_IN)
+        // Held again while arranging: nothing more.
+        check(arranging(3, 1), Input.NoteHold, arranging(3, 1))
+        // Not on the notes: the moon's and the pages' hold are Input.Hold, as they were; this input means nothing there.
+        for (s in listOf(moon.copy(pins = 3), live(Live.TIMER).copy(pins = 3), usage().copy(pins = 3), moon.copy(pins = 3, pop = true), State(pins = 3))) check(s, Input.NoteHold, s)
+        check(notes(3).copy(pop = true), Input.NoteHold, notes(3).copy(pop = true))
+        check(moon.copy(pins = 3), Input.Hold, moon.copy(pins = 3, picker = true), Anim.PICKER_IN)
+        check(moon.copy(pins = 3), Input.DoubleTapHold, moon.copy(pins = 3), does = Does.BACK_OFF)
+        check(notes(3), Input.Hold, notes(3))
+    }
+
+    @Test fun `carried along, the held note is where it was taken, one place at a time or any - and only while arranging`() {
+        check(arranging(3, 0), Input.NoteCarried(1), arranging(3, 1), Anim.NOTE_CARRIED)
+        check(arranging(3, 1), Input.NoteCarried(2), arranging(3, 2), Anim.NOTE_CARRIED)
+        check(arranging(3, 2), Input.NoteCarried(1), arranging(3, 1), Anim.NOTE_CARRIED)
+        check(arranging(3, 1), Input.NoteCarried(1), arranging(3, 1))
+        check(arranging(3, 1), Input.NoteCarried(3), arranging(3, 1))
+        check(arranging(3, 1), Input.NoteCarried(-1), arranging(3, 1))
+        // Twelve notes, carried from the first to the last and back.
+        var s = arranging(12, 0)
+        for (to in 1..11) s = RearNav.next(s, Input.NoteCarried(to)).also { assertEquals(Anim.NOTE_CARRIED, it.anim) }.state
+        assertEquals(arranging(12, 11), s)
+        for (to in 10 downTo 0) s = s.go(Input.NoteCarried(to))
+        assertEquals(arranging(12, 0), s)
+        // Not arranging: nothing.
+        for (st in listOf(notes(3, 1), moon.copy(pins = 3))) { check(st, Input.NoteCarried(2), st); check(st, Input.NoteSwapped(2), st) }
+    }
+
+    @Test fun `a tap on another swaps them - the held note is then at its place - and one on it or the ground ends it, the order kept`() {
+        check(arranging(3, 0), Input.NoteSwapped(2), arranging(3, 2), Anim.NOTE_SWAP)
+        check(arranging(3, 2), Input.NoteSwapped(1), arranging(3, 1), Anim.NOTE_SWAP)
+        check(arranging(3, 1), Input.NoteSwapped(1), arranging(3, 1))
+        check(arranging(3, 1), Input.NoteSwapped(5), arranging(3, 1))
+        // Done: the notes page again, on the held note where it now is.
+        check(arranging(3, 2), Input.ArrangeDone, notes(3, 2), Anim.ARRANGE_OUT)
+        check(notes(3, 2), Input.ArrangeDone, notes(3, 2))
+        // The tap itself is still only a tap (its place is the shell's to read): it changes nothing in the table.
+        check(arranging(3, 1), Input.Tap, arranging(3, 1), does = Does.TAP)
+        check(arranging(3, 1), Input.DoubleTap, arranging(3, 1), does = Does.DIM)
+    }
+
+    @Test fun `while arranging, sideways is the carousel's own and up nothing - down leaves the notes as ever`() {
+        for (from in From.values()) {
+            if (from == From.TOP_EDGE) continue
+            check(arranging(3, 1), stroke(L, from), arranging(3, 1))
+            check(arranging(3, 1), stroke(R, from), arranging(3, 1))
+            check(arranging(3, 1), stroke(U, from), arranging(3, 1))
+            check(arranging(3, 1), stroke(D, from), moon.copy(pins = 3), Anim.NOTES_OUT)
+        }
+        check(arranging(3, 1, live(Live.TIMER)), stroke(D), live(Live.TIMER).copy(pins = 3), Anim.NOTES_OUT)
+        // The notifications' pull is over everything of ours, arranging too.
+        check(arranging(3, 1), stroke(D, From.TOP_EDGE), notes(3, 1).copy(shade = true), Anim.SHADE_IN)
+        check(arranging(3, 1), stroke(L, sliding = true), arranging(3, 1))
+    }
+
+    @Test fun `arranging ends with the back dark, a pop-up, the shade, an urgent live thing, another's app, a note pinned or taken away`() {
+        check(arranging(3, 2), Input.Dark, moon.copy(lit = false, pins = 3), Anim.CUT)
+        check(arranging(3, 2), Input.PopArrives(), notes(3, 2).copy(pop = true), Anim.POP_IN)
+        check(arranging(3, 2), Input.OthersTake, moon.copy(ours = false, pins = 3), Anim.CUT)
+        check(arranging(3, 2), Input.NotesAlone, moon.copy(pins = 3), Anim.NOTES_OUT)
+        check(arranging(3, 2), Input.LiveComes(Live.CALL, urgent = true), live(Live.CALL).copy(pins = 3), Anim.NOTES_OUT)
+        // Something live that is not urgent stays under the notes, and so does the arranging.
+        check(arranging(3, 2), Input.LiveComes(Live.MUSIC), arranging(3, 2, live(Live.MUSIC)))
+        // A note pinned (the beam's landing shows the newest), the list grown or shrunk, one binned on the phone.
+        check(arranging(3, 2), Input.NotePinned, notes(3, 0), Anim.ARRANGE_OUT)
+        check(arranging(3, 2), Input.PinsAre(4), notes(4, 3), Anim.ARRANGE_OUT)
+        check(arranging(3, 2), Input.PinsAre(3), arranging(3, 2))
+        check(arranging(3, 2), Input.PinsAre(1), notes(1, 0), Anim.ARRANGE_OUT)
+        check(arranging(3, 2), Input.PinRemoved(0), notes(2, 1), Anim.ARRANGE_OUT)
+        // And back again it is the notes page, the held note where he left it, not arranging.
+        assertEquals(notes(3, 0), arranging(3, 1).go(Input.NoteCarried(2), Input.PopArrives(), Input.PopEnds, stroke(D), stroke(U)))
+        assertEquals(notes(3, 2), arranging(3, 1).go(Input.NoteCarried(2), Input.PopArrives(), Input.PopEnds))
+    }
+
+    @Test fun `an arrival at a place ends arranging, and a hold under a standing arrival lifts nothing`() {
+        val s = arranging(3, 1).go(Input.ArrivalsAre(1))
+        assertFalse("$s", s.arrange)
+        assertFalse("$s", s.notes)
+        assertEquals(Seen.ARRIVAL, RearNav.seen(s))
+        assertFalse(s.go(Input.NoteHold).arrange)
+        // Put away ("not now"), the notes are one stroke up again and can be put in order as before.
+        assertTrue(s.go(stroke(D), stroke(U), Input.NoteHold).arrange)
+    }
+
+    @Test fun `arranging never changes which page shows, and is only ever on the notes page with two or more - in every state that can be reached`() {
+        assertTrue("arranging is reached", reachable.any { it.arrange && it.pin == 2 })
+        for (s in reachable) if (s.arrange) {
+            assertEquals("$s", Seen.NOTES, RearNav.seen(s))
+            assertTrue("$s", s.pins >= 2)
+        }
     }
 
     // -- LEAVING USAGE WITH A LIVE PAGE UNDER IT ----------------------------------------------------------------
@@ -170,7 +321,7 @@ class RearNavTest {
         check(moon, stroke(D, From.TOP_EDGE), moon.copy(shade = true), Anim.SHADE_IN)
         check(moon, Input.Tap, moon, does = Does.TAP)
         check(moon, Input.DoubleTap, moon, does = Does.DIM)
-        check(moon, Input.Hold, moon, does = Does.NEXT_FACE)
+        check(moon, Input.Hold, moon.copy(picker = true), Anim.PICKER_IN)
         check(moon, Input.DoubleTapHold, moon, does = Does.BACK_OFF)
         // The live page he sent away is one stroke right of home, and usage one more.
         check(away(Live.TIMER), stroke(L), live(Live.TIMER), Anim.LIVE_IN)
@@ -187,7 +338,8 @@ class RearNavTest {
             check(live(k), stroke(D, From.TOP_EDGE), live(k).copy(shade = true), Anim.SHADE_IN)
             check(live(k), Input.Tap, live(k), does = Does.TAP)
             check(live(k), Input.DoubleTap, live(k), does = Does.DIM)
-            check(live(k), Input.Hold, live(k), does = Does.NEXT_FACE)
+            // A hold on a live page is nothing (it was "the next face", which with one face did nothing anyway).
+            check(live(k), Input.Hold, live(k))
             check(live(k), Input.DoubleTapHold, live(k), does = Does.BACK_OFF)
         }
     }
@@ -243,6 +395,27 @@ class RearNavTest {
         }
     }
 
+    @Test fun `the pull with nothing waiting is the shade's own state, and gives back what was under it`() {
+        for (under in listOf(moon, live(Live.TIMER), live(Live.MUSIC), usage(Live.TIMER), usage(), moon.copy(notes = true), away(Live.TIMER), live(Live.CHARGE))) {
+            val rim = under.copy(shade = true)
+            check(under, stroke(D, From.TOP_EDGE), rim, Anim.SHADE_IN)
+            for (from in From.values()) for (way in Way.values()) check(rim, stroke(way, from), rim, does = Does.SHADE_OWN)
+            for (i in listOf(Input.Tap, Input.DoubleTap, Input.Hold)) assertEquals(Does.SHADE_OWN, RearNav.next(rim, i).does)
+            check(rim, Input.ShadeShut, under, Anim.SHADE_OUT)
+            assertEquals(under, under.go(stroke(D, From.TOP_EDGE), Input.ShadeShut))
+            // Taken away at once.
+            assertFalse(RearNav.next(rim, Input.Dark).state.shade)
+            assertFalse(RearNav.next(rim, Input.OthersTake).state.shade)
+            assertEquals(Seen.LIVE, RearNav.seen(RearNav.next(rim, Input.LiveComes(Live.CALL, urgent = true)).state))
+        }
+        // A pop-up up as he pulls is gone with the pull; one that comes meanwhile lies over the light for its time.
+        check(moon.copy(pop = true), stroke(D, From.TOP_EDGE), moon.copy(shade = true), Anim.SHADE_IN)
+        check(moon.copy(shade = true), Input.PopArrives(), moon.copy(shade = true, pop = true), Anim.POP_IN)
+        // On a dark back or another's there is no pull: nothing plays.
+        check(State(), stroke(D, From.TOP_EDGE), State())
+        check(moon.copy(ours = false), stroke(D, From.TOP_EDGE), moon.copy(ours = false))
+    }
+
     @Test fun `a stroke is the same from the middle and from every edge - there is no Back gesture`() {
         for (s in reachable) for (way in Way.values()) for (from in From.values()) {
             if (from == From.TOP_EDGE && way == D) continue
@@ -256,8 +429,7 @@ class RearNavTest {
         for (s in reachable) for (way in Way.values()) for (from in From.values()) {
             val step = RearNav.next(s, stroke(way, from, sliding = true))
             if (from == From.TOP_EDGE && way == D && RearNav.seen(s) !in setOf(Seen.DARK, Seen.OTHERS, Seen.SHADE) && s.lit && s.ours) continue
-            // On a pop-up any stroke takes the pop-up away, and that is all it does.
-            if (s.pop && s.lit && s.ours && !s.shade) { assertEquals("$s $way $from", s.copy(pop = false), step.state); continue }
+            // A pop-up too: such a stroke was not meant for it, and it stays, its notification untouched.
             assertEquals("$s $way $from", s, step.state)
             assertEquals(Anim.NONE, step.anim)
         }
@@ -289,7 +461,7 @@ class RearNavTest {
         assertEquals(a, a.go(Input.Dark, Input.Lit))
         assertEquals(a, a.go(stroke(U), stroke(D)))
         assertEquals(a, a.go(stroke(D, From.TOP_EDGE), Input.ShadeShut))
-        assertEquals(a, a.go(Input.PopArrives, Input.PopEnds))
+        assertEquals(a, a.go(Input.PopArrives(), Input.PopEnds))
         assertEquals(a, a.go(Input.OthersTake, Input.OthersLeave))
         // Music starting under a timer he sent away is not on top: the moon stays.
         check(a, Input.LiveComes(Live.MUSIC), away(Live.TIMER, Live.MUSIC))
@@ -299,6 +471,54 @@ class RearNavTest {
         check(a, Input.LiveComes(Live.CALL, urgent = true), live(Live.TIMER, Live.CALL).copy(sent = bits(Live.TIMER)), Anim.LIVE_IN)
         // It ends: nothing is away any more.
         check(a, Input.LiveEnds(Live.TIMER), moon)
+    }
+
+    @Test fun `navigation sits below calls and above timer music and charging`() {
+        val lower = live(Live.CHARGE, Live.MUSIC, Live.TIMER)
+        val route = live(Live.CHARGE, Live.MUSIC, Live.TIMER, Live.NAVIGATION)
+        check(lower, Input.LiveComes(Live.NAVIGATION), route, Anim.LIVE_SWAP)
+        check(route, Input.LiveComes(Live.CALL, urgent = true), route.copy(lives = route.lives or bits(Live.CALL)), Anim.LIVE_SWAP)
+        check(route.copy(lives = route.lives or bits(Live.CALL)), Input.LiveEnds(Live.CALL), route, Anim.LIVE_SWAP)
+        check(route, Input.LiveEnds(Live.NAVIGATION), lower, Anim.LIVE_SWAP)
+        assertEquals(Live.NAVIGATION, route.live)
+        assertEquals(listOf(Live.CHARGE, Live.MUSIC, Live.TIMER, Live.NAVIGATION, Live.CALL), Live.values().toList())
+    }
+
+    @Test fun `navigation updates never bring back a sent away route and taps only brighten`() {
+        val sent = away(Live.NAVIGATION, Live.TIMER)
+        check(sent, Input.LiveUpdates(Live.NAVIGATION), sent)
+        check(sent, Input.LiveEnds(Live.NAVIGATION), away(Live.TIMER))
+        check(sent, stroke(L), live(Live.NAVIGATION, Live.TIMER), Anim.LIVE_IN)
+        val route = live(Live.NAVIGATION)
+        check(route, Input.Tap, route, does = Does.TAP)
+        check(usage(Live.NAVIGATION), stroke(R), route, Anim.USAGE_OUT)
+        check(route.copy(notes = true), stroke(D), route, Anim.NOTES_OUT)
+        check(route, Input.Dark, route.copy(lit = false), Anim.CUT)
+        check(route.copy(lit = false), Input.Lit, route, Anim.CUT)
+        check(route, Input.OthersTake, route.copy(ours = false), Anim.CUT)
+    }
+
+    @Test fun `a new navigation route stays under usage notes and the notification shade`() {
+        check(usage(), Input.LiveComes(Live.NAVIGATION), usage(Live.NAVIGATION))
+        check(moon.copy(notes = true), Input.LiveComes(Live.NAVIGATION), live(Live.NAVIGATION).copy(notes = true))
+        check(moon.copy(shade = true), Input.LiveComes(Live.NAVIGATION), live(Live.NAVIGATION).copy(shade = true))
+    }
+
+    @Test fun `on the route's page the row's strokes are as on any live page, and a double tap held is the back off`() {
+        val route = live(Live.NAVIGATION)
+        check(moon, Input.LiveComes(Live.NAVIGATION), route, Anim.LIVE_IN)
+        check(route, stroke(L), usage(Live.NAVIGATION), Anim.USAGE_IN)
+        check(route, stroke(R), away(Live.NAVIGATION), Anim.LIVE_OUT)
+        check(away(Live.NAVIGATION), stroke(L), route, Anim.LIVE_IN)
+        check(route, stroke(U), route.copy(notes = true), Anim.NOTES_IN)
+        check(route, stroke(D), route)
+        check(route, Input.DoubleTap, route, does = Does.DIM)
+        check(route, Input.DoubleTapHold, route, does = Does.BACK_OFF)
+        // Music he had sent away stays away under a route that ends.
+        val musicAway = away(Live.MUSIC)
+        val both = musicAway.go(Input.LiveComes(Live.NAVIGATION))
+        assertEquals(live(Live.MUSIC, Live.NAVIGATION).copy(sent = bits(Live.MUSIC)), both)
+        assertEquals(musicAway, both.go(Input.LiveEnds(Live.NAVIGATION)))
     }
 
     @Test fun `TIMER AND MUSIC - the timer is the live page, music has none until the timer ends`() {
@@ -345,23 +565,97 @@ class RearNavTest {
 
     @Test fun `a pop-up arrives on every page and leaves it as it was`() {
         for (s in listOf(moon, live(Live.TIMER), usage(Live.MUSIC), away(Live.CALL), moon.copy(notes = true), live(Live.CHARGE).copy(shade = true))) {
-            check(s, Input.PopArrives, s.copy(pop = true), Anim.POP_IN)
+            check(s, Input.PopArrives(), s.copy(pop = true), Anim.POP_IN)
             check(s.copy(pop = true), Input.PopEnds, s, Anim.POP_OUT)
             assertEquals(Seen.POP, RearNav.seen(s.copy(pop = true)))
         }
         // IT HAS THE WHOLE BACK (the review's 3 and 38): a stroke takes it away and does nothing to the page under it,
         // on the moon too (no Camera opened unseen); a tap presses no button under it.
+        // Up and down it is taken away; sideways it is thrown out (dismissed or snoozed, NoticeThrow): the page under is the same.
         for (way in Way.values()) {
-            check(live(Live.TIMER).copy(pop = true), stroke(way), live(Live.TIMER), Anim.POP_OUT)
-            check(moon.copy(pop = true), stroke(way), moon, Anim.POP_OUT)
-            check(usage(Live.CALL).copy(pop = true), stroke(way), usage(Live.CALL), Anim.POP_OUT)
+            val anim = when (way) { L -> Anim.POP_THROWN_LEFT; R -> Anim.POP_THROWN_RIGHT; else -> Anim.POP_OUT }
+            val does = if (way == L || way == R) thrownDoes(way) else Does.NOTHING
+            check(live(Live.TIMER).copy(pop = true), stroke(way), live(Live.TIMER), anim, does)
+            check(moon.copy(pop = true), stroke(way), moon, anim, does)
+            check(usage(Live.CALL).copy(pop = true), stroke(way), usage(Live.CALL), anim, does)
         }
         check(live(Live.CALL).copy(pop = true), Input.Tap, live(Live.CALL).copy(pop = true), does = Does.BRIGHT)
         check(live(Live.CALL).copy(pop = true), Input.Hold, live(Live.CALL).copy(pop = true))
         check(live(Live.CALL).copy(pop = true), Input.DoubleTapHold, live(Live.CALL).copy(pop = true))
         // Pulling the notifications down takes it away.
         check(moon.copy(pop = true), stroke(D, From.TOP_EDGE), moon.copy(shade = true), Anim.SHADE_IN)
-        check(State(), Input.PopArrives, State())
+        check(State(), Input.PopArrives(), State())
+    }
+
+
+    @Test fun `the way is one constant - right to left dismisses, left to right snoozes`() {
+        // The default asked of him (his to flip): the finger moving right to left, the page flying off to the left.
+        assertEquals(Way.LEFT, RearNav.DISMISS_WAY)
+        assertEquals(Does.DISMISS, RearNav.next(moon.copy(pop = true), stroke(L)).does)
+        assertEquals(Does.SNOOZE, RearNav.next(moon.copy(pop = true), stroke(R)).does)
+    }
+
+    @Test fun `a pop-up thrown sideways, from anywhere on the back, on every page - its notification dismissed or snoozed, the page under as it was`() {
+        var n = 0
+        for (s in reachable.filter { it.pop && !it.popFixed && it.lit && it.ours && !it.shade }) for (from in From.values()) for (way in listOf(L, R)) {
+            val step = RearNav.next(s, stroke(way, from))
+            assertEquals("$s $way $from", RearNav.Step(s.copy(pop = false), if (way == L) Anim.POP_THROWN_LEFT else Anim.POP_THROWN_RIGHT, thrownDoes(way)), step)
+            // Landed while a page still slid, or on its way before this pop-up came: not meant for it, nothing at all.
+            assertEquals("$s $way $from sliding", RearNav.Step(s), RearNav.next(s, stroke(way, from, sliding = true)))
+            assertEquals("$s $way $from not aimed", RearNav.Step(s), RearNav.next(s, stroke(way, from, aimed = false)))
+            n++
+        }
+        assertTrue("pop-ups that may be thrown are reached: $n", n > 100)
+    }
+
+    @Test fun `a stroke whose finger was on its way before the pop-up came does nothing to it - no dismiss, no snooze, nothing under it`() {
+        // The skeptic's timeline: his finger lands on the moon going right to left towards usage, a WhatsApp pop-up
+        // comes 100 ms later, he lifts 200 ms after that. Before: thrown out, dismissed on the phone, unseen.
+        val came = moon.go(Input.PopArrives())
+        check(came, stroke(L, aimed = false), came)
+        check(came, stroke(R, aimed = false), came)
+        var n = 0
+        // (Under the pulled-down pile its strokes are the pile's own: SHADE_OWN, as ever.)
+        for (s in reachable.filter { it.pop && !it.shade }) for (way in Way.values()) for (sliding in listOf(false, true)) {
+            val step = RearNav.next(s, stroke(way, sliding = sliding, aimed = false))
+            assertEquals("$s $way", RearNav.Step(s), step)
+            n++
+        }
+        assertTrue("pop-ups reached: $n", n > 100)
+        // With no pop-up up "aimed" means nothing: the stroke is what it always was.
+        for (s in reachable.filter { !it.pop }) for (way in Way.values()) for (from in From.values()) for (sliding in listOf(false, true)) {
+            assertEquals("$s $way $from", RearNav.next(s, stroke(way, from, sliding)), RearNav.next(s, stroke(way, from, sliding, aimed = false)))
+        }
+        // The pull from the top edge is the notifications' own as ever (the pop-up goes, nothing is thrown).
+        check(came, stroke(D, From.TOP_EDGE, aimed = false), moon.copy(shade = true), Anim.SHADE_IN)
+        // And the table has such strokes among its inputs (the whole table and every sequence of three walk them).
+        for (way in Way.values()) assertTrue(stroke(way, aimed = false) in RearNav.INPUTS)
+    }
+
+    @Test fun `a pop-up whose notification may not be thrown out gives and stays, and still goes up and down`() {
+        var n = 0
+        for (s in reachable.filter { it.pop && it.popFixed && it.lit && it.ours && !it.shade }) {
+            for (way in listOf(L, R)) assertEquals("$s $way", RearNav.Step(s, Anim.POP_GIVES), RearNav.next(s, stroke(way)))
+            assertEquals(RearNav.Step(s.copy(pop = false, popFixed = false), Anim.POP_OUT), RearNav.next(s, stroke(U)))
+            assertEquals(RearNav.Step(s.copy(pop = false, popFixed = false), Anim.POP_OUT), RearNav.next(s, stroke(D)))
+            assertEquals(s.copy(pop = false, popFixed = false), RearNav.next(s, Input.PopEnds).state)
+            n++
+        }
+        assertTrue("fixed pop-ups are reached: $n", n > 10)
+        // It comes as such, and the next pop-up over it says for itself.
+        check(moon, Input.PopArrives(fixed = true), moon.copy(pop = true, popFixed = true), Anim.POP_IN)
+        check(moon.copy(pop = true, popFixed = true), Input.PopArrives(), moon.copy(pop = true))
+        check(moon.copy(pop = true), Input.PopArrives(fixed = true), moon.copy(pop = true, popFixed = true))
+        // Dark, it is gone and says nothing any more.
+        check(moon.copy(pop = true, popFixed = true), Input.Dark, State(), Anim.CUT)
+        // The notifications pulled down over it: gone with it.
+        check(moon.copy(pop = true, popFixed = true), stroke(D, From.TOP_EDGE), moon.copy(shade = true), Anim.SHADE_IN)
+    }
+
+    @Test fun `on the pulled-down pile sideways is the pile's own, whichever way - it throws its page out itself`() {
+        for (s in reachable.filter { it.shade && it.lit && it.ours }) for (way in listOf(L, R)) for (from in From.values()) {
+            assertEquals("$s $way", RearNav.Step(s, does = Does.SHADE_OWN), RearNav.next(s, stroke(way, from)))
+        }
     }
 
     @Test fun `dark and lit again on every page - usage, the notes and the shade are gone, the row's page stays`() {
@@ -390,6 +684,96 @@ class RearNavTest {
         }
     }
 
+
+    private val picker = moon.copy(picker = true)
+
+    @Test fun `a hold on the face opens the picker, and only there`() {
+        check(moon, Input.Hold, picker, Anim.PICKER_IN)
+        assertEquals(Seen.PICKER, RearNav.seen(picker))
+        // On the face with a live page sent away: the face is what shows.
+        check(away(Live.TIMER), Input.Hold, away(Live.TIMER).copy(picker = true), Anim.PICKER_IN)
+        // Nowhere else.
+        for (s in listOf(live(Live.TIMER), live(Live.MUSIC), live(Live.CALL), live(Live.CHARGE), usage(), moon.copy(notes = true), moon.copy(pop = true))) check(s, Input.Hold, s)
+        check(moon.copy(shade = true), Input.Hold, moon.copy(shade = true), does = Does.SHADE_OWN)
+        check(State(), Input.Hold, State())
+        check(moon.copy(ours = false), Input.Hold, moon.copy(ours = false))
+    }
+
+    @Test fun `the picker takes every stroke and tap itself, from every edge, sliding or not`() {
+        for (sliding in listOf(false, true)) for (from in From.values()) for (way in Way.values()) check(picker, stroke(way, from, sliding), picker, does = Does.PICKER_OWN)
+        check(picker, Input.Tap, picker, does = Does.PICKER_OWN)
+        check(picker, Input.DoubleTap, picker)
+        check(picker, Input.Hold, picker)
+        check(picker, Input.DoubleTapHold, picker)
+    }
+
+    @Test fun `it shuts by itself, chosen or not, and the face is home again`() {
+        check(picker, Input.PickerShut(true), moon, Anim.PICKER_OUT)
+        check(picker, Input.PickerShut(false), moon, Anim.PICKER_OUT)
+        // Not up: nothing.
+        for (s in listOf(moon, live(Live.TIMER), usage(), moon.copy(notes = true))) for (c in listOf(true, false)) check(s, Input.PickerShut(c), s)
+    }
+
+    @Test fun `a shut that comes after a pop-up arrived still takes the picker down, and the face is touched again after it`() {
+        // The shell posts the shut; a pop-up's arrival is handled first. The shut must not be lost under it.
+        for (c in listOf(true, false)) check(picker.copy(pop = true), Input.PickerShut(c), moon.copy(pop = true), Anim.PICKER_OUT)
+        // The race as a sequence: picker, pop-up, the shut, the pop-up's end: the face, its hold opening the picker again.
+        var s = RearNav.next(picker, Input.PopArrives()).state
+        s = RearNav.next(s, Input.PickerShut(false)).state
+        s = RearNav.next(s, Input.PopEnds).state
+        assertEquals(moon, s)
+        assertEquals(Seen.MOON, RearNav.seen(s))
+        check(s, Input.Hold, picker, Anim.PICKER_IN)
+        // The fallback said by the shell when the exit has played out (onGone) is accepted under the pop-up too.
+        check(picker.copy(pop = true), Input.PickerShut(false), moon.copy(pop = true), Anim.PICKER_OUT)
+    }
+
+    @Test fun `what takes the back drops the picker at once`() {
+        check(picker, Input.Dark, State(), Anim.CUT)
+        check(picker, Input.OthersTake, moon.copy(ours = false), Anim.CUT)
+        check(picker, Input.NotePinned, moon.copy(notes = true), Anim.NOTES_IN)
+        // Something live on top: its page, urgent or not.
+        check(picker, Input.LiveComes(Live.TIMER), live(Live.TIMER), Anim.LIVE_IN)
+        check(picker, Input.LiveComes(Live.CALL, urgent = true), live(Live.CALL), Anim.LIVE_IN)
+        val a = away(Live.CALL).copy(picker = true)
+        check(a, Input.LiveComes(Live.MUSIC), away(Live.CALL, Live.MUSIC).copy(picker = true))
+        check(a, Input.LiveUpdates(Live.CALL), a)
+        check(a, Input.LiveEnds(Live.CALL), picker)
+        // Data only: it stays.
+        for (i in listOf(Input.Lit, Input.OthersLeave, Input.UsageAlone, Input.NotesAlone, Input.ShadeShut, Input.PinsAre(2), Input.PinRemoved(0))) assertTrue("$i", RearNav.next(picker, i).state.picker)
+    }
+
+    @Test fun `a pop-up over the picker, and the picker again under it`() {
+        check(picker, Input.PopArrives(), picker.copy(pop = true), Anim.POP_IN)
+        assertEquals(Seen.POP, RearNav.seen(picker.copy(pop = true)))
+        // A stroke on it is the pop-up's as on any page: up and down (from the top edge too) take it away, sideways
+        // throw it out (dismissed one way, snoozed the other), one that may not be thrown gives; the picker is under it.
+        for (from in From.values()) {
+            check(picker.copy(pop = true), stroke(Way.UP, from), picker, Anim.POP_OUT)
+            check(picker.copy(pop = true), stroke(Way.DOWN, from), picker, Anim.POP_OUT)
+            check(picker.copy(pop = true), stroke(Way.LEFT, from), picker, Anim.POP_THROWN_LEFT,
+                if (RearNav.DISMISS_WAY == Way.LEFT) Does.DISMISS else Does.SNOOZE)
+            check(picker.copy(pop = true), stroke(Way.RIGHT, from), picker, Anim.POP_THROWN_RIGHT,
+                if (RearNav.DISMISS_WAY == Way.RIGHT) Does.DISMISS else Does.SNOOZE)
+            for (way in listOf(Way.LEFT, Way.RIGHT)) check(picker.copy(pop = true, popFixed = true), stroke(way, from), picker.copy(pop = true, popFixed = true), Anim.POP_GIVES)
+        }
+        // A stroke not meant for it (on its way before it came, or while a page slid) does nothing, to it or the picker.
+        for (way in Way.values()) {
+            check(picker.copy(pop = true), Input.Stroke(way, aimed = false), picker.copy(pop = true))
+            check(picker.copy(pop = true), stroke(way, From.MIDDLE, true), picker.copy(pop = true))
+        }
+        check(picker.copy(pop = true), Input.PopEnds, picker, Anim.POP_OUT)
+        check(picker.copy(pop = true), Input.Tap, picker.copy(pop = true), does = Does.BRIGHT)
+        check(picker.copy(pop = true), Input.Dark, State(), Anim.CUT)
+    }
+
+    @Test fun `the picker is reached, and nothing but the face carries it`() {
+        assertTrue(reachable.any { it.picker })
+        assertTrue(reachable.any { it.picker && it.pop })
+        assertTrue(reachable.any { it.picker && it.lives != 0 })
+        for (s in reachable.filter { it.picker }) assertTrue("$s", s.lit && s.ours && s.row == Row.HOME && !s.notes && !s.shade && RearNav.seen(s) in setOf(Seen.PICKER, Seen.POP))
+    }
+
     // -- the whole table: every state, every input, every sequence of three --------------------------------------------
 
     private fun holds(s: State): String? = when {
@@ -398,13 +782,17 @@ class RearNavTest {
         s.row == Row.HOME && s.liveShown -> "the moon while a live page is in the row and not sent away"
         s.row == Row.USAGE && s.notes -> "usage under the notes"
         !s.lit && (s.notes || s.shade || s.pop || s.row == Row.USAGE) -> "something up on a dark back"
+        s.popFixed && !s.pop -> "a pop-up's own say with no pop-up"
         !s.ours && (s.notes || s.shade || s.row == Row.USAGE) -> "a page of ours on another's back"
+        s.picker && !(s.lit && s.ours && s.row == Row.HOME && !s.notes && !s.shade && s.arrivals == 0) -> "the picker off the face"
+        s.arrange && !(s.notes && s.pins >= 2 && s.lit && s.ours && !s.pop && !s.shade && !s.arrivalUp) -> "arranging off the notes page, or with nothing to put in order"
         else -> null
     }
 
     @Test fun `every state x every input gives one sound state, and nothing ever needs mending`() {
         // 1188 before the notes had a count and a place among them (none, one, two, three pinned; the first, second or third shown): 5724 with.
-        assertTrue("states: ${reachable.size}", reachable.size in 100..20_000)
+        // About 59 500 with navigation, a fifth kind of live thing (live or not, sent away or not, for each kind).
+        assertTrue("states: ${reachable.size}", reachable.size in 100..120_000)
         var n = 0
         for (s in reachable) {
             assertEquals("$s", null, holds(s))
@@ -416,8 +804,16 @@ class RearNavTest {
                 // Nothing changed, nothing moves: but for the notes page's give at its first and last note, which is
                 // exactly that (a sideways stroke on the notes with no note that way).
                 val give = raw.anim == Anim.NOTE_END_OLDER || raw.anim == Anim.NOTE_END_NEWER
-                if (raw.state == s && !give) assertEquals("$s + $i", Anim.NONE, raw.anim)
+                // The same give on a standing arrival (place/Arrivals) at its first and last note.
+                val arrivalGive = raw.anim == Anim.ARRIVAL_END_OLDER || raw.anim == Anim.ARRIVAL_END_NEWER
+                // And a pop-up whose notification may not be thrown out, giving under a sideways stroke.
+                val popGives = raw.anim == Anim.POP_GIVES
+                if (raw.state == s && !give && !arrivalGive && !popGives) assertEquals("$s + $i", Anim.NONE, raw.anim)
                 if (give) assertTrue("$s + $i: a give is only a sideways stroke on the notes, and changes nothing", raw.state == s && s.notes && i is Input.Stroke && (i.way == Way.LEFT || i.way == Way.RIGHT))
+                if (arrivalGive) assertTrue("$s + $i: an arrival's give is only a sideways stroke on it, and changes nothing", raw.state == s && RearNav.seen(s) == Seen.ARRIVAL && i is Input.Stroke && (i.way == Way.LEFT || i.way == Way.RIGHT))
+                if (popGives) assertTrue("$s + $i: a pop-up gives only for a sideways stroke, when it may not be thrown, and nothing changes", raw.state == s && s.pop && s.popFixed && i is Input.Stroke && (i.way == Way.LEFT || i.way == Way.RIGHT) && raw.does == Does.NOTHING)
+                // Its notification is dismissed or snoozed only by a sideways stroke on a pop-up that may be thrown, which takes it away.
+                if (raw.does == Does.DISMISS || raw.does == Does.SNOOZE) assertTrue("$s + $i: thrown out", s.pop && !s.popFixed && !raw.state.pop && i is Input.Stroke && i.aimed && !i.sliding && raw.does == thrownDoes(i.way))
                 n++
             }
         }
@@ -436,7 +832,8 @@ class RearNavTest {
         // The live page never appears out of the moon but for something new or his own stroke to it.
         if (sa == Seen.MOON && sb == Seen.LIVE && !(i is Input.LiveComes || (i is Input.Stroke && i.way == Way.LEFT && !i.sliding))) return "the live page popped up"
         // A thing that leaves uncovers what was under it, in its place: the live page is never slid in then.
-        if (anim == Anim.LIVE_IN && !(sa == Seen.MOON || sa == Seen.POP)) return "the live page slid in from under something"
+        // (A call comes over a standing arrival: it slides in over it, the one live page that may; and over the picker.)
+        if (anim == Anim.LIVE_IN && !(sa == Seen.MOON || sa == Seen.POP || sa == Seen.PICKER || sa == Seen.ARRIVAL && b.live == Live.CALL)) return "the live page slid in from under something"
         // Under a pop-up no stroke moves the row and no tap or hold reaches the page.
         if (a.pop && i is Input.Stroke && a.lit && a.ours && !a.shade && !(i.from == From.TOP_EDGE && i.way == Way.DOWN) && (b.row != a.row || b.notes != a.notes || b.sent != a.sent)) return "a stroke moved the page under a pop-up"
         if (i is Input.Stroke) {
@@ -449,7 +846,18 @@ class RearNavTest {
             if (i.way == Way.LEFT && rowAt(b) < rowAt(a)) return "a stroke to the left went left along the row"
             if (b.lives != a.lives) return "a stroke changed what is live"
         }
+        // The one exception: a hold on the face opens the picker, and nothing else changes with it.
+        if (i == Input.Hold && sa == Seen.MOON && b == a.copy(picker = true)) return null
         if ((i == Input.Tap || i == Input.DoubleTap || i == Input.Hold || i == Input.DoubleTapHold || i is Input.LiveUpdates) && b != a) return "it changed the page"
+        // The picker is only ever on the face, and only its own end or something that takes the back shuts it.
+        if (b.picker && !(b.lit && b.ours && b.row == Row.HOME && !b.notes && !b.shade && b.arrivals == 0)) return "the picker somewhere else than on the face"
+        if (a.picker && !b.picker && !(i is Input.PickerShut || i == Input.Dark || i == Input.OthersTake || i is Input.LiveComes || i == Input.NotePinned || i is Input.ArrivalsAre)) return "the picker shut by $i"
+        // Putting the notes in order is the notes page's own: it changes the note held and nothing else.
+        if (i == Input.NoteHold || i == Input.ArrangeDone || i is Input.NoteCarried || i is Input.NoteSwapped) {
+            if (sb != sa) return "arranging changed which page shows"
+            if (b.copy(pin = a.pin, arrange = a.arrange) != a) return "arranging changed more than the note held"
+        }
+        if (b.arrange && !a.arrange && i != Input.NoteHold) return "arranging began by itself"
         return null
     }
 
@@ -477,7 +885,8 @@ class RearNavTest {
                     // A STROKE OUT AND THE STROKE BACK: from a live page, left then right is that live page again, whatever came first.
                     if (b == left && c == right) {
                         val s1 = reachable[k1]
-                        if (RearNav.seen(s1) == Seen.LIVE && k3 != k1) error("${reachable[k]} + ${inputs[a]}, then left and right from the live page, is ${reachable[k3]}")
+                        // (Not over a standing arrival under a call: there the stroke left is nothing, RearNavArrivalTest.)
+                        if (RearNav.seen(s1) == Seen.LIVE && s1.arrivals == 0 && k3 != k1) error("${reachable[k]} + ${inputs[a]}, then left and right from the live page, is ${reachable[k3]}")
                     }
                 }
             }

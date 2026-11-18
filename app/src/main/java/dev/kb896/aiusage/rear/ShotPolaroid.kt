@@ -1,11 +1,14 @@
 package dev.kb896.aiusage.rear
 
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.PorterDuff
 import android.graphics.RectF
+import android.graphics.Shader
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceControl
@@ -195,6 +198,7 @@ class ShotPolaroid(
             surface?.release()
             ShellLayer.remove(layer)
             ShellLayer.remove(blocker)
+            if (shaderOf === shot) { shader = null; shaderOf = null }
             shot.recycle()
         }
     }
@@ -205,9 +209,24 @@ class ShotPolaroid(
     private val flash = Paint().apply { color = Color.WHITE }
     private val box = RectF()
     private val pic = RectF()
+    private val shotRect = RectF()
+    private val toPic = Matrix()
+    private var shader: BitmapShader? = null
+    private var shaderOf: Bitmap? = null
 
-    /** The picture at [t] ms in; [binned] how far it has fallen away since the bin was tapped (0 to 1). */
-    private fun frame(c: android.graphics.Canvas, shot: Bitmap, t: Long, binned: Float) {
+    internal class Card(
+        val cx: Float, val cy: Float, val angle: Float, val alpha: Float, val shrink: Float,
+        val picW: Float, val picH: Float, val side: Float, val bottom: Float,
+    ) {
+        val cardW get() = picW + 2 * side
+        val cardH get() = picH + side + bottom
+        /** The display's corner at the picture's size (PageCorners.radius). */
+        var photoR = 0f; internal set
+        /** The paper's corner: the picture's, plus the paper's width round it. */
+        val paperR get() = photoR + side
+    }
+
+    internal fun cardAt(t: Long, binned: Float): Card {
         // Shrinking into the polaroid as it flows up to the top right, eased out; waiting; then away
         // up and right, fading — or, binned, shrinking to nothing where it is.
         val shrink = ease(((t - SHRINK_AT) / SHRINK_MS.toFloat()).coerceIn(0f, 1f))
@@ -234,23 +253,46 @@ class ShotPolaroid(
         val cy = h / 2f + (restCy - h / 2f) * shrink - away * cardH
         val angle = TILT * shrink + TILT_LEAVE * away
         val alpha = (1f - maxOf(leave, gone, swipe)).coerceIn(0f, 1f)
-        val cardW = picW + 2 * side
-        val cardH = picH + side + bottom
+        return Card(cx, cy, angle, alpha, shrink, picW, picH, side, bottom).apply { photoR = PageCorners.radius(rear, picW) }
+    }
+
+    /**
+     * The picture at [t] ms in; [binned] how far it has fallen away since the bin was tapped (0 to 1). [cardOnly]: the
+     * card alone, no shadow, bin or flash (a test looks at its corners).
+     */
+    internal fun frame(c: android.graphics.Canvas, shot: Bitmap, t: Long, binned: Float, cardOnly: Boolean = false) {
+        val k = cardAt(t, binned)
+        val leave = if (binned > 0f || swipedAt != 0L) 0f else easeIn(((t - leaveAt) / LEAVE_MS.toFloat()).coerceIn(0f, 1f))
+        val swiped = swipedAt
+        val swipe = if (swiped == 0L) 0f else easeIn(((android.os.SystemClock.uptimeMillis() - swiped) / SWIPE_MS.toFloat()).coerceIn(0f, 1f))
+        val shrink = k.shrink
+        val alpha = k.alpha
         c.save()
-        c.rotate(angle, cx, cy)
-        box.set(cx - cardW / 2, cy - cardH / 2, cx + cardW / 2, cy + cardH / 2)
+        c.rotate(k.angle, k.cx, k.cy)
+        box.set(k.cx - k.cardW / 2, k.cy - k.cardH / 2, k.cx + k.cardW / 2, k.cy + k.cardH / 2)
         if (shrink > 0f) {
-            // A soft shadow under it, a little down and right, and the paper.
-            shade.alpha = (0x66 * shrink * alpha).toInt()
-            val off = 6f * rear.fitX * shrink
-            c.drawRoundRect(box.left + off, box.top + off * 1.5f, box.right + off, box.bottom + off * 1.5f, 6f, 6f, shade)
+            // A soft shadow under it, a little down and right, and the paper: both with the card's corners.
+            if (!cardOnly) {
+                shade.alpha = (0x66 * shrink * alpha).toInt()
+                val off = 6f * rear.fitX * shrink
+                c.drawRoundRect(box.left + off, box.top + off * 1.5f, box.right + off, box.bottom + off * 1.5f, k.paperR, k.paperR, shade)
+            }
             paper.alpha = (255 * shrink * alpha).toInt()
-            c.drawRoundRect(box, 6f * shrink, 6f * shrink, paper)
+            c.drawRoundRect(box, k.paperR, k.paperR, paper)
         }
-        pic.set(box.left + side, box.top + side, box.left + side + picW, box.top + side + picH)
-        photo.alpha = (255 * alpha).toInt()
-        if (picW > 1f) c.drawBitmap(shot, null, pic, photo)
+        pic.set(box.left + k.side, box.top + k.side, box.left + k.side + k.picW, box.top + k.side + k.picH)
+        if (k.picW > 1f) {
+            // The picture cut to the display's corners at its size (a shader on a rounded rectangle: its edge smooth).
+            val sh = shader?.takeIf { shaderOf === shot } ?: BitmapShader(shot, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).also { shader = it; shaderOf = shot }
+            shotRect.set(0f, 0f, shot.width.toFloat(), shot.height.toFloat())
+            toPic.setRectToRect(shotRect, pic, Matrix.ScaleToFit.FILL)
+            sh.setLocalMatrix(toPic)
+            photo.shader = sh
+            photo.alpha = (255 * alpha).toInt()
+            c.drawRoundRect(pic, k.photoR, k.photoR, photo)
+        }
         c.restore()
+        if (cardOnly) return
         // The bin under it while it rests: in as it arrives, out as it leaves or is binned.
         val binIn = ((t - REST_AT + BIN_FADE_MS) / BIN_FADE_MS.toFloat()).coerceIn(0f, 1f)
         val binAlpha = binIn * (1f - maxOf(leave * 2f, binned * 2f, swipe * 2f)).coerceIn(0f, 1f)

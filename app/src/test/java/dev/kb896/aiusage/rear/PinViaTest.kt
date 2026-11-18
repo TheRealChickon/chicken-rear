@@ -115,7 +115,6 @@ class PinViaTest {
     }
 
     @Test fun `Xiaomi says its stages and its arrival in the log - and the back goes by what it says`() {
-        // As the phone's log had them (brief format).
         fun line(what: String) = "W/SubScreenCenter_PinAnimationSurfaceView( 9970): [PinAnimationThread] - $what"
         fun rear(what: String) = "W/SubScreenCenter_SmartAssistantPanel( 9970): [main] - $what"
         assertEquals(PinVia.Heard.STAGE0, PinVia.heard(line("start animation 0")))
@@ -131,13 +130,9 @@ class PinViaTest {
             assertNull(other, PinVia.heard(rear(other)))
         assertNull(PinVia.heard("W/SubScreenCenter_PinAnimationSurfaceView( 9970): [main] - surfaceDestroyed"))
         assertNull(PinVia.heard("I/ActivityTaskManager( 3832): START u0 {act=android.intent.action.SEND cmp=com.xiaomi.subscreencenter/.pin.PinReceiveActivity} start animation 1"))
-        // One pin: handed over 24.461; stages at 24.604, 24.805, 26.107; finished 26.658. Whichever is heard, the
-        // same count.
         val zeros = listOf(PinVia.Heard.STAGE0 to 24_604L, PinVia.Heard.STAGE1 to 24_805L, PinVia.Heard.STAGE2 to 26_107L, PinVia.Heard.FINISHED to 26_658L).map { PinVia.zero(it.first, it.second) }
         assertTrue("within 5 ms of each other: $zeros", zeros.max() - zeros.min() <= 5)
         assertEquals(26_654L, zeros[0] + PinVia.FRONT_GONE_MS)
-        // The pin recorded with its log beside it: stage 1 at 42.114, finished 43.964, enter 44.162; on the
-        // recording its own face blurred until about 44.35, the glass was strongest at 44.62, its note sharp from 44.66.
         val zero = PinVia.zero(PinVia.Heard.STAGE1, 42_114L)
         val enter = 44_162L - zero
         assertTrue("ours is aside before it begins", PinVia.SWITCH_AT < enter)
@@ -154,9 +149,9 @@ class PinViaTest {
           "androidAppfunctionsReturnValue": [ {
               "success": [ true ], "summary": [ "Listed 3 sticky note(s)" ], "total_count": [ 3 ], "max_count": [ 9 ],
               "items": [
-                { "text": [ "his own note" ], "type": [ "text" ], "content_preview": [ "his own note" ], "card_id": [ "-685270475" ] },
-                { "text": [ "Buy milk" ], "type": [ "text" ], "content_preview": [ "Buy milk" ], "card_id": [ "-600387217" ] },
-                { "text": [ "Buy milk" ], "type": [ "text" ], "content_preview": [ "Buy milk" ], "card_id": [ "-600000000" ] }
+                { "text": [ "Sample note" ], "type": [ "text" ], "content_preview": [ "Sample note" ], "card_id": [ "-910000000" ] },
+                { "text": [ "Water the plant" ], "type": [ "text" ], "content_preview": [ "Water the plant" ], "card_id": [ "-900387217" ] },
+                { "text": [ "Water the plant" ], "type": [ "text" ], "content_preview": [ "Water the plant" ], "card_id": [ "-900000000" ] }
               ],
               "remaining": [ 6 ]
           } ]
@@ -165,7 +160,7 @@ class PinViaTest {
 
     @Test fun `Xiaomi's own list is read as its function prints it`() {
         val (notes, remaining) = PinVia.notes("some line before\n$listing")!!
-        assertEquals(listOf(PinVia.Note("-685270475", "his own note"), PinVia.Note("-600387217", "Buy milk"), PinVia.Note("-600000000", "Buy milk")), notes)
+        assertEquals(listOf(PinVia.Note("-910000000", "Sample note", "text"), PinVia.Note("-900387217", "Water the plant", "text"), PinVia.Note("-900000000", "Water the plant", "text")), notes)
         assertEquals(6, remaining)
         assertEquals(emptyList<PinVia.Note>() to 9, PinVia.notes("""{"androidAppfunctionsReturnValue":[{"success":[true],"total_count":[0],"max_count":[9],"remaining":[9]}]}"""))
         assertNull(PinVia.notes("Error: no such function")); assertNull(PinVia.notes(""))
@@ -173,26 +168,31 @@ class PinViaTest {
 
     @Test fun `only what this pin added is taken out of Xiaomi's list again - never a note he pinned there, even with the same words`() {
         val after = PinVia.notes(listing)!!.first
-        // Xiaomi's ids are the clock's milliseconds cut to 32 bits. This pin of "Buy milk" began 171 ms before the third
-        // note was made; the second "Buy milk" (6 min 27 s older) is his own, and so is "his own note".
-        val began = (-600000000 - 171).toLong()
-        assertEquals(listOf("-600000000"), PinVia.tidy(began, after, "Buy milk"))
+        // Begin the synthetic pin 171 ms before its card appears.
+        val began = (-900000000 - 171).toLong()
+        assertEquals(listOf("-900000000"), PinVia.tidy(began, after, "Water the plant"))
         // The same with the clock's whole value (only its low 32 bits count), and across the 32 bits' turn-over.
-        assertEquals(listOf("-600000000"), PinVia.tidy((1L shl 40) + ((-600000000 - 171).toLong() and 0xFFFFFFFFL), after, "Buy milk"))
+        assertEquals(listOf("-900000000"), PinVia.tidy((1L shl 40) + ((-900000000 - 171).toLong() and 0xFFFFFFFFL), after, "Water the plant"))
         assertEquals(listOf(Int.MIN_VALUE.toString()), PinVia.tidy(Int.MAX_VALUE.toLong() - 99, listOf(PinVia.Note(Int.MIN_VALUE.toString(), "x")), "x"))
         // Not our words (he pinned by Xiaomi's own share target at that moment): it stays.
-        assertEquals(emptyList<String>(), PinVia.tidy(began, after, "Call the bank"))
+        assertEquals(emptyList<String>(), PinVia.tidy(began, after, "Close the window"))
         // Our words, but made at another time: his own, they stay.
-        assertEquals(emptyList<String>(), PinVia.tidy(began - 60_000, after, "Buy milk"))
-        assertEquals(emptyList<String>(), PinVia.tidy(began + 60_000, after, "Buy milk"))
-        assertEquals(emptyList<String>(), PinVia.tidy(-600000000L + PinVia.BORN_BEFORE_MS + 1, after, "Buy milk"))
-        assertEquals(emptyList<String>(), PinVia.tidy(-600000000L - PinVia.BORN_AFTER_MS - 1, after, "Buy milk"))
+        assertEquals(emptyList<String>(), PinVia.tidy(began - 60_000, after, "Water the plant"))
+        assertEquals(emptyList<String>(), PinVia.tidy(began + 60_000, after, "Water the plant"))
+        assertEquals(emptyList<String>(), PinVia.tidy(-900000000L + PinVia.BORN_BEFORE_MS + 1, after, "Water the plant"))
+        assertEquals(emptyList<String>(), PinVia.tidy(-900000000L - PinVia.BORN_AFTER_MS - 1, after, "Water the plant"))
         // Spaces around the words do not matter; an id that is no number is never ours.
-        assertEquals(listOf("-600000000"), PinVia.tidy(began, after, "  Buy milk "))
-        assertEquals(emptyList<String>(), PinVia.tidy(began, listOf(PinVia.Note("abc", "Buy milk")), "Buy milk"))
-        assertTrue(PinVia.delete("-600000000").contains("\"card_id\":\"-600000000\"") && PinVia.delete("-600000000").contains("\"confirmed\":true"))
+        assertEquals(listOf("-900000000"), PinVia.tidy(began, after, "  Water the plant "))
+        assertEquals(emptyList<String>(), PinVia.tidy(began, listOf(PinVia.Note("abc", "Water the plant")), "Water the plant"))
+        assertTrue(PinVia.delete("-900000000").contains("\"card_id\":\"-900000000\"") && PinVia.delete("-900000000").contains("\"confirmed\":true"))
         val odd = PinVia.delete("1'; rm -rf /; '")
         assertFalse("nothing but an id gets into the command", odd.contains("rm -rf") || odd.contains(";") || odd.contains("card_id\":\"1'"))
         assertTrue(odd.contains("\"card_id\":\"1-\""))
+    }
+
+    @Test fun `through Xiaomi's own only on the version its times were measured on`() {
+        assertTrue(PinVia.timedFor(426091419L))
+        assertFalse(PinVia.timedFor(426091420L))
+        assertFalse("not known", PinVia.timedFor(null))
     }
 }

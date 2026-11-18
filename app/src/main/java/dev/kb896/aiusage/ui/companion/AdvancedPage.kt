@@ -30,10 +30,25 @@ import kotlinx.coroutines.withContext
  * it off, which is Xiaomi's AOD's job; they live on in Replace mode.
  */
 object AdvancedPage {
+    /** "Faces left out" opened. */
+    private var facesOpen = false
 
     fun build(column: LinearLayout, host: CompanionHost) {
         val context = host.activity
         val config = host.config()
+
+        // HEALTH: what something the back leans on says is wrong, in a few words with what to do; nothing when all is
+        // well (service/Health, looked at by service/HealthCheck at start and after any change).
+        val problems = dev.kb896.aiusage.service.HealthCheck.now(context)
+        if (problems.isNotEmpty()) {
+            val health = CompanionUi.card(column)
+            SettingsRows.title(health, "Health")
+            for (p in problems) {
+                val go = dev.kb896.aiusage.service.HealthCheck.intentFor(context, p.action)
+                if (go != null) SettingsRows.navigation(health, "${p.what} ${p.todo}") { open(host, go) }
+                else SettingsRows.note(health, "${p.what} ${p.todo}")
+            }
+        }
 
         val xiaomi = CompanionUi.card(column)
         SettingsRows.title(xiaomi, "These act on Xiaomi's screen")
@@ -52,6 +67,12 @@ object AdvancedPage {
         SettingsRows.toggle(ours, "Not while lying on its back", config.offOnBack) { on -> host.write { it.copy(offOnBack = on) } }
         SettingsRows.note(ours, "Chicken Rear never wakes the back in a pocket, or after you double tap it off.")
 
+        // The phone's own search (the home screen's Search pill) off the internet: no web suggestions, no app-store
+        // ads; applied again by the shell after every restart (rear/SearchOffline).
+        val search = CompanionUi.card(column)
+        SettingsRows.toggle(search, "Keep the system search offline", config.searchOffline) { on -> host.write { it.copy(searchOffline = on) } }
+        SettingsRows.note(search, "No web suggestions or ads in the phone's search, after every restart too. Apps and settings are still found.")
+
         val keep = CompanionUi.card(column)
         SettingsRows.title(keep, "Keep it running")
         SettingsRows.note(keep, "Advice only: nothing waits on these. Without them HyperOS may stop the app in the background.")
@@ -66,6 +87,14 @@ object AdvancedPage {
             Privacy.disclose(context, Privacy.Access.AUTOSTART, next = "Next: HyperOS's Autostart list. Turn it on for this app.") {
                 open(host, Intent().setClassName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"))
             }
+        }
+
+        // WHY A THEME IS NOT AMONG THE FACES (the faces the picker leaves out, each with its one reason): collapsed.
+        val out = dev.kb896.aiusage.data.FacesStore.read(context).filter { !it.offered }
+        if (out.isNotEmpty()) {
+            val faces = CompanionUi.card(column)
+            SettingsRows.navigation(faces, "Faces left out (${out.size})") { facesOpen = !facesOpen; host.rebuild() }
+            if (facesOpen) for (f in out) SettingsRows.note(faces, "${f.title}: ${f.reason}")
         }
 
         val help = CompanionUi.card(column)

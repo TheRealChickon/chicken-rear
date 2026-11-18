@@ -33,7 +33,9 @@ package dev.kb896.aiusage.rear
  *  Not heard by [ENTER_LATEST]: ours comes back under the black and the black lifts on OUR notes page. Xiaomi's own
  *  page is never shown standing.
  * Afterwards Xiaomi's own copy of the note is taken out of ITS list again, through its own function ([TIDY_AT]),
- * so that list stays as it was and never fills (it holds nine, and refuses a pin when full).
+ * so that list stays as he had it and never fills (it holds nine, and refuses a pin when full): a note of words by its
+ * words and its time ([tidy]), a PICTURE by its kind and its time ([tidyPicture]; it is handed to Xiaomi as a content
+ * address of ours, data/PinImageFiles.uri, which Xiaomi's package alone is let read).
  *
  * Pure: time in, what the back's top layer is and whether ours has stepped aside under it.
  */
@@ -68,6 +70,9 @@ object PinVia {
      * not where a debug build asks for our own. (Whether it CAN is found as it is tried: PinActivity falls back to ours.)
      */
     fun wanted(setting: Boolean, demo: Boolean, ownAsked: Boolean): Boolean = setting && !demo && !ownAsked
+
+    const val BUILT_ON = 426091419L
+    fun timedFor(versionCode: Long?): Boolean = versionCode == BUILT_ON
 
     /** Whether Xiaomi's pin has really begun is looked at here (heard, or its overlay window is there): if not, our own arrival plays. */
     const val CHECK_AT = 700L
@@ -132,8 +137,19 @@ object PinVia {
 
     private fun ease(t: Float): Float { val x = t.coerceIn(0f, 1f); return x * x * (3f - 2f * x) }
 
-    /** One of Xiaomi's own pinned notes, as its list function gives it. */
-    data class Note(val id: String, val text: String)
+    /**
+     * One of Xiaomi's own pinned notes, as its list function gives it: its card id, words, its kind ("text" for a note
+     * of words; another for a picture) and, for a picture, where Xiaomi has it.
+     */
+    data class Note(val id: String, val text: String, val type: String = "", val image: String = "") {
+        /** A picture's card: its kind says so, or (no kind given) it has a picture; never a card of words. */
+        val picture: Boolean get() {
+            val t = type.trim().lowercase()
+            if (t == "text") return false
+            return PICTURE_KINDS.any { t.contains(it) } || image.isNotBlank()
+        }
+    }
+    private val PICTURE_KINDS = listOf("image", "picture", "photo", "img", "pic")
 
     /**
      * Which of Xiaomi's notes to take out of its list after a pin of ours went through it: those MADE AS THIS PIN WAS
@@ -146,9 +162,28 @@ object PinVia {
      * back, and nothing was taken out.
      */
     fun tidy(startedWall: Long, after: List<Note>, text: String): List<String> =
-        after.filter { n -> n.text.trim() == text.trim() && n.id.toIntOrNull()?.let { (it - startedWall.toInt()) in -BORN_BEFORE_MS..BORN_AFTER_MS } == true }.map { it.id }
+        after.filter { n -> !n.picture && n.text.trim() == text.trim() && n.id.toIntOrNull()?.let { (it - startedWall.toInt()) in -BORN_BEFORE_MS..BORN_AFTER_MS } == true }.map { it.id }
     const val BORN_BEFORE_MS = 500
     const val BORN_AFTER_MS = 4_000
+
+    /**
+     * After a PICTURE went through Xiaomi's pin (handed over at [startedWall]): THE ONE picture card made as this pin
+     * was, known by its kind and its time, never by words (Xiaomi has no words of ours for a picture). Cards of words
+     * are never taken, nor a picture card made at any other time; of two in the window (he would have had to share
+     * one to Xiaomi's own pin in the same seconds) only the one nearest the moment Xiaomi usually makes it.
+     */
+    fun tidyPicture(startedWall: Long, after: List<Note>): List<String> {
+        fun born(n: Note): Int? = n.id.toIntOrNull()?.let { it - startedWall.toInt() }
+        return after.filter { n -> n.picture && born(n)?.let { it in -BORN_BEFORE_MS..BORN_AFTER_MS } == true }
+            .minByOrNull { kotlin.math.abs(born(it)!! - USUAL_BORN_MS) }?.let { listOf(it.id) }.orEmpty()
+    }
+    /** How long after our hand-over Xiaomi's card usually carries as its id (171 ms seen for words). */
+    const val USUAL_BORN_MS = 170
+
+    /** For the log: the kinds (and whether each has a picture's address) of the cards made in a pin's window; never their words. */
+    fun kindsNear(startedWall: Long, after: List<Note>): String =
+        after.filter { n -> n.id.toIntOrNull()?.let { (it - startedWall.toInt()) in -BORN_BEFORE_MS..BORN_AFTER_MS } == true }
+            .joinToString { "${it.type.ifBlank { "?" }.take(24)}${if (it.image.isNotBlank()) "+uri" else ""}" }.ifEmpty { "none" }
 
     /** Xiaomi's list as its function `getRearStickyNotes` prints it (each value in a one-element array): its notes, and how many more it takes. */
     fun notes(json: String): Pair<List<Note>, Int>? = runCatching {
@@ -161,7 +196,7 @@ object PinVia {
         val value = ((root as kotlinx.serialization.json.JsonObject)["androidAppfunctionsReturnValue"] as kotlinx.serialization.json.JsonArray).first() as kotlinx.serialization.json.JsonObject
         val items = (value["items"] as? kotlinx.serialization.json.JsonArray).orEmpty().mapNotNull { i ->
             val o = i as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
-            Note(one(o["card_id"]) ?: return@mapNotNull null, one(o["text"]).orEmpty())
+            Note(one(o["card_id"]) ?: return@mapNotNull null, one(o["text"]).orEmpty(), one(o["type"]).orEmpty(), one(o["image_uri"]).orEmpty())
         }
         items to (one(value["remaining"])?.toIntOrNull() ?: (9 - items.size))
     }.getOrNull()

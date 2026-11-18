@@ -13,7 +13,8 @@ import java.io.File
 class PrivacyTextTest {
 
     @Test fun `the notice names every host the app sends anything to`() {
-        for (host in listOf("api.anthropic.com", "claude.ai", "platform.claude.com", "auth.openai.com", "chatgpt.com", "Open-Meteo")) {
+        for (host in listOf("api.anthropic.com", "claude.ai", "platform.claude.com", "auth.openai.com", "chatgpt.com", "Open-Meteo",
+                "tiles.openfreemap.org", "photon.komoot.io")) {
             assertTrue("the notice names $host", Privacy.NOTICE.contains(host))
         }
     }
@@ -33,7 +34,7 @@ class PrivacyTextTest {
     }
 
     @Test fun `the notice is shown again to whoever read the old one`() {
-        assertTrue(Privacy.NOTICE_VERSION >= 2)
+        assertTrue(Privacy.NOTICE_VERSION >= 3)
     }
 
     @Test fun `the apk carries the licence texts`() {

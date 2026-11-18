@@ -29,4 +29,40 @@
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowIsTranslucent">true</item>
     </style>
+    <!--
+      The pinned picture on the front (ui/PinViewActivity): see-through, so the app it opens over is there while the
+      picture grows out of the back's place and the black comes up behind it, and again as it closes. No window animation
+      of the system's (it draws its own open and close), no bars' colour, drawn under the cutout.
+    -->
+    <style name="PinViewTheme" parent="@android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
+    </style>
+    <!--
+      Our camera page on the back (ui/camera/RearCameraActivity). OPAQUE AND BLACK, unlike RearTheme: the cover steps
+      away the moment the page is on top of the back, and a see-through window would show Xiaomi's launcher under it
+      until its first frame; an opaque one gets a black starting window at once. The system's empty splash (no icon:
+      the app's icon is never shown on the back) is black too. It does not show over the lock screen (no
+      showWhenLocked), so it is never the opaque candidate RearTheme's note warns of: it simply closes when the phone
+      locks. No window animation: the moon is back at once when it closes.
+    -->
+    <style name="RearCameraTheme" parent="@android:style/Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
+        <item name="android:windowSplashScreenBackground">@android:color/black</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/nothing</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
 </resources>

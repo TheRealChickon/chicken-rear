@@ -37,8 +37,37 @@ class PinRun(private val context: Context, private val tell: Runnable, private v
         PinChime.play(context, demo, soundAsked)
     }
 
+    // ---- THE DROP ON A FRAME (draft B: service/Droplet; the plain drawing keeps chime() above) ----
+    private var armed = false
+    @Volatile private var shot: dev.kb896.aiusage.service.Droplet.Shot? = null
+
+    /** As the pin's first frame is drawn: the sound decoded and a track of its own running silence, or nothing for a silent pin. */
+    @Synchronized fun armChime() {
+        if (armed || chimed) return
+        armed = true
+        shot = dev.kb896.aiusage.service.Droplet.arm(context, demo, soundAsked)
+    }
+
+    /** Its attack heard at [presentNanos] (System.nanoTime): the island's first frame on the glass. */
+    @Synchronized fun chimeAt(presentNanos: Long, how: String) {
+        if (chimed) return
+        if (!armed) { chime(); return }
+        chimed = true
+        shot?.at(presentNanos, how)
+    }
+
+    /** When the island's first frame really was on the glass, for the drop's own log line. */
+    fun islandShown(presentNanos: Long) { shot?.islandShown = presentNanos }
+
+    @Synchronized private fun chimeNow() {
+        if (chimed) return
+        if (!armed) { chime(); return }
+        chimed = true
+        shot?.now()
+    }
+
     /** The pin's screen is going: whatever was still to come, comes now. */
-    fun finish() { tellBack(); chime() }
+    fun finish() { tellBack(); chimeNow() }
 
     private companion object { const val TAG = "AiUsagePin" }
 }
@@ -57,6 +86,9 @@ class PinBeamView(
     private val blur: (Int) -> Unit,
     /** A touch ends it (the activity's window); false where touches go through to what is under (the overlay). */
     private val touchEnds: Boolean,
+    /** A picture's pin: the picture lifts off where the words would (PinBeamArt.sheetPicture), and is on the card's face. */
+    private val picture: Bitmap? = null,
+    private val image: String? = null,
     private val end: () -> Unit,
 ) : View(context) {
     private val art = PinBeamArt()
@@ -93,7 +125,7 @@ class PinBeamView(
             // The card's face is the back's own notes page with this note on it, as it will be there.
             face = runCatching {
                 Bitmap.createBitmap(976, 596, Bitmap.Config.ARGB_8888).also {
-                    PinFace.draw(Canvas(it), 976f, 596f, text, PinFace.stamp(System.currentTimeMillis(), System.currentTimeMillis()), 0, 1, false)
+                    PinFace.draw(Canvas(it), 976f, 596f, text, PinFace.stamp(System.currentTimeMillis(), System.currentTimeMillis()), 0, 1, false, image = image, picture = picture)
                 }
             }.getOrNull()
         }
@@ -128,7 +160,8 @@ class PinBeamView(
             val os = (o.width() / room).coerceIn(0.35f, 1.2f)
             x = ox + (x - ox) * k; y = oy + (y - oy) * k; scale = os + (scale - os) * k
         }
-        art.sheet(c, text, x, y, room, scale, f.noteAlpha, f.lift, unit)
+        if (picture != null && !picture.isRecycled) art.sheetPicture(c, picture, x, y, room, scale, f.noteAlpha, f.lift, unit)
+        else art.sheet(c, text, x, y, room, scale, f.noteAlpha, f.lift, unit)
         val cw = PinBeam.CARD_W * w * f.cardScale
         art.card(c, face, f.cardX * w, f.cardY * h, cw, cw / PinBeam.CARD_SHAPE, f.cardTurn, f.cardAlpha, f.face, f.glow, f.edge, 0.09f)
         if (t >= PinBeam.ARRIVE_AT - PinActivity.TELL_LEAD_MS) run.tellBack()

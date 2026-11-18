@@ -1,8 +1,7 @@
 package dev.kb896.aiusage.rear
 
 /**
- * A `logcat` that is followed line by line (the back's cover follows the system's event log, and
- * so does the camera's standby page), started so that it CANNOT OUTLIVE THE PROCESS THAT READS IT.
+ * A `logcat` followed line by line, started so that it cannot outlive the process that reads it.
  *
  * WHY: a bare `logcat` child does not end when its reader dies. Every restart
  * of the shell service (each update of the app kills it outright) left its logcat behind, an
@@ -17,13 +16,13 @@ package dev.kb896.aiusage.rear
  * ours ([stale]); anything else on the phone that runs logcat is not touched.
  */
 object LogWatch {
-    /** Follows the log for [filters] (as "tag:I") in [buffer]; its lines are on the returned process's output. */
+    /** Follows the log for [filters] (as "tag:I") in [buffer] (one, or several by commas: "system,events"); its lines are on the returned process's output. */
     fun start(buffer: String, vararg filters: String): Process =
         ProcessBuilder("sh", "-c", command(buffer, filters.toList())).redirectErrorStream(true).start()
 
     /** The shell line: logcat in the background, its end tied to this shell's, this shell's to its input's. */
     internal fun command(buffer: String, filters: List<String>): String {
-        require(buffer.all { it.isLetterOrDigit() } && filters.all { f -> f.all { it.isLetterOrDigit() || it == '_' || it == ':' } }) { "a tag or buffer name only" }
+        require(buffer.isNotEmpty() && buffer.all { it.isLetterOrDigit() || it == ',' } && filters.all { f -> f.all { it.isLetterOrDigit() || it == '_' || it == ':' } }) { "a tag or buffer name only" }
         val logcat = "logcat -b $buffer -T 1 -v brief ${filters.joinToString(" ")} '*:S'"
         return "$logcat & L=\$!; trap 'kill \$L 2>/dev/null' EXIT TERM HUP INT; while read _; do :; done; kill \$L 2>/dev/null"
     }
@@ -56,7 +55,12 @@ object LogWatch {
         return pids.size
     }
 
-    // Every watcher any build started: the event log's or all logs', new lines only, brief, a first
-    // tag of these four, more tags of the same kind, everything else silenced.
-    private val OURS = Regex("""logcat -b (all|events) -T 1 -v brief (ActivityTaskManager|input_focus|wm_set_resumed_activity|MiuiSubscreenDoubleTapGesture):I( [A-Za-z_]+:I)* \*:S""")
+    // Every watcher any build started: the event log's, the system and event logs', or all logs', new lines only,
+    // brief, a first tag of these four, more tags (at I or W: the pin's two of Xiaomi's are at W), everything else
+    // silenced; and the short one of a pin through Xiaomi's own, on the main log, whose first tag is Xiaomi's pin
+    // animation's (a main-log watcher of anything else is not ours).
+    private val OURS = Regex(
+        """logcat -b (all|events|system,events) -T 1 -v brief (ActivityTaskManager|input_focus|wm_set_resumed_activity|MiuiSubscreenDoubleTapGesture):I( [A-Za-z_]+:[IW])* \*:S""" +
+            """|logcat -b main -T 1 -v brief SubScreenCenter_PinAnimationSurfaceView:W( [A-Za-z_]+:[IW])* \*:S""",
+    )
 }

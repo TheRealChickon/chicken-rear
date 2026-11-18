@@ -134,13 +134,36 @@ data class RingLayout(
 
 /**
  * A note pinned to the back: its words, and when (wall clock, ms), which is also what names it.
- * With a place ([lat], [lng]) it is a reminder for there: coming back within PlaceNotes.RADIUS_M of
- * it puts the note on the back again and says so on the phone ([shownAt]: when it last did).
+ * With a place ([lat], [lng], [radius] m, [place] its name or none) it is a reminder for there ("Pin to location",
+ * dev.kb896.aiusage.place): reaching the zone puts it on the back as a page that stands ([arrivedAt], 0 while it
+ * waits) until he dismisses it. [watched]: the zone's fence is known to be set and the position may be read, so an
+ * arrival can be noticed; false, its mark is hollow ("Needs location"). [shownAt]: when it was last news otherwise.
+ * [here]: the phone is at its place now, by the app's own state of that place (dev.kb896.aiusage.place.Here; the
+ * app keeps it as it keeps [watched], and it crosses to the back with the notes): the back's notes page lists a note
+ * for a place only while it is set (Here.onBack). Never set on a plain note, which is always listed.
+ * [image]: a PICTURE pinned (a picture shared to "Pin to back" or "Pin to location"): its file's name in the app's
+ * external files folder, `pins/` (data/PinImage: the name only, never a path; the back reads the file itself), and
+ * [text] is then its caption, which may be empty. Null for a note of words, and for every note stored before.
  */
 @kotlinx.serialization.Serializable
-data class Pin(val text: String, val at: Long, val lat: Double? = null, val lng: Double? = null, val shownAt: Long = 0L) {
+data class Pin(
+    val text: String,
+    val at: Long,
+    val lat: Double? = null,
+    val lng: Double? = null,
+    val shownAt: Long = 0L,
+    val radius: Int? = null,
+    val place: String? = null,
+    val arrivedAt: Long = 0L,
+    val watched: Boolean = false,
+    val here: Boolean = false,
+    val image: String? = null,
+) {
     val placed: Boolean get() = lat != null && lng != null
-    /** When it last became news: pinned, or arrived at. */
+    /** A picture's note (its words, if any, are the caption). */
+    val pictured: Boolean get() = image != null
+    val zone: Int get() = radius ?: 150
+    /** When it last became news on the notes page (an arrival is not: it has a page of its own, [arrivedAt]). */
     val freshAt: Long get() = maxOf(at, shownAt)
 }
 
@@ -240,6 +263,14 @@ enum class PortalGrid(val rows: Int, val columns: Int) {
 @Serializable
 enum class RearMode { COMPANION, REPLACE }
 
+/**
+ * What three fingers held on the back do (PanelConfig.threeFingers). Stored by name: [SCREENSHOT] (the default) a
+ * screenshot of the back into DCIM/Screenshots; [RECORDING] the recording of the back started, or stopped if it runs
+ * (the control centre's own tile); [BACK_OFF] the back off as a double tap and hold puts it; [NOTHING].
+ */
+@Serializable
+enum class ThreeFingers { SCREENSHOT, RECORDING, BACK_OFF, NOTHING }
+
 /** How the clock over the scene is set. */
 @Serializable
 enum class SceneClockStyle { THIN, BOLD, STACKED }
@@ -255,6 +286,16 @@ enum class ChargeAnimStyle { LIQUID, RING, EDGE_GLOW, MINIMAL }
 /** The animation played as the back wakes (drawn in a later step: rear/WakeStyle). */
 @Serializable
 enum class WakeAnimStyle { EDGE_GLOW, LIQUID_SWEEP, BLUR_REVEAL, RIPPLE, NONE }
+
+/**
+ * How a message arriving shows on the back (the settings' Notifications section, "Message style"): [FULL] the whole back
+ * for a few seconds (rear/NoticePop, as before; the default); [TINT] and [SWEEP] the message island (rear/MessageIsland):
+ * a small pill drops in at the top with the app's icon, who it is from and a line of the message, Xiaomi's light round
+ * it, and grows into a page over the live face: [TINT] the face takes on the app's colour, [SWEEP] the face dimmed and
+ * one broad band of Xiaomi's light passing behind the words.
+ */
+@Serializable
+enum class MessageStyle { FULL, TINT, SWEEP }
 
 /** Where on the back a pull opens the pinned apps in companion mode (PortalPull). */
 @Serializable
@@ -939,7 +980,9 @@ data class PanelConfig(
 
     /**
      * The notes pinned to the back ("Pin to back" from any app's text: ui.PinActivity), newest
-     * first. Shown on the back's notes page (rear/PinFace), one swipe up from the scene.
+     * first. Shown on the back's notes page (rear/PinFace), one swipe up from the scene: every plain note, and a note
+     * for a place only while the phone is at that place ([Pin.here], dev.kb896.aiusage.place.Here.onBack). The
+     * settings' own list shows them all.
      */
     val pins: List<Pin> = emptyList(),
 
@@ -966,6 +1009,12 @@ data class PanelConfig(
      */
     @kotlinx.serialization.SerialName("sceneLoop5")
     val sceneLoop: String = "david-moon.loop.mp4",
+    val face: String = "moon",
+    /**
+     * Which choice [face] is: the phone's clock at the choice (FaceCatalog.nextSeq), on the back or in the settings; a
+     * payload with an older one than the shell's own is not followed (the shell keeps its copy in /data/local/tmp).
+     */
+    val faceSeq: Long = 0L,
     /**
      * The clock over the scene. OFF, under a new stored name so an older stored "on" is not read back. The switch
      * stays in the settings.
@@ -985,6 +1034,7 @@ data class PanelConfig(
      * fetched for the phone's own rough position (WeatherPoll), whatever the older weather settings say.
      */
     val sceneWeather: Boolean = true,
+    val dustMovesWithPhone: Boolean = true,
     val sceneClockStyle: SceneClockStyle = SceneClockStyle.STACKED,
     /** The day and date under the clock. */
     val sceneDate: Boolean = true,
@@ -996,12 +1046,10 @@ data class PanelConfig(
      */
     @kotlinx.serialization.SerialName("sceneBatteryOnFace")
     val sceneBattery: Boolean = false,
-    /**
-     * With the camera open on the front, Xiaomi's Camera puts a blank standby page of its own on
-     * the back (MainScreenSelfieActivity). On: that page is sent away so Xiaomi's rear screen is
-     * back; the swipe from the left still brings the camera's preview.
-     */
+    /** Retained for compatibility with builds that had a camera standby setting. */
     val cameraKeepRear: Boolean = true,
+    /** Open our rear camera from the moon once camera permission has been granted. */
+    val cameraOwnRear: Boolean = true,
     /**
      * The back stays lit with the scene on it whenever the phone is in use in the hand or lies
      * face down, and is off in a pocket, lying on its back, and after a double tap on the back
@@ -1023,20 +1071,50 @@ data class PanelConfig(
     val sleepAtNight: Boolean = true,
     /**
      * "Pin animation" (the settings' Notes section): true = a pin goes through Xiaomi's own pin (rear/PinVia: its
-     * animation, island and sound on the front, our notes page on the back at its end); false = our own animation
-     * (rear/PinBeam). Read as a pin begins, so a change holds from the next pin. Xiaomi's by default.
+     * animation, island and sound on the front, our notes page on the back at its end); false = our own animation,
+     * draft B (rear/PinB, Xiaomi's look drawn by us; the plain rear/PinBeam where Xiaomi's pictures cannot be read).
+     * Read as a pin begins, so a change holds from the next pin. Xiaomi's by default.
      */
     val pinByXiaomi: Boolean = true,
+    /**
+     * "Empty pull light" (the settings' Notifications section): the light that runs round the rim when the
+     * notifications are pulled down with nothing waiting (rear/EmptyRim) is white (false, the default) or in Xiaomi's
+     * own rear-glow colours (true). Read as a pull begins.
+     */
+    val emptyPullXiaomi: Boolean = false,
+    /**
+     * "Message style" (the settings' Notifications section): the full page (as before, the default) or the message
+     * island with the face tinted or dimmed under a sweep of light ([MessageStyle]). Read as each message arrives.
+     */
+    val messageStyle: MessageStyle = MessageStyle.FULL,
     /**
      * "Follows the music" (service/MusicLevel): the music page's glows rise and fall with the sound. It needs the
      * permission to hear what is playing (RECORD_AUDIO: Android's only way), which is the user's to give, so OFF
      * until it is switched on; off, or without the permission, the glows breathe by themselves.
      */
     val musicFollows: Boolean = false,
+    /** Ongoing navigation notifications may use the full rear page; requires notification access. */
+    val navigationOn: Boolean = true,
+    val musicFloor: Int = MUSIC_FLOOR,
+    /**
+     * "Earbuds animation" (the settings' Music section): when earbuds or a headset connect over Bluetooth, the
+     * Xiaomi-like card on the front with Sony's picture of them and their level, and its moment on the back
+     * (service/EarbudsWatch). On by default; it shows only once he has allowed a way onto the front.
+     */
+    val earbudsAnim: Boolean = true,
+    val usageFiveHours: Boolean = false,
+    /**
+     * Which of OpenAI's own Dots characters stands in ChatGPT's vessel (rear/dots: drawn by the ChatGPT app's own
+     * renderer, read from the phone at run time), by its id in that app's character list. Felipe by default.
+     */
+    val chatGptDot: String = "blue_beret",
+    val usageDots: Boolean = false,
     /** The home Wi-Fi as HomeNet knows a network; "" when none is marked. */
     val homeNet: String = "",
     /** Lying face down and not touched for a while, the scene is dimmed. */
     val stayDimFaceDown: Boolean = true,
+    val searchOffline: Boolean = true,
+    val threeFingers: ThreeFingers = ThreeFingers.SCREENSHOT,
 ) {
 
     /**
@@ -1186,6 +1264,9 @@ data class PanelConfig(
         /** The clock's glass tint before it could be set: a wash of its colour, not the colour. */
         const val CLOCK_GLASS_TINT = 0.35f
 
+        /** [musicFloor]'s default: the music page's body never under 70 % of the floor's range (98 px). */
+        const val MUSIC_FLOOR = 30
+
         const val FACE_DIGITAL = "digital"
         const val FACE_ANALOG = "analog"
 
@@ -1228,7 +1309,10 @@ data class PanelConfig(
             if (raw.isNullOrBlank()) return DEFAULT
             return try {
                 val element = json.parseToJsonElement(repurpled(raw))
-                val config = json.decodeFromJsonElement(serializer(), element)
+                // A number out of its range (written by hand, or by a later build) is read as the nearest one in it.
+                val config = json.decodeFromJsonElement(serializer(), element).let {
+                    if (it.musicFloor in 0..100) it else it.copy(musicFloor = it.musicFloor.coerceIn(0, 100))
+                }
                 val stamped = (element as? kotlinx.serialization.json.JsonObject)?.containsKey(REAR_MODE_KEY) == true
                 // And one that says Replace: that mode and its screen are gone. It is read as
                 // companion mode, always, so nothing in the app can be in Replace mode again; the service

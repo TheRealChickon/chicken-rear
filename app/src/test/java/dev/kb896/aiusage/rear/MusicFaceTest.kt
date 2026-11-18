@@ -3,6 +3,7 @@ package dev.kb896.aiusage.rear
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import dev.kb896.aiusage.color.mcu.Hct
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -13,7 +14,10 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import java.io.File
 
-/** The music page: Xiaomi's measures, the colours taken from the cover, the glows' wandering. */
+/**
+ * The music page: Xiaomi's measures, the colours taken from the cover as Xiaomi takes them, the wiring of the level,
+ * the picture. The body's motion and light are MusicBodyTest's; the sound's arithmetic is MusicSoundTest's.
+ */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [34])
@@ -31,151 +35,156 @@ class MusicFaceTest {
         assertNull("behind the lenses", MusicFace.button(150f, 530f))
     }
 
-    @Test fun `the page's colours are the cover's hue at Xiaomi's tones`() {
-        val green = 0xFF1DB954.toInt()
-        val p = MusicFace.palette(green)
-        assertEquals("the ground: tone 4", 4f, MusicFace.lch(p.ground)[0], 1.2f)
-        assertEquals("the first glow: tone 20", 20f, MusicFace.lch(p.glow1)[0], 1.2f)
-        assertEquals("the second: tone 60", 60f, MusicFace.lch(p.glow2)[0], 1.2f)
-        assertEquals("the third: tone 70", 70f, MusicFace.lch(p.glow3)[0], 1.2f)
-        val hue = MusicFace.lch(green)[2]
-        assertEquals("the cover's own hue", hue, MusicFace.lch(p.glow2)[2], 6f)
-        assertEquals("and its neighbour's for the third", (hue + 60f) % 360f, MusicFace.lch(p.glow3)[2], 8f)
-        // A cover with no colour: greys, never a made-up hue.
-        val grey = MusicFace.palette(0)
-        for (c in listOf(grey.ground, grey.glow1, grey.glow2, grey.glow3)) {
-            assertTrue(maxOf(Color.red(c), Color.green(c), Color.blue(c)) - minOf(Color.red(c), Color.green(c), Color.blue(c)) <= 2)
+    // -- the colours, Xiaomi's way (SPEC.md 5 and 8.11) --
+
+    private val red = Hct.from(17.0, 90.0, 50.0).toInt()
+    private val purple = Hct.from(295.0, 20.0, 10.0).toInt()
+
+    /** A made-up 64 x 64 cover: [purpleShare] dark purple, [redShare] a red patch, the rest near black. Nobody's cover. */
+    private fun madeUpCover(purpleShare: Double, redShare: Double): IntArray {
+        val nr = Math.round(redShare * 4096).toInt(); val np = Math.round(purpleShare * 4096).toInt()
+        return IntArray(4096) { i -> if (i < nr) red else if (i < nr + np) purple else 0xFF080808.toInt() }
+    }
+
+    @Test fun `the seed is the cover's most prominent colour as Score finds it - chroma can outweigh area, but not any area`() {
+        fun hue(px: IntArray) = Hct.fromInt(MusicFace.seedOf(px)).hue
+        val wins = madeUpCover(0.40, 0.20)
+        assertTrue("a 20 % red patch over 40 % dark purple: ${hue(wins)}", kotlin.math.abs(hue(wins) - 17.0) <= 5.0)
+        val loses = madeUpCover(0.70, 0.15)
+        assertTrue("a 15 % red patch over 70 % dark purple is the purple, as Material's Score has it: ${hue(loses)}", kotlin.math.abs(hue(loses) - 295.0) <= 5.0)
+        // The same through a Bitmap, as the shell takes it.
+        val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).also { it.setPixels(wins, 0, 64, 0, 0, 64, 64) }
+        assertTrue(kotlin.math.abs(Hct.fromInt(MusicFace.seed(bmp)).hue - 17.0) <= 5.0)
+    }
+
+    @Test fun `A at tone 60, B the same 20 degrees lower, the ground at tone 4`() {
+        for (seed in listOf(0xFFE01940.toInt(), 0xFFFEEC02.toInt(), 0xFF1DB954.toInt(), 0xFF2060E0.toInt(), 0xFF8E44AD.toInt())) {
+            val p = MusicFace.palette(seed)
+            val a = Hct.fromInt(p.colA); val b = Hct.fromInt(p.colB); val g = Hct.fromInt(p.ground)
+            assertEquals("A's tone", 60.0, a.tone, 0.5); assertEquals("B's tone", 60.0, b.tone, 0.5); assertEquals("the ground's tone", 4.0, g.tone, 0.5)
+            val want = (a.hue - 20.0 + 360.0) % 360.0
+            val off = kotlin.math.abs(((b.hue - want + 540.0) % 360.0) - 180.0)
+            assertTrue("B's hue ${b.hue} against A's ${a.hue} minus 20", off <= 2.0)
+            val seedHue = Hct.fromInt(seed).hue
+            assertTrue("A has the seed's hue: ${a.hue} against $seedHue", kotlin.math.abs(((a.hue - seedHue + 540.0) % 360.0) - 180.0) <= 2.0)
         }
     }
 
-    // -- the glows' motion: up and down, never across, and never a cut --
+    @Test fun `his two covers' seeds give the colours checked against Xiaomi's card`() {
+        fun near(want: Int, got: Int) = maxOf(kotlin.math.abs(Color.red(want) - Color.red(got)), kotlin.math.abs(Color.green(want) - Color.green(got)), kotlin.math.abs(Color.blue(want) - Color.blue(got)))
+        val one = MusicFace.palette(0xFFE01940.toInt()); val two = MusicFace.palette(0xFFFEEC02.toInt())
+        assertTrue("%08X".format(one.colA), near(0xFFFF5262.toInt(), one.colA) <= 2); assertTrue("%08X".format(one.colB), near(0xFFFF46A0.toInt(), one.colB) <= 2)
+        assertTrue("%08X".format(two.colA), near(0xFF9F9300.toInt(), two.colA) <= 2); assertTrue("%08X".format(two.colB), near(0xFFB88900.toInt(), two.colB) <= 2)
+    }
 
-    /** A minute of the page at 16 ms a picture; [each] sees every picture's glows and how far each moved since the last. */
-    private fun run(glow: MusicFace.Glow, fromMs: Long, forMs: Long, stepMs: Long = 16L, playing: (Long) -> Boolean = { true }, each: (Long, FloatArray, Float) -> Unit) {
-        var prev: FloatArray? = null
-        var t = fromMs
-        while (t <= fromMs + forMs) {
-            val at = glow.at(t, playing(t)).copyOf()
-            val moved = prev?.let { p -> (0..5).maxOf { kotlin.math.abs(at[it] - p[it]) } } ?: 0f
-            each(t, at, moved)
-            prev = at; t += stepMs
+    @Test fun `a grey cover gives greys and no cover the seed 0 - never a made-up hue`() {
+        val grey = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).also { it.eraseColor(0xFF7A7A7A.toInt()) }
+        assertEquals(0, MusicFace.seed(grey)); assertEquals(0, MusicFace.seed(null))
+        val p = MusicFace.palette(0)
+        for (c in listOf(p.ground, p.colA, p.colB)) {
+            assertTrue(maxOf(Color.red(c), Color.green(c), Color.blue(c)) - minOf(Color.red(c), Color.green(c), Color.blue(c)) <= 1)
         }
+        assertEquals(4.0, Hct.fromInt(p.ground).tone, 0.5); assertEquals(60.0, Hct.fromInt(p.colA).tone, 0.5)
     }
 
-    @Test fun `the glows never move across, only up and down, inside Xiaomi's own band`() {
-        val glow = MusicFace.Glow()
-        var low = 9f; var high = -9f
-        run(glow, 1_000L, 60_000L) { _, at, _ ->
-            for (i in 0..2) {
-                assertEquals("across, glow $i", MusicFace.Glow.X[i], at[2 * i], 0f)
-                low = maxOf(low.takeIf { it < 9f } ?: at[2 * i + 1], at[2 * i + 1]); high = if (high < -8f) at[2 * i + 1] else minOf(high, at[2 * i + 1])
-                assertTrue("in the band: ${at[2 * i + 1]}", at[2 * i + 1] in 0.8f..1.2001f)
-            }
-        }
-        assertTrue("it does rise and fall: from $low to $high", low - high > 0.08f)
+    @Test fun `the colours are taken once for one picture, and again for another`() {
+        val a = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).also { it.eraseColor(0xFFE01940.toInt()) }
+        val b = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).also { it.eraseColor(0xFF2060E0.toInt()) }
+        val pa = MusicFace.colorsOf(a)
+        assertTrue(pa === MusicFace.colorsOf(a))
+        assertTrue(MusicFace.colorsOf(b) != pa)
     }
 
-    @Test fun `a minute of it is one unbroken motion - no picture moves a glow more than its fastest honest step`() {
-        val glow = MusicFace.Glow()
-        val step = MusicFace.Glow.TOP_SPEED * 0.016f * 1.05f
-        var worst = 0f
-        run(glow, 1_000L, 60_000L) { _, _, moved -> worst = maxOf(worst, moved) }
-        assertTrue("the largest step in a minute: $worst of the page's height (a picture's honest step: $step)", worst <= step)
-        // And without sound it is slow: under a twentieth of the page's height in a second.
-        val quiet = MusicFace.Glow(); var before: FloatArray? = null; var fastest = 0f
-        run(quiet, 1_000L, 30_000L, stepMs = 1_000L) { t, at, _ -> if (t > 4_000L) before?.let { b -> fastest = maxOf(fastest, (0..2).maxOf { kotlin.math.abs(at[2 * it + 1] - b[2 * it + 1]) }) }; before = at }
-        assertTrue("breathing: $fastest a second", fastest < 0.07f)
-    }
-
-    @Test fun `a new track, a new cover or a blink of the player's state starts nothing over`() {
-        val glow = MusicFace.Glow()
-        val step = MusicFace.Glow.TOP_SPEED * 0.016f * 1.05f
-        var worst = 0f
-        // A track change as a player reports it: not playing for a picture or two, then playing again; twice in ten seconds.
-        run(glow, 1_000L, 20_000L, playing = { t -> t !in 8_000L..8_040L && t !in 14_000L..14_020L }) { t, _, moved -> if (t > 1_016L) worst = maxOf(worst, moved) }
-        assertTrue("through two track changes the largest step was $worst", worst <= step)
-    }
-
-    @Test fun `paused it sinks to rest and stays, and playing again it goes on from there`() {
-        val glow = MusicFace.Glow()
-        run(glow, 1_000L, 12_000L) { _, _, _ -> }
-        var last = FloatArray(6)
-        run(glow, 13_016L, 6_000L, playing = { false }) { _, at, _ -> last = at }
-        for (i in 0..2) assertEquals("at rest", MusicFace.Glow.REST_Y, last[2 * i + 1], 0.002f)
-        val still = glow.at(60_000L, playing = false).copyOf()
-        for (i in 0..5) assertEquals("it stays", last[i], still[i], 0.0005f)
-        // On again: a first picture is a small step from rest, not a leap to where the breath "would be by now".
-        val on = glow.at(60_016L, playing = true)
-        for (i in 0..2) assertTrue(kotlin.math.abs(on[2 * i + 1] - still[2 * i + 1]) < 0.01f)
-    }
-
-    @Test fun `the page away for a while and back - no leap, the time it was not drawn is not caught up with`() {
-        val glow = MusicFace.Glow()
-        var before = FloatArray(6)
-        run(glow, 1_000L, 9_000L) { _, at, _ -> before = at }
-        val back = glow.at(10_000L + 45_000L, playing = true)
-        for (i in 0..2) assertTrue("glow $i moved ${kotlin.math.abs(back[2 * i + 1] - before[2 * i + 1])}", kotlin.math.abs(back[2 * i + 1] - before[2 * i + 1]) <= MusicFace.Glow.TOP_SPEED * 0.05f * 1.05f)
-    }
-
-    @Test fun `with the sound it rises on a loud passage and sinks slower than it rose, never jumping on a beat`() {
-        val glow = MusicFace.Glow()
-        val step = MusicFace.Glow.TOP_SPEED * 0.016f * 1.05f
-        var worst = 0f
-        val height = { at: FloatArray -> (0..2).map { at[2 * it + 1] }.average().toFloat() }
-        var quiet = 0f; var loud = 0f; var afterHalfSecond = 0f; var sunkHalfSecond = 0f
-        // Ten seconds quiet (a soft passage, 0.1), ten loud with a hard beat twice a second (0.9 / 0.4), then quiet again.
-        run(glow, 1_000L, 30_000L) { t, at, moved ->
-            val heard = when { t < 11_000L -> 0.1f; t < 21_000L -> if ((t / 250L) % 2L == 0L) 0.9f else 0.4f; else -> 0.1f }
-            // Told as the app tells it: every 50 ms or so (each third picture here).
-            if (((t - 1_000L) / 16L) % 3L == 0L) glow.hear(heard, t)
-            if (t > 1_016L) worst = maxOf(worst, moved)
-            if (t in 10_900L..10_916L) quiet = height(at)
-            if (t in 11_500L..11_516L) afterHalfSecond = height(at)
-            if (t in 20_900L..20_916L) loud = height(at)
-            if (t in 21_500L..21_516L) sunkHalfSecond = height(at)
-        }
-        assertTrue("higher in the loud passage (smaller y): quiet $quiet, loud $loud", loud < quiet - 0.05f)
-        assertTrue("the hardest beat is no jump: the largest step was $worst", worst <= step)
-        assertTrue("slow to rise: half a second in it is not there yet", afterHalfSecond > loud + 0.02f)
-        assertTrue("slower to sink than to rise", (sunkHalfSecond - loud) < (quiet - afterHalfSecond))
-        assertTrue("and it shines a little more with it", glow.strength >= MusicFace.Glow.STRENGTH_QUIET)
-    }
-
-    @Test fun `not told the level any more, it is back to breathing by itself`() {
-        val glow = MusicFace.Glow()
-        run(glow, 1_000L, 3_000L) { t, _, _ -> glow.hear(1f, t) }
-        run(glow, 4_016L, 8_000L) { _, _, _ -> }
-        assertEquals(MusicFace.Glow.STRENGTH_QUIET, glow.strength, 0.01f)
-    }
-
-    @Test fun `a new cover's colours come in over half a second, not at once`() {
+    @Test fun `a new cover's colours come in over half a second, not at once - all three of them`() {
         val fade = MusicFace.Fade()
         val a = MusicFace.palette(0xFF2060E0.toInt()); val b = MusicFace.palette(0xFFE04020.toInt())
         assertEquals(a, fade.at(a, 1_000L))
         var t = 1_016L; var prev = a; var worst = 0
         while (t < 4_000L) {
             val now = fade.at(b, t)
-            worst = maxOf(worst, kotlin.math.abs(Color.red(now.glow2) - Color.red(prev.glow2)), kotlin.math.abs(Color.blue(now.glow2) - Color.blue(prev.glow2)))
+            for ((x, y) in listOf(now.ground to prev.ground, now.colA to prev.colA, now.colB to prev.colB)) {
+                worst = maxOf(worst, kotlin.math.abs(Color.red(x) - Color.red(y)), kotlin.math.abs(Color.green(x) - Color.green(y)), kotlin.math.abs(Color.blue(x) - Color.blue(y)))
+            }
             prev = now; t += 16L
         }
         assertTrue("no picture changes a colour by more than a few steps: $worst", worst <= 12)
         assertEquals(b, prev)
     }
 
-    @Test fun `the sound's level from a measured loudness - a tone generated here, quiet to loud`() {
-        // A sine of a given peak has an RMS of peak / sqrt 2: in millibels below full scale, 2000 log10 of it.
-        fun rmsMilliBel(peak: Double): Int {
-            var sum = 0.0
-            val n = 4_800
-            for (i in 0 until n) { val v = peak * kotlin.math.sin(2.0 * Math.PI * 440.0 * i / 48_000.0); sum += v * v }
-            return Math.round(2_000.0 * kotlin.math.log10(kotlin.math.sqrt(sum / n))).toInt()
+    // -- the wiring (SPEC.md 2.6, 8.12) --
+
+    @Test fun `the back lit again calls each wake listener once, and MusicLevel registers once`() {
+        var one = 0; var two = 0
+        val l1: () -> Unit = { one++ }; val l2: () -> Unit = { two++ }
+        val awake = dev.kb896.aiusage.service.PanelAwake
+        awake.addWakeListener(l1); awake.addWakeListener(l1); awake.addWakeListener(l2)
+        awake.setDozing(true); awake.setDozing(false)
+        assertEquals(1, one); assertEquals(1, two)
+        awake.setDozing(false)
+        assertEquals("awake to awake is no wake", 1, one)
+        val app = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val before = awake.wakeListenerCount()
+        dev.kb896.aiusage.service.MusicLevel.listenForWake(app)
+        val once = awake.wakeListenerCount()
+        assertTrue("MusicLevel's listener is there ($once after $before; another test may have registered it already)", once - before in 0..1 && once >= 3)
+        dev.kb896.aiusage.service.MusicLevel.listenForWake(app); dev.kb896.aiusage.service.MusicLevel.listenForWake(app)
+        assertEquals("a second registration adds no second call", once, awake.wakeListenerCount())
+    }
+
+    @Test fun `the body's shader is valid AGSL where the test runtime can compile one`() {
+        val e = runCatching { android.graphics.RuntimeShader(MusicBody.AGSL) }.exceptionOrNull()
+        // A compile error is an IllegalArgumentException with the compiler's words; a runtime with no shader compiler
+        // at all is something else, and says nothing about the program.
+        org.junit.Assume.assumeTrue("no shader compiler here: $e", e == null || e is IllegalArgumentException)
+        assertNull("the compiler: ${e?.message}", e)
+    }
+
+    @Test fun `the shader draws what the Kotlin formula says, pixel for pixel`() {
+        // Robolectric's renderer runs AGSL but passes no uniforms (all read 0 there; a uniform-free shader draws right),
+        // so the frame's values are written into the program as constants. On the phone the uniforms are set as
+        // TableGlow's are; what this holds is that the program and MusicBody's Kotlin are the same formula.
+        fun baked(f: MusicBody.Frame): String {
+            fun v(x: Float) = "%.6f".format(java.util.Locale.ROOT, x)
+            fun v3(c: FloatArray) = "float3(${v(c[0])}, ${v(c[1])}, ${v(c[2])})"
+            fun v4(i: Int) = "float4(${v(f.bands[i])}, ${v(f.bands[i + 1])}, ${v(f.bands[i + 2])}, ${v(f.bands[i + 3])})"
+            val consts = "const float u = 1.0; const float base = ${v(f.base)}; const float peak = ${v(f.peak)}; const float kickAmp = ${v(f.kickAmp)}; " +
+                "const float breath = ${v(f.breath)}; const float wave = ${v(f.wave)}; const float wph = ${v(f.wph)}; " +
+                "const float limit = ${v(f.limit)}; const float soft = ${v(f.soft)}; const float G = ${v(f.g)}; " +
+                "const float glow = ${v(f.glow)}; const float tilt = ${v(f.tilt)}; const float shift = ${v(f.shift)};\n" +
+                "const float4 b0 = ${v4(0)}; const float4 b1 = ${v4(4)}; const float4 b2 = ${v4(8)};\n" +
+                "const float3 ground = ${v3(f.ground)}; const float3 colA = ${v3(f.colA)}; const float3 colB = ${v3(f.colB)};"
+            val src = MusicBody.AGSL.replace(Regex("uniform float u,[^\\n]*\\n"), "").replace(Regex("uniform float4 b0[^\\n]*\\n"), "")
+                .replace(Regex("uniform float3 ground[^\\n]*"), consts)
+            check(!src.contains("uniform")) { src }
+            return src
         }
-        val level = dev.kb896.aiusage.service.MusicLevel::level
-        assertEquals("silence", 0f, level(-9_600), 0f)
-        assertEquals("a tone at a thousandth of full scale: nothing yet", 0f, level(rmsMilliBel(0.001)), 0f)
-        val soft = level(rmsMilliBel(0.03)); val mid = level(rmsMilliBel(0.15)); val full = level(rmsMilliBel(0.9))
-        assertTrue("soft $soft, middle $mid, loud $full", soft in 0.2f..0.5f && mid in 0.6f..0.9f && full == 1f)
-        assertTrue(soft < mid && mid < full)
+        val e = runCatching { android.graphics.RuntimeShader(MusicBody.AGSL) }.exceptionOrNull()
+        org.junit.Assume.assumeTrue("no shader compiler here: $e", e == null)
+        // A drop with a kick in it, in his first cover's colours; and the body at rest, in the second's.
+        val drop = MusicFace.Body(); var t = 1_000L
+        while (t < 6_000L) {
+            if (t % 33L < 16L) drop.hear(FloatArray(dev.kb896.aiusage.service.MusicSound.PACKET) { i ->
+                when { i == 0 -> 1f; i == 1 -> if (t in 5_900L..5_933L) 0.9f else 0f; i == 2 -> 1f; i >= dev.kb896.aiusage.service.MusicSound.BAND0 -> ((i * 37) % 10) / 10f; else -> 0f }
+            }, t)
+            drop.step(t, true); t += 16L
+        }
+        val rest = MusicFace.Body().also { it.step(1_000L, false) }
+        for ((f, seed) in listOf(drop.step(t, true) to 0xFFE01940.toInt(), rest.frame to 0xFFFEEC02.toInt())) {
+            val p = MusicFace.palette(seed); f.setColors(p.ground, p.colA, p.colB)
+            val sh = android.graphics.RuntimeShader(baked(f))
+            val bmp = runCatching { hardwareDraw(976, 596) { c -> c.drawPaint(android.graphics.Paint().apply { shader = sh }) } }
+                .onFailure { println("no hardware drawing here: $it") }.getOrNull()
+            org.junit.Assume.assumeTrue("no hardware drawing here", bmp != null)
+            val px = FloatArray(3); var worst = 0; var at = ""
+            for (y in 0 until 596 step 7) for (x in 0 until 976 step 9) {
+                MusicBody.linear(f, x + 0.5f, y + 0.5f, px)
+                val want = MusicBody.srgb(px[0], px[1], px[2]); val got = bmp!!.getPixel(x, y)
+                val d = maxOf(kotlin.math.abs(Color.red(want) - Color.red(got)), kotlin.math.abs(Color.green(want) - Color.green(got)), kotlin.math.abs(Color.blue(want) - Color.blue(got)))
+                if (d > worst) { worst = d; at = "($x, $y): Kotlin %06X, shader %06X".format(want and 0xFFFFFF, got and 0xFFFFFF) }
+            }
+            // The shader's half-level dither and its half floats: two levels at most.
+            assertTrue("the largest difference is $worst levels at $at", worst <= 2)
+        }
     }
 
     @Test fun `the page is drawn, full bleed, with and without a cover`() {
@@ -183,10 +192,11 @@ class MusicFaceTest {
         // A stand-in for a cover, for this test only: on the phone the cover is the player's own picture.
         val cover = Bitmap.createBitmap(288, 288, Bitmap.Config.ARGB_8888).also { b -> b.eraseColor(0xFF1DB954.toInt()) }
         val icon = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888).also { b -> b.eraseColor(0xFF3A6EA5.toInt()) }
-        val glow = floatArrayOf(0.28f, 0.92f, 0.52f, 1.05f, 0.78f, 0.86f)
+        // The body a second into playing, with no sound told to it.
+        val body = MusicFace.Body().let { b -> var t = 1_000L; while (t <= 2_000L) { b.step(t, true); t += 16L }; b.frame }
         for ((name, art) in mapOf("cover" to cover, "none" to null)) for (playing in listOf(true, false)) {
             val bmp = Bitmap.createBitmap(976, 596, Bitmap.Config.ARGB_8888)
-            MusicFace.draw(Canvas(bmp), 976f, 596f, "Who Shot Johnny", "Rosa Walton, Hallie Coggins", playing, art, MusicFace.palette(MusicFace.seed(art ?: icon)), glow, playerIcon = icon)
+            MusicFace.draw(Canvas(bmp), 976f, 596f, "Who Shot Johnny", "Rosa Walton, Hallie Coggins", playing, art, MusicFace.palette(MusicFace.seed(art ?: icon)), body, playerIcon = icon)
             // The cover's place holds the cover, or without one the player's icon: never something drawn by us.
             assertEquals("$name: what stands in the cover's place", (if (art != null) 0x1DB954 else 0x3A6EA5), bmp.getPixel(458, 161) and 0xFFFFFF)
             File("build/music-$name-${if (playing) "playing" else "paused"}.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -194,7 +204,34 @@ class MusicFaceTest {
             assertEquals("and in the far corner", 255, Color.alpha(bmp.getPixel(970, 590)))
             assertTrue("dark at the top", Color.green(bmp.getPixel(600, 10)) < 40)
             assertEquals("the title's white", 0xFFFFFF, bmp.getPixel(374, 352) and 0xFFFFFF or findWhite(bmp))
+            // The body is lit along the foot, behind the lenses too, one colour body over the ground.
+            val ground = MusicFace.palette(MusicFace.seed(art ?: icon)).ground
+            for (x in listOf(20, 300, 636, 960)) assertTrue("lit at the foot, x $x", Color.green(bmp.getPixel(x, 590)) + Color.red(bmp.getPixel(x, 590)) > Color.green(ground) + Color.red(ground) + 40)
         }
+    }
+
+    private fun hardwareDraw(w: Int, h: Int, draw: (Canvas) -> Unit): Bitmap {
+        val reader = android.media.ImageReader.newInstance(w, h, android.graphics.PixelFormat.RGBA_8888, 1,
+            android.hardware.HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE or android.hardware.HardwareBuffer.USAGE_GPU_COLOR_OUTPUT)
+        val node = android.graphics.RenderNode("music").apply { setPosition(0, 0, w, h) }
+        val rc = node.beginRecording()
+        assertTrue(rc.isHardwareAccelerated)
+        draw(rc)
+        node.endRecording()
+        val renderer = android.graphics.HardwareRenderer()
+        renderer.setSurface(reader.surface); renderer.setContentRoot(node)
+        renderer.createRenderRequest().setWaitForPresent(true).syncAndDraw()
+        val image = reader.acquireNextImage()
+        val plane = image.planes[0]
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val buf = plane.buffer
+        for (y in 0 until h) for (x in 0 until w) {
+            val i = y * plane.rowStride + x * plane.pixelStride
+            // (Robolectric's reader gives the bytes blue, green, red, alpha: a flat 0x3366CC read back as 0xCC6633 the other way.)
+            out.setPixel(x, y, Color.argb(buf.get(i + 3).toInt() and 0xFF, buf.get(i + 2).toInt() and 0xFF, buf.get(i + 1).toInt() and 0xFF, buf.get(i).toInt() and 0xFF))
+        }
+        image.close(); renderer.destroy(); reader.close()
+        return out
     }
 
     /** White somewhere along the title's line. */

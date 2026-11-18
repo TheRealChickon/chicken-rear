@@ -22,7 +22,8 @@ import java.io.File
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [34])
 class MusicLayoutTest {
-    private val glow = floatArrayOf(0.28f, 0.92f, 0.52f, 1.05f, 0.78f, 0.86f)
+    /** The body as it stands a second into playing, with no sound told to it. */
+    private val glow = MusicFace.Body().let { b -> var t = 1_000L; while (t <= 2_000L) { b.step(t, true); t += 16L }; b.frame }
 
     @Test fun `which page - by the picture's own shape, never by which app plays`() {
         assertSame(MusicLayout.VIDEO, MusicLayout.of(1280, 720))

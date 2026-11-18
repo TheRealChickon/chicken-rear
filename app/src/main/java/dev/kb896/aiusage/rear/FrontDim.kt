@@ -84,21 +84,37 @@ class FrontDim(private val handler: Handler, private val sensors: () -> SensorMa
 
     private fun put(a: Float) {
         if (a > 0f && layer == null) {
+            // ONE SQUARE OF THE FRONT'S LONGEST SIDE covers it either way up (it was 4096 x 4096: a 64 MiB picture filled
+            // by the CPU at every face down). Best of all A BLACK COLOUR LAYER, NO BUFFER (ShellLayer.createColour), which
+            // costs no memory whatever its size: there an unreadable size is the old square, cropped, not drawn.
+            val side = frontSide()
             layer = runCatching {
-                val sc = ShellLayer.create("front-dim", FRONT_STACK, ShellLayer.Z_DIM, SIDE, SIDE, trusted = true, visible = false, alpha = 0f, format = PixelFormat.RGBA_8888)
-                val s = Surface(sc)
-                try {
-                    val c = s.lockCanvas(null)
-                    try { c.drawColor(0xFF000000.toInt()) } finally { s.unlockCanvasAndPost(c) }
-                } finally { s.release() }
-                sc
-            }.onFailure { Log.w(TAG, "front dim: no layer: ${it.message}") }.getOrNull()
+                ShellLayer.createColour("front-dim", FRONT_STACK, ShellLayer.Z_DIM, side ?: SIDE, side ?: SIDE, trusted = true, visible = false, alpha = 0f)
+            }.recoverCatching { e ->
+                // Not trusted is never shown, whatever it is drawn with (fail closed); and never a 4096 x 4096 buffer again.
+                if (e is ShellLayer.Untrusted || side == null) throw e
+                Log.i(TAG, "front dim: no colour layer (${e.message}); a black buffer ${side}x$side")
+                bufferLayer(side)
+            }.onFailure { Log.w(TAG, "front dim: no layer: ${it.message}${if (side == null) " (the front's size could not be read)" else ""}") }.getOrNull()
         }
         val sc = layer
         alpha = a
         if (sc == null) return
         runCatching { SurfaceControl.Transaction().use { it.setAlpha(sc, a).setVisibility(sc, a > 0.002f).apply() } }
             .onFailure { Log.w(TAG, "front dim: ${it.message}") }
+    }
+
+    /** The way it was made before colour layers: a black picture, [side] square, drawn once. */
+    private fun bufferLayer(side: Int): SurfaceControl {
+        val sc = ShellLayer.create("front-dim", FRONT_STACK, ShellLayer.Z_DIM, side, side, trusted = true, visible = false, alpha = 0f, format = PixelFormat.RGBA_8888)
+        try {
+            val s = Surface(sc)
+            try {
+                val c = s.lockCanvas(null)
+                try { c.drawColor(0xFF000000.toInt()) } finally { s.unlockCanvasAndPost(c) }
+            } finally { s.release() }
+        } catch (e: Throwable) { ShellLayer.remove(sc); throw e }
+        return sc
     }
 
     /** Gone, with its layer (also as the shell ends: nothing of this may outlive it). */
@@ -119,9 +135,29 @@ class FrontDim(private val handler: Handler, private val sensors: () -> SensorMa
         const val STALE_MS = 12_000L
         /** Gravity along z (m/s²) above which the phone is no longer lying on its front. */
         const val LIFT = -6.5f
-        /** The front display's layer stack, and a square that covers it either way up. */
+        /** The front display (its id and its layer stack). */
         private const val FRONT_STACK = 0
+        /** Only the crop of a colour layer (no memory) when the front's size cannot be read; never a buffer's size. */
         private const val SIDE = 4096
+
+        /**
+         * The side of a square that covers a display of [width] x [height] either way up and is no larger than it needs
+         * to be: its longest side. Null for a size that is not one. Pure.
+         */
+        fun coverSide(width: Int, height: Int): Int? = if (width > 0 && height > 0) maxOf(width, height) else null
+
+        /**
+         * The front display's logical size as the display manager has it (IDisplayManager.getDisplayInfo, straight to the
+         * service as RearPanel does: no listener is registered in this process), as [coverSide]; null where it cannot be read.
+         */
+        private fun frontSide(): Int? = runCatching {
+            val binder = Class.forName("android.os.ServiceManager").getMethod("getService", String::class.java).invoke(null, "display")
+            val dm = Class.forName("android.hardware.display.IDisplayManager\$Stub")
+                .getMethod("asInterface", android.os.IBinder::class.java).invoke(null, binder)
+            val info = Class.forName("android.hardware.display.IDisplayManager")
+                .getMethod("getDisplayInfo", Int::class.javaPrimitiveType).invoke(dm, FRONT_STACK) ?: return@runCatching null
+            coverSide(info.javaClass.getField("logicalWidth").getInt(info), info.javaClass.getField("logicalHeight").getInt(info))
+        }.onFailure { Log.w(TAG, "front dim: the front's size: ${it.message}") }.getOrNull()
 
         /** StayOn.Level.DIM's ordinal: lying face down, by the app's rule (the "face down" switch on, no finger on it just now). */
         const val FACE_DOWN_LEVEL = 2

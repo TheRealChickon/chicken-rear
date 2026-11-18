@@ -35,6 +35,7 @@ interface CompanionHost {
     /** Runs a missing need's one button. */
     fun fix(fix: CompanionRows.Fix)
     fun toast(text: String)
+    fun askCameraPermission(permission: String)
     /** Asks for POST_NOTIFICATIONS (only where Android has it), then [then] with the answer. */
     fun askPostNotifications(then: (Boolean) -> Unit)
     /** Rear mode changed (Replace on or off): the activity shows the other screen. */

@@ -13,6 +13,10 @@ import android.util.Log
  * (and from making a named pipe in /data/local/tmp), and `input -d 1` reaches apps but never the
  * shell's getevent. A socket in the abstract namespace needs no file at all. One reader thread for the
  * process's life; each watch [attach]es itself, and lines arriving with no live watch are dropped.
+ *
+ * ANY APP CAN CONNECT to an abstract socket, so a connection is taken only from the shell or root
+ * (dev.kb896.aiusage.DebugLock.fromShell, by the peer's credentials): `adb forward` connects from adbd and
+ * `adb shell` runs as the shell, both uid 2000. Anything else is closed unread, with one log line.
  */
 object DemoTouchFeed {
     private const val TAG = "AiUsageRear"
@@ -35,6 +39,11 @@ object DemoTouchFeed {
                 try {
                     // One writer at a time, for as long as it stays connected.
                     server.accept().use { client ->
+                        val uid = runCatching { client.peerCredentials.uid }.getOrDefault(-1)
+                        if (!dev.kb896.aiusage.DebugLock.fromShell(uid)) {
+                            Log.w(TAG, "demo touches: a connection from uid $uid refused (the shell's or root's only)")
+                            return@use
+                        }
                         client.inputStream.bufferedReader().useLines { lines ->
                             for (line in lines) {
                                 val s = sink ?: continue

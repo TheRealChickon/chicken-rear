@@ -113,7 +113,7 @@ internal class GuestCover private constructor(
                 } else {
                     val surface = Surface(layer)
                     try {
-                        val c = surface.lockCanvas(null)
+                        val c = ShellLayer.lockPanelCanvas(surface)
                         try { c.drawBitmap(picture!!, 0f, 0f, null) } finally { surface.unlockCanvasAndPost(c) }
                     } finally {
                         surface.release()

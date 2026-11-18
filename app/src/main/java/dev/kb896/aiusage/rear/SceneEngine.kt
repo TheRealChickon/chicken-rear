@@ -50,6 +50,11 @@ import java.util.concurrent.TimeUnit
  *
  * One thread: [play] blocks its caller until the show is over, and makes and releases its own
  * EGL context there. [look], [dim] and [depth] may be set from any thread while it plays.
+ *
+ * DUST IN LIGHT ([FaceCatalog.DUST] as the loop, made with [gles3]): no clip at all. The face is drawn on the GPU
+ * (DustGl, DustField) in the same pass and on the same surface, with the same curtain, dim, fade, still and clock; its
+ * finger, the phone's movement and its sensors' switch come in [dust]. A GLES 3 context and an sRGB surface (its
+ * motes are added in linear light) are made only for it, so the moon's context is exactly as it was.
  */
 class SceneEngine(
     private val output: Surface,
@@ -57,11 +62,19 @@ class SceneEngine(
     private val height: Int,
     /** The lens column's width in the output's pixels, for the face's layout. */
     private val lens: Float,
+    /**
+     * The dust face's engine ([FaceCatalog.DUST] is all it plays): a GLES 3 context and an sRGB surface where the system
+     * has them, and none of the clip's decoder. Without GLES 3 it says [DUST_FAILED] and the shell shows the moon.
+     */
+    private val gles3: Boolean = false,
 ) {
     /** What decides, frame by frame, whether the show goes on. */
     interface Control {
-        /** What is left of the show, 1 down to 0 as it fades; null once it is to stop, [why] having the reason. */
-        fun strength(): Float?
+        /**
+         * What is left of the show, 1 down to 0 as it fades; [STOP] (under 0) once it is to stop, [why] having the reason.
+         * A plain Float: it is asked every picture, and a Float? would be a new object each time.
+         */
+        fun strength(): Float
         val why: String
         /** The first frame of the first clip is on the surface. */
         fun onFirstFrame() {}
@@ -77,8 +90,17 @@ class SceneEngine(
     /**
      * The loop held on the frame it is at: a still picture, the clock still kept right. Nothing is
      * decoded meanwhile, so it costs next to nothing. The wake clip is never held.
+     * LET GO, IT MOVES AT ONCE: the held loop's wait ends the moment this goes false (it used to sleep out its
+     * [STILL_STEP_MS] first, so a page leaving a held scene showed it standing for up to a fifth of a second).
      */
     @Volatile var still = false
+        set(value) {
+            val was = field
+            field = value
+            if (was && !value) stillWake.release()
+        }
+    /** Released when [still] is let go: the held loop waits on it instead of sleeping. */
+    private val stillWake = Semaphore(0)
     /** The weather where the phone is, for the moon face's clouds; null when it is not known (they stir gently then). */
     @Volatile var weather: dev.kb896.aiusage.data.Condition? = null
     /** The clip is the moon's (SceneEffects' places are that picture's): the clouds and the glitch are for it alone. */
@@ -87,6 +109,41 @@ class SceneEngine(
     @Volatile var clouds = true
     @Volatile var glitch = true
     private val effects = SceneEffects()
+
+    /**
+     * What the dust face reacts to, kept by whoever shows it (the finger and the phone's movement outlive one show), and
+     * the switch of its two sensors, which only the dust's own loop throws (DustSensor.Gate). Null: none (the preview).
+     * [panelHz]: the rate the panel the surface is shown on is at now, for the log (0: not known); read once a log line.
+     * [sensorPoll]: the sensors' direct channel read, before each picture's inputs (DustSensor.poll); [sensorSaid]: how
+     * the sensors' samples came since the last log line, for it (DustSensor.said).
+     */
+    class Dust(
+        val finger: DustFinger = DustFinger(),
+        val motion: DustMotion = DustMotion(),
+        val sensorOn: () -> Boolean = { false },
+        val sensorOff: () -> Unit = {},
+        val panelHz: () -> Float = { 0f },
+        val sensorPoll: () -> Unit = {},
+        val sensorSaid: () -> String = { "" },
+        /** The setting "Moves with the phone": false keeps the sensors off (DustSensor.Gate). */
+        val sensorAllowed: () -> Boolean = { true },
+    )
+    @Volatile var dust: Dust? = null
+
+    /**
+     * THE MESSAGE ISLAND'S TINT ("Island · Tint", NoticeVeil): read at every picture, the face drawn in the app's colour
+     * inside the page's outline while it is up; nothing at all otherwise. Moving (the page opening, folding, the tint going),
+     * the face is drawn at the rear's full rate so its colour keeps up with the island's outline; held still, it is drawn
+     * again as the tint changes. While an island is up the pictures' gaps are counted and said once as it goes ([veilLine]).
+     */
+    @Volatile var veil: NoticeVeil? = null
+    private val veilFrame = NoticeVeil.Frame()
+    /** The tint's strength in the last picture drawn (0: none), to draw again once as it reaches 0. */
+    private var veilDrawn = 0f
+    private val veilGaps = VeilGaps()
+    /** The context made is GLES 3, and the surface encodes to sRGB itself. */
+    private var es3 = false
+    private var srgb = false
 
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var context: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -105,6 +162,10 @@ class SceneEngine(
     private var clipPlace: SceneFace.Place? = null
     private var frontTex = 0
     private var frontBitmap: Bitmap? = null
+    /** The moon's tint uniforms (looked up once, as the program is linked). */
+    private var uTintM = -1
+    private var uTintBoxM = -1
+    private var uTintShapeM = -1
 
     /**
      * Black on the surface now, and nothing else: the curtain a wake starts from. Makes the
@@ -123,6 +184,8 @@ class SceneEngine(
      * wake clip, "played"). Blocks until it is over; says why it ended. Releases everything.
      */
     fun play(wake: String?, loop: String?, control: Control): String {
+        // The dust's engine has no decoder: it plays the dust and nothing else.
+        if (gles3 && (wake != null || loop != FaceCatalog.DUST)) { release(); return "this engine draws the dust only" }
         try {
             setUp()
             var first = true
@@ -132,6 +195,7 @@ class SceneEngine(
             }
             if (loop == null) return "played"
             control.onLoop()
+            if (loop == FaceCatalog.DUST) return playDust(control) { if (first) { first = false; control.onFirstFrame() } }
             return playFile(loop, repeat = true, withFace = true, control) { if (first) { first = false; control.onFirstFrame() } } ?: "played"
         } finally {
             release()
@@ -169,7 +233,8 @@ class SceneEngine(
             val cal = java.util.Calendar.getInstance()
 
             while (true) {
-                val left = control.strength() ?: return control.why.ifEmpty { "dismissed" }
+                val left = control.strength()
+                if (left < 0f) return control.why.ifEmpty { "dismissed" }
 
                 if (still && repeat && haveFrame) {
                     // Held: the same frame, drawn again only for the clock, the dim or the fade.
@@ -177,12 +242,15 @@ class SceneEngine(
                     val before = faceKey
                     if (withFace) face(look, cal)
                     val gain = left * dim
-                    if (faceKey != before || gain != lastDrawnStrength) {
+                    // The island's tint changing over a held picture: drawn again at the rear's rate while it moves.
+                    val tinting = veilChanging(SystemClock.uptimeMillis())
+                    if (faceKey != before || gain != lastDrawnStrength || tinting) {
                         draw(left, if (withFace) 1f else 0f, hasMatte, System.nanoTime())
                         lastDrawnStrength = gain
                     }
                     startNs = 0L                    // moving again starts its clock again
-                    Thread.sleep(STILL_STEP_MS)
+                    // Waits its step, or less: until [still] is let go.
+                    stillWake.tryAcquire(if (tinting) VEIL_STEP_MS else STILL_STEP_MS, TimeUnit.MILLISECONDS)
                     continue
                 }
 
@@ -221,7 +289,15 @@ class SceneEngine(
                         var due = startNs + info.presentationTimeUs * 1000
                         // Fallen behind by more than three frames (a stall): the clock is moved, not the frames dropped.
                         if (now - due > frameUs * 3000) { startNs += now - due; due = now }
-                        val wait = due - now - RELEASE_LEAD_NS
+                        var wait = due - now - RELEASE_LEAD_NS
+                        // The island's tint moving while this frame waits for its time: the picture before it is drawn again
+                        // with the tint as it is now, at the rear's rate (a clip's own frames come 24 to 30 a second).
+                        while (wait > VEIL_STEP_MS * 1_000_000L && haveFrame && veilChanging(SystemClock.uptimeMillis())) {
+                            val faceAlpha = if (withFace && faceUpAt != 0L) ((SystemClock.uptimeMillis() - faceUpAt).toFloat() / FACE_IN_MS).coerceIn(0f, 1f) else 0f
+                            draw(left, faceAlpha, hasMatte, System.nanoTime())
+                            Thread.sleep(VEIL_STEP_MS)
+                            wait = due - System.nanoTime() - RELEASE_LEAD_NS
+                        }
                         if (wait > 0) Thread.sleep(wait / 1_000_000, (wait % 1_000_000).toInt())
                         made.releaseOutputBuffer(o, true)
                         if (frameReady.tryAcquire(FRAME_WAIT_MS, TimeUnit.MILLISECONDS)) {
@@ -247,8 +323,9 @@ class SceneEngine(
                     }
                     if (eos) return null
                 }
-                // Fading with no new frame due yet: the same frame again, weaker, so the fade is smooth.
-                if (!drew && haveFrame && left * dim != lastDrawnStrength) {
+                // Fading with no new frame due yet: the same frame again, weaker, so the fade is smooth (and so for the
+                // island's tint).
+                if (!drew && haveFrame && (left * dim != lastDrawnStrength || veilChanging(SystemClock.uptimeMillis()))) {
                     val faceAlpha = if (withFace && faceUpAt != 0L) ((SystemClock.uptimeMillis() - faceUpAt).toFloat() / FACE_IN_MS).coerceIn(0f, 1f) else 0f
                     draw(left, faceAlpha, hasMatte, System.nanoTime())
                     lastDrawnStrength = left * dim
@@ -258,6 +335,125 @@ class SceneEngine(
             runCatching { codec?.stop() }
             runCatching { codec?.release() }
             runCatching { extractor.release() }
+        }
+    }
+
+    /**
+     * DUST IN LIGHT, until the show ends: no decoder, the GPU steps and draws the motes (DustGl). Every refresh of the
+     * rear while a finger or the phone's fast movement is answered, every other one at rest and while it reacts slowly
+     * (DustDriver.quick, DustPace), on the rear's frame grid by the clock (FramePace), each picture given its time as the
+     * clip's are and stepping the motes by the real time since the last one (in steps of 1/120 s while something
+     * reacts). Held ([still]): nothing stepped, drawn again only for the light; the sensors off (DustSensor.Gate) until
+     * it moves again. Says why it ended; [DUST_FAILED] when this GPU cannot draw it (the shell shows the moon in its
+     * place). Every DustPace.DUST_LOG_EVERY pictures it logs their rate and the panel's, what reacted, how long the CPU
+     * took on them (the inputs, the motes' step, the drawing and the swap), the thread's own share of a core, the longest
+     * gap and the sensors' rates (DustPace.line); nothing else is logged or allocated per picture.
+     */
+    private fun playDust(control: Control, shown: () -> Unit): String {
+        if (!es3) return DUST_FAILED + "no GLES 3 context here"
+        val io = dust ?: Dust()
+        val motes = DustField.motes()
+        val gl = DustGl(width, height, srgb)
+        try { gl.setUp(motes, DustField.initial(motes)) } catch (e: Throwable) {
+            runCatching { gl.release() }
+            return DUST_FAILED + (e.message ?: e.javaClass.simpleName)
+        }
+        val driver = DustDriver(io.finger, io.motion)
+        val gate = DustSensor.Gate(io.sensorOn, io.sensorOff, io.sensorAllowed)
+        val pace = DustPace(REAR_PERIOD_NS)
+        val count = DustPace.Count()
+        val cal = java.util.Calendar.getInstance()
+        var lastNs = 0L
+        var drawn = false
+        var lastGain = -1f
+        var faceUpAt = 0L
+        var lookSeen: SceneFace.Look? = null
+        var minuteSeen = -1L
+        var countFromNs = System.nanoTime()
+        var threadFrom = android.os.Debug.threadCpuTimeNanos()
+        try {
+            while (true) {
+                val left = control.strength()
+                if (left < 0f) return control.why.ifEmpty { "dismissed" }
+                val gain = left.coerceIn(0f, 1f) * dim.coerceIn(0f, 1f)
+                val nowMs = SystemClock.uptimeMillis()
+                // The clock, drawn again only when its look or its minute changes (nothing allocated otherwise).
+                val asked = look
+                val minute = System.currentTimeMillis() / 60_000L
+                var clockNew = false
+                if (asked !== lookSeen || minute != minuteSeen) {
+                    val before = faceKey
+                    cal.timeInMillis = System.currentTimeMillis()
+                    face(asked, cal)
+                    lookSeen = asked; minuteSeen = minute
+                    clockNew = faceKey != before
+                }
+                if (faceUpAt == 0L) faceUpAt = nowMs
+                val clock = if (faceOn) ((nowMs - faceUpAt).toFloat() / FACE_IN_MS).coerceIn(0f, 1f) else 0f
+                if (still && drawn) {
+                    gate.showing(still = true)
+                    val tinting = veilChanging(nowMs)
+                    if (gain != lastGain || clockNew || tinting) {
+                        driver.inputs.gain = gain
+                        veilInto(driver.inputs, nowMs)
+                        gl.frame(driver.inputs, 0f, 1, clock, faceTex, frontTex)
+                        EGLExt.eglPresentationTimeANDROID(display, surface, System.nanoTime())
+                        EGL14.eglSwapBuffers(display, surface)
+                        lastGain = gain
+                    }
+                    lastNs = 0L; pace.hold()
+                    stillWake.tryAcquire(if (tinting) VEIL_STEP_MS else STILL_STEP_MS, TimeUnit.MILLISECONDS)
+                    continue
+                }
+                // (Held from the start, its first picture is drawn all the same, with no sensors for it.)
+                gate.showing(still = still)
+                val now = System.nanoTime()
+                // The real time since the last picture, on the grid; while something reacts, in steps of 1/120 s.
+                val dt = pace.picture(now)
+                val steps = DustPace.steps(dt, driver.active)
+                val gap = if (lastNs == 0L) 0L else now - lastNs
+                lastNs = now
+                // The phone's movement as the sensors' direct channel has it now (nothing without one: the listener's
+                // samples are in DustMotion already).
+                io.sensorPoll()
+                val inp = driver.next(dt, nowMs, steps)
+                inp.gain = gain
+                // The message island's tint (none: the face exactly as always).
+                veilInto(inp, nowMs)
+                val tintMoving = inp.tint > 0f && veilFrame.moving
+                // The CPU's time split for the log: the inputs, the motes' step, the drawing, the swap.
+                val stepAt = System.nanoTime()
+                gl.step(inp, dt, steps)
+                val drawAt = System.nanoTime()
+                gl.picture(inp, clock, faceTex, frontTex)
+                EGLExt.eglPresentationTimeANDROID(display, surface, pace.dueNs)
+                val swapAt = System.nanoTime()
+                EGL14.eglSwapBuffers(display, surface)
+                val sent = System.nanoTime()
+                lastGain = gain
+                if (!drawn) { drawn = true; shown() }
+                if (count.picture(driver.touched, driver.quick, driver.active, gap, sent - now, sent - swapAt, stepAt - now, drawAt - stepAt)) {
+                    // Once in 600 pictures (five to ten seconds): the thread's own CPU time, the panel's rate (a call to
+                    // the display's service), the sensors' rates.
+                    val thread = android.os.Debug.threadCpuTimeNanos()
+                    val panel = runCatching { io.panelHz() }.getOrDefault(0f)
+                    val sensors = runCatching { io.sensorSaid() }.getOrDefault("")
+                    android.util.Log.i("AiUsageRear", DustPace.line(
+                        count, if (thread >= 0L && threadFrom >= 0L) thread - threadFrom else -1L, sent - countFromNs, panel, sensors,
+                    ))
+                    count.reset(); countFromNs = sent; threadFrom = thread
+                }
+                // The clock read again: shown() and the log line take their time, which the sleep must not add to.
+                val t = System.nanoTime()
+                // Every refresh while the island's outline moves over a tint, so the colour keeps up with it.
+                val wait = pace.next(t, driver.quick || tintMoving) - t - DUST_LEAD_NS
+                if (wait > 0) Thread.sleep(wait / 1_000_000, (wait % 1_000_000).toInt())
+            }
+        } finally {
+            gate.end()
+            // The finger it showed is let go with the show (its lift may come when the dust no longer hears it).
+            io.finger.reset()
+            runCatching { gl.release() }
         }
     }
 
@@ -308,6 +504,17 @@ class SceneEngine(
         val fx = effects.at(nowMs, weather, moonClip && !still, clouds, glitch)
         GLES20.glUniform3f(GLES20.glGetUniformLocation(program, "uCloud"), fx[0], fx[1], fx[2])
         GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "uGlitch"), fx[3], fx[4])
+        // The message island's tint: its uniforms only while one is up or just went (0 then: the picture as always).
+        val v = veilFrame
+        val tinted = veilRead(nowMs)
+        if (tinted || veilDrawn > 0f) {
+            GLES20.glUniform4f(uTintM, v.srgb[0], v.srgb[1], v.srgb[2], if (tinted) v.amount else 0f)
+            if (tinted) {
+                GLES20.glUniform4f(uTintBoxM, v.cx, v.cy, v.w / 2f, v.h / 2f)
+                GLES20.glUniform2f(uTintShapeM, v.r, v.feather)
+            }
+        }
+        veilDrawn = if (tinted) v.amount else 0f
         val pos = GLES20.glGetAttribLocation(program, "aPos")
         val uv = GLES20.glGetAttribLocation(program, "aUv")
         QUAD.position(0)
@@ -321,6 +528,34 @@ class SceneEngine(
         EGL14.eglSwapBuffers(display, surface)
     }
 
+    /**
+     * The island's tint at [nowMs] into [veilFrame]; true when there is one to draw. Counts the picture's gap for the log
+     * while an island is up, and says the gaps once as it goes.
+     */
+    private fun veilRead(nowMs: Long): Boolean {
+        val v = veil
+        val up = v != null && v.up
+        val on = up && v!!.read(nowMs, veilFrame)
+        veilGaps.picture(up, System.nanoTime())?.let { android.util.Log.i("AiUsageRear", it) }
+        return on
+    }
+
+    /** The tint changes from the last picture drawn: moving, or going to nothing (one picture more at 0). */
+    private fun veilChanging(nowMs: Long): Boolean {
+        val v = veil ?: return veilDrawn > 0f
+        if (!v.up) return veilDrawn > 0f
+        val on = v.read(nowMs, veilFrame)
+        return if (on) veilFrame.moving || veilFrame.amount != veilDrawn else veilDrawn > 0f
+    }
+
+    /** The dust's inputs take the tint at [nowMs] (none: amount 0, the face as always). */
+    private fun veilInto(inp: DustField.Inputs, nowMs: Long) {
+        val on = veilRead(nowMs)
+        if (!on) { inp.tint = 0f; veilDrawn = 0f; return }
+        veilFrame.into(inp)
+        veilDrawn = veilFrame.amount
+    }
+
     private fun setUp() {
         if (context != EGL14.EGL_NO_CONTEXT) return
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -329,23 +564,39 @@ class SceneEngine(
         check(EGL14.eglInitialize(display, version, 0, version, 1)) { "EGL did not start" }
         val configs = arrayOfNulls<EGLConfig>(1)
         val n = IntArray(1)
-        val attrs = intArrayOf(
+        fun attrs(renderable: Int) = intArrayOf(
             EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
-            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT, EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT, EGL14.EGL_NONE,
+            EGL14.EGL_RENDERABLE_TYPE, renderable, EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT, EGL14.EGL_NONE,
         )
-        check(EGL14.eglChooseConfig(display, attrs, 0, configs, 0, 1, n, 0) && n[0] > 0) { "no EGL config" }
-        context = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT, intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
+        es3 = false; srgb = false
+        // The dust face's GLES 3, where it can be had; the moon's GLES 2 as always otherwise.
+        if (gles3 && EGL14.eglChooseConfig(display, attrs(EGLExt.EGL_OPENGL_ES3_BIT_KHR), 0, configs, 0, 1, n, 0) && n[0] > 0) {
+            context = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT, intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE), 0)
+            es3 = context != EGL14.EGL_NO_CONTEXT
+        }
+        if (!es3) {
+            check(EGL14.eglChooseConfig(display, attrs(EGL14.EGL_OPENGL_ES2_BIT), 0, configs, 0, 1, n, 0) && n[0] > 0) { "no EGL config" }
+            context = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT, intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0)
+        }
         check(context != EGL14.EGL_NO_CONTEXT) { "no EGL context" }
-        surface = EGL14.eglCreateWindowSurface(display, configs[0], output, intArrayOf(EGL14.EGL_NONE), 0)
+        if (es3) {
+            // Linear light in, sRGB out, blended right (EGL_KHR_gl_colorspace); without it the shaders encode.
+            surface = EGL14.eglCreateWindowSurface(display, configs[0], output, intArrayOf(EGL_GL_COLORSPACE, EGL_GL_COLORSPACE_SRGB, EGL14.EGL_NONE), 0)
+            srgb = surface != EGL14.EGL_NO_SURFACE
+        }
+        if (!srgb) surface = EGL14.eglCreateWindowSurface(display, configs[0], output, intArrayOf(EGL14.EGL_NONE), 0)
         check(surface != EGL14.EGL_NO_SURFACE) { "no EGL surface: 0x${Integer.toHexString(EGL14.eglGetError())}" }
         check(EGL14.eglMakeCurrent(display, surface, surface, context)) { "EGL make current failed" }
         EGL14.eglSwapInterval(display, 0)
 
-        program = link(VERTEX, FRAGMENT)
         val tex = IntArray(3)
         GLES20.glGenTextures(3, tex, 0)
         videoTex = tex[0]; faceTex = tex[1]; frontTex = tex[2]
-        for ((target, id) in listOf(GLES11Ext.GL_TEXTURE_EXTERNAL_OES to videoTex, GLES20.GL_TEXTURE_2D to faceTex, GLES20.GL_TEXTURE_2D to frontTex)) {
+        // The clock's two textures for any face; the clip's program, texture and decoder surface only for a clip (the dust
+        // has no video: no decoder thread, no shader of the moon's compiled for nothing).
+        val targets = if (gles3) listOf(GLES20.GL_TEXTURE_2D to faceTex, GLES20.GL_TEXTURE_2D to frontTex)
+            else listOf(GLES11Ext.GL_TEXTURE_EXTERNAL_OES to videoTex, GLES20.GL_TEXTURE_2D to faceTex, GLES20.GL_TEXTURE_2D to frontTex)
+        for ((target, id) in targets) {
             GLES20.glBindTexture(target, id)
             GLES20.glTexParameteri(target, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(target, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
@@ -355,7 +606,12 @@ class SceneEngine(
             if (target == GLES20.GL_TEXTURE_2D) GLES20.glTexImage2D(target, 0, GLES20.GL_RGBA, 1, 1, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ByteBuffer.allocateDirect(4))
         }
         android.opengl.Matrix.setIdentityM(texMatrix, 0)
+        if (gles3) return
 
+        program = link(VERTEX, FRAGMENT)
+        uTintM = GLES20.glGetUniformLocation(program, "uTint")
+        uTintBoxM = GLES20.glGetUniformLocation(program, "uTintBox")
+        uTintShapeM = GLES20.glGetUniformLocation(program, "uTintShape")
         val thread = HandlerThread("scene-frames").apply { start() }
         frameThread = thread
         val st = SurfaceTexture(videoTex)
@@ -417,7 +673,19 @@ class SceneEngine(
         }
 
         private const val FACE_IN_MS = 320f
+        /** What [Control.strength] says when the show is to stop. */
+        const val STOP = -1f
+        /** What [play] says when the dust face cannot be drawn here (no GLES 3, a shader this GPU refuses). */
+        const val DUST_FAILED = "dust failed: "
+        /** The rear's refresh, the grid the dust's pictures go on, and how early a picture is sent before its time. */
+        private val REAR_PERIOD_NS = FramePace.periodNsOf(FramePace.REAR_HZ)
+        private const val DUST_LEAD_NS = 4_000_000L
+        /** EGL_KHR_gl_colorspace (EGL 1.5's EGL_GL_COLORSPACE, _SRGB). */
+        private const val EGL_GL_COLORSPACE = 0x309D
+        private const val EGL_GL_COLORSPACE_SRGB = 0x3089
         private const val STILL_STEP_MS = 200L
+        /** While the island's tint moves over a picture that is not stepped by itself: drawn again this often (the rear's 120 Hz). */
+        private const val VEIL_STEP_MS = 8L
         private const val FRAME_WAIT_MS = 120L
         private const val START_LEAD_NS = 30_000_000L
         private const val RELEASE_LEAD_NS = 8_000_000L
@@ -427,7 +695,7 @@ class SceneEngine(
             put(floatArrayOf(-1f, -1f, 0f, 0f, 1f, -1f, 1f, 0f, -1f, 1f, 0f, 1f, 1f, 1f, 1f, 1f))
         }
 
-        private const val VERTEX = """
+        internal const val VERTEX = """
             attribute vec2 aPos;
             attribute vec2 aUv;
             uniform mat4 uTex;
@@ -446,7 +714,7 @@ class SceneEngine(
             }
         """
 
-        private const val FRAGMENT = """
+        internal const val FRAGMENT = """
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
             uniform samplerExternalOES uVideo;
@@ -465,6 +733,11 @@ class SceneEngine(
             // The glitch: x its strength now (0 when there is none, which is nearly always), y a seed that
             // jumps while it lasts.
             uniform vec2 uGlitch;
+            // The message island's tint (NoticeVeil): the app's colour for a luminance of 1 and how much of it (0: none,
+            // the picture exactly as always); the page's outline (centre, half size; corner, soft edge; rear px).
+            uniform vec4 uTint;
+            uniform vec4 uTintBox;
+            uniform vec2 uTintShape;
             varying vec2 vColor;
             varying vec2 vMatte;
             varying vec2 vFace;
@@ -498,6 +771,14 @@ class SceneEngine(
                 c += uCloud.z * earth * vec3(0.55, 0.6, 0.7) * max(c.r, max(c.g, c.b));
                 float peak = max(c.r, max(c.g, c.b));
                 c *= smoothstep(uCrush.x, uCrush.y, peak);
+                // The live picture in the app's colour inside the page's outline (lengths in hundreds of px: mediump).
+                if (uTint.w > 0.0) {
+                    vec2 b = (abs(px - uTintBox.xy) - (uTintBox.zw - vec2(uTintShape.x))) * 0.01;
+                    float dd = (length(max(b, vec2(0.0))) + min(max(b.x, b.y), 0.0)) * 100.0 - uTintShape.x;
+                    float u = clamp(0.5 - dd / max(uTintShape.y, 0.001), 0.0, 1.0);
+                    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+                    c = mix(c, min(uTint.rgb * lum, vec3(1.0)), uTint.w * u * u * (3.0 - 2.0 * u));
+                }
                 vec4 f = texture2D(uFace, vFace) * uFaceAlpha;
                 if (uDepth > 0.5) {
                     float subject = smoothstep(0.35, 0.65, texture2D(uVideo, vMatte).g);

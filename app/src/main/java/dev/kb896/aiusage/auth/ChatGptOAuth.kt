@@ -16,29 +16,6 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 
-/**
- * ChatGPT's sign-in, for its usage limits on the back.
- *
- * WHAT THERE IS TO SIGN IN TO. ChatGPT gives a signed-in client no figures for its chat models' message
- * caps: none is documented and none was found. What it does give is the plan's CODEX limits,
- * a five-hour window and a weekly one, to its own open-source Codex client (github.com/openai/codex), and
- * that is what this reads (data/ChatGptUsageApi). This sign-in is that client's, step for step, read from
- * its source (codex-rs/login/src/server.rs, oauth/authorization.rs, oauth/client.rs):
- *  - the browser goes to `https://auth.openai.com/oauth/authorize` with the Codex client id, PKCE (S256), a
- *    state, and a redirect to a listener on this phone, `http://127.0.0.1:1455/auth/callback` (1457 when 1455
- *    is taken): those two are the only redirects OpenAI's side accepts for this client;
- *  - the code is exchanged at `/oauth/token`, form-encoded; the answer has an id token, an access token and a
- *    refresh token;
- *  - a refresh is the same address with a JSON body. REFRESH TOKENS ROTATE: each refresh gives a new one and
- *    the old one must not be used again, so every answer is stored at once.
- * The account id the usage request needs is a claim of the id token.
- *
- * NOT VERIFIED AGAINST A LIVE ACCOUNT when this was written: the sign-in needs a real account, and none was used to
- * try it. The scope asked for is the narrow one (identity and a refresh token), not the connector rights the Codex
- * client also asks for: reading usage needs none of them.
- *
- * Nothing here is logged but an HTTP status and OAuth's own short error word. Tokens never are.
- */
 class ChatGptOAuth(
     private val client: OkHttpClient,
     private val issuer: HttpUrl = "https://auth.openai.com/".toHttpUrl(),

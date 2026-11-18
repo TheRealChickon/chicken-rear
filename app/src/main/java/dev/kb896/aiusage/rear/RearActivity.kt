@@ -97,6 +97,9 @@ class RearActivity : Activity() {
         const val EXTRA_NOTICES_TITLES = "titles"
         const val EXTRA_NOTICES_TEXTS = "texts"
         const val ACTION_DISMISS_NOTIFICATION = "dev.kb896.aiusage.DISMISS_NOTIFICATION"
+        /** To the relay: the notification [EXTRA_NOTIFICATION_KEY] thrown on the back the snoozing way, for [EXTRA_SNOOZE_MS]. */
+        const val ACTION_SNOOZE_NOTIFICATION = "dev.kb896.aiusage.SNOOZE_NOTIFICATION"
+        const val EXTRA_SNOOZE_MS = "dev.kb896.aiusage.extra.SNOOZE_MS"
         const val ACTION_NOTIFICATIONS_SYNC = "dev.kb896.aiusage.NOTIFICATIONS_SYNC"
 
         /**
@@ -694,13 +697,13 @@ class RearActivity : Activity() {
             // (ShizukuBridge: update, hide, IRearEvents.onPanelPoke/onPanelStepBack).
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
-        render(intent?.getStringExtra(EXTRA_STATE).orEmpty())
+        render(intent?.getStringExtra(EXTRA_STATE).orEmpty(), started = true)
         // This process may be new, and the front may have changed while it was gone: ask
         // the relay what is there now (it answers only when matching is on).
         sendBroadcast(Intent(ACTION_NOTIFICATIONS_SYNC).setPackage(packageName))
     }
 
-    private fun render(payload: String) {
+    private fun render(payload: String, started: Boolean = false) {
         val wantCalibrate = CalibrateMode.isCalibrate(payload)
         if (wantCalibrate != calibrating) {
             calibrating = wantCalibrate
@@ -708,7 +711,13 @@ class RearActivity : Activity() {
         }
         if (!calibrating) {
             val decoded = StatePayload.decode(payload)
-            dial.config = decoded.config
+            val demo = !started || dev.kb896.aiusage.DebugLock.launchDemo(dev.kb896.aiusage.BuildConfig.DEBUG, decoded.config.demoMode) {
+                dev.kb896.aiusage.data.ConfigStore(applicationContext).loadFresh().demoMode
+            }
+            dial.config = if (decoded.config.demoMode && !demo) {
+                Log.i(TAG, "the demo in the state this panel was started with is not in the stored settings: not taken")
+                decoded.config.copy(demoMode = false)
+            } else decoded.config
             dial.state = decoded.state
             dial.weather = decoded.weather
             // The switch may have just been thrown either way: on has to take the hold

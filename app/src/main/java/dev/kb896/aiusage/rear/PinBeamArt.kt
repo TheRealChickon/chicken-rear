@@ -133,6 +133,43 @@ class PinBeamArt {
         c.restoreToCount(count)
     }
 
+    private var sheetShaderOf: Bitmap? = null
+    private var sheetShader: android.graphics.BitmapShader? = null
+    private val sheetMatrix = Matrix()
+
+    /**
+     * A PICTURE'S PIN: the picture itself lifts off where the sheet of words would (its rounded corners, its shadow, its
+     * rim), centred on ([cx], [cy]), [scale] times its size, fitted in its own shape into [room] wide and three quarters
+     * of that high (never stretched).
+     */
+    fun sheetPicture(c: Canvas, picture: Bitmap, cx: Float, cy: Float, room: Float, scale: Float, alpha: Float, lift: Float, unit: Float) {
+        if (alpha <= 0.004f || picture.isRecycled || picture.width <= 0 || picture.height <= 0) return
+        val k = minOf(room / picture.width, room * 0.75f / picture.height)
+        val w = picture.width * k; val h = picture.height * k
+        val count = c.save()
+        c.translate(cx, cy)
+        c.scale(scale, scale)
+        rect.set(-w / 2f, -h / 2f, w / 2f, h / 2f)
+        val r = 34f * unit
+        val whole = if (alpha < 0.996f) { layer.alpha = (alpha * 255).toInt(); c.saveLayer(rect.left - 60f * unit, rect.top - 60f * unit, rect.right + 60f * unit, rect.bottom + 90f * unit, layer) } else -1
+        for (i in 1..5) {
+            fill.color = ((lift * 0.07f * 255).toInt().coerceIn(0, 255) shl 24)
+            val grow = i * 5f * unit * lift
+            c.drawRoundRect(rect.left - grow, rect.top - grow + 16f * unit * lift, rect.right + grow, rect.bottom + grow + 26f * unit * lift, r + grow, r + grow, fill)
+        }
+        if (sheetShaderOf !== picture) { sheetShaderOf = picture; sheetShader = android.graphics.BitmapShader(picture, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP) }
+        sheetMatrix.setRectToRect(RectF(0f, 0f, picture.width.toFloat(), picture.height.toFloat()), rect, Matrix.ScaleToFit.FILL)
+        sheetShader!!.setLocalMatrix(sheetMatrix)
+        pic.shader = sheetShader
+        c.drawRoundRect(rect, r, r, pic)
+        pic.shader = null
+        line.strokeWidth = 1.5f * unit
+        line.color = 0x38FFFFFF
+        c.drawRoundRect(rect, r, r, line)
+        if (whole >= 0) c.restoreToCount(whole)
+        c.restoreToCount(count)
+    }
+
     companion object {
         private const val PAD = 44f
         /** The light round the card's edge: how many edge-thicknesses wide, how strong. */

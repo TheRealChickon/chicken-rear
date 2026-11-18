@@ -53,6 +53,37 @@ object RearPanel {
         }.onFailure { Log.w(TAG, "light: the panel's own level cannot be read on this firmware (${(it.cause ?: it).message})") }.getOrNull()
     }
 
+    /**
+     * [read], kept for [keepMs]: the back's brightness is worked out again two or three times a second while it is lit
+     * (RearUserService.applySceneLook), and asked the display manager each time. The panel's level only bounds the back
+     * from below (RearLight.LEAST_NITS), Xiaomi moves it over seconds, and what it gives is eased over 1.6 s
+     * (RearLight.EASE_MS). [forget] when the light around it has changed (setAmbient), the back is lit again or the rule
+     * lights it: read again at once. Only a reading that is a level is kept: NaN (off, or not had) is read again at the
+     * next look, as before. Pure but for [read]; any thread.
+     */
+    class Kept(private val keepMs: Long = KEEP_MS, private val read: (Int) -> Float = RearPanel::read) {
+        private var display = 0
+        private var at = 0L
+        private var have = false
+        private var nits = Float.NaN
+
+        /** The panel's nits on [displayId] at [now] (uptime): the kept reading if it is under [keepMs] old, else read. */
+        @Synchronized
+        fun nits(displayId: Int, now: Long): Float {
+            if (have && displayId == display && now - at < keepMs) return nits
+            nits = read(displayId)
+            display = displayId; at = now; have = !nits.isNaN()
+            return nits
+        }
+
+        /** The next [nits] reads. */
+        @Synchronized
+        fun forget() { have = false }
+    }
+
+    /** How long [Kept] keeps a reading. */
+    const val KEEP_MS = 2_000L
+
     /** The panel's nits now on logical display [displayId]; NaN when it cannot be had. */
     fun read(displayId: Int): Float {
         if (refused) return Float.NaN

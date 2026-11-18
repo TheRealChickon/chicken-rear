@@ -89,7 +89,7 @@ class ShizukuBridge(private val context: Context) {
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = if (binder != null && binder.pingBinder()) IRearService.Stub.asInterface(binder) else null
-            if (service != null) { wasBound = true; runCatching { binder?.linkToDeath(shellDeath, 0) } }
+            if (service != null) { wasBound = true; runCatching { binder?.linkToDeath(shellDeath, 0) }; dev.kb896.aiusage.service.RestartLog.say("shell service bound"); boundNow() }
             portalApps?.let { b -> runCatching { service?.setPortalApps(b) } }
             // The settings the shell runs on, before anything is placed or shown with them: a held
             // banner below is drawn by a shell that knows it is in companion mode, with notifications
@@ -121,9 +121,11 @@ class ShizukuBridge(private val context: Context) {
             // And knows no battery: the scene's percent.
             battery?.let { (level, charging) -> runCatching { service?.setBattery(level, charging) } }
             ambient?.let { (lux, source) -> runCatching { service?.setAmbient(lux, source) } }
+            dots?.let { d -> runCatching { service?.setDots(d) } }
             stay?.let { (level, why) -> runCatching { service?.setStay(level, why) } }
             media?.let { m -> runCatching { service?.setMedia(m) } }
             live?.let { l -> runCatching { service?.setLive(l) } }
+            navigation?.let { n -> runCatching { service?.setLive(n) } }
             pending?.let { (p, light) -> pending = null; show(p, light) }
             // Now there is somebody to ask whether the panel is there: supervision, again.
             if (service != null) onConnected()
@@ -144,6 +146,7 @@ class ShizukuBridge(private val context: Context) {
         goneAt = android.os.SystemClock.elapsedRealtime()
         service = null
         Log.w(TAG, "the shell service is gone ($why) — binding it again")
+        runCatching { dev.kb896.aiusage.service.HealthCheck.cue(context, dev.kb896.aiusage.service.Health.Cue.SHELL_GONE, "the shell gone") }
         for (after in longArrayOf(0L, 500L, 2_000L, 6_000L)) mainHandler.postDelayed({ if (service == null) bindWhenReachable() }, after)
     }
     @Volatile private var goneAt = 0L
@@ -151,6 +154,8 @@ class ShizukuBridge(private val context: Context) {
 
     /** Asked every few seconds: a shell that no longer answers is bound again; so is a guard. Any thread. */
     fun ensureAlive() {
+        // Without Shizuku there is nothing to bind with: its binder arriving binds both (onShizukuArrived).
+        if (!runCatching { Shizuku.pingBinder() }.getOrDefault(false)) return
         val s = service
         if (s != null && !runCatching { s.asBinder().pingBinder() }.getOrDefault(false)) onShellGone("no answer")
         else if (s == null && wasBound && android.os.SystemClock.elapsedRealtime() - goneAt > 8_000L) onShellGone("still away")
@@ -163,11 +168,14 @@ class ShizukuBridge(private val context: Context) {
 
     private val guardArgs by lazy {
         Shizuku.UserServiceArgs(ComponentName(context.packageName, RearGuardService::class.java.name))
-            .daemon(true).processNameSuffix("guard").debuggable(false).version(3)
+            .daemon(true).processNameSuffix("guard").debuggable(false).version(9)
     }
     @Volatile private var guard: IBinder? = null
     private val guardConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) { guard = binder?.takeIf { it.pingBinder() } }
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            guard = binder?.takeIf { it.pingBinder() }
+            if (guard != null) { dev.kb896.aiusage.service.RestartLog.say("guard bound"); boundNow() }
+        }
         override fun onServiceDisconnected(name: ComponentName?) {
             guard = null
             for (after in longArrayOf(0L, 1_000L, 5_000L)) mainHandler.postDelayed({ bindGuard() }, after)
@@ -177,6 +185,50 @@ class ShizukuBridge(private val context: Context) {
     private fun bindGuard() {
         if (guard != null) return
         runCatching { Shizuku.bindUserService(guardArgs, guardConnection) }.onFailure { Log.e(TAG, "guard: bind failed", it) }
+    }
+
+    // -- after a restart: both shell services bound each time Shizuku's binder arrives (service/ShizukuArrival) --
+
+    private val bindBackoff = dev.kb896.aiusage.service.Backoff()
+    private val bindCheck = Runnable { checkBound() }
+
+    /** Whether the main shell service and the guard both answer now. */
+    fun shellBound(): Boolean = runCatching { service?.asBinder()?.pingBinder() == true }.getOrDefault(false)
+    fun guardBound(): Boolean = runCatching { guard?.pingBinder() == true }.getOrDefault(false)
+
+    /**
+     * Shizuku's binder has arrived (main thread): both shell services bound, now, and looked at again after
+     * [dev.kb896.aiusage.service.Backoff]'s waits until both are. Not allowed in Shizuku: nothing to bind, said once.
+     */
+    fun onShizukuArrived() {
+        mainHandler.removeCallbacks(bindCheck)
+        bindBackoff.reset()
+        if (!status().granted) { dev.kb896.aiusage.service.RestartLog.say("Shizuku is there, but this app is not allowed in it: nothing bound"); return }
+        bind()
+        mainHandler.postDelayed(bindCheck, bindBackoff.next())
+    }
+
+    /** Shizuku's binder is gone: no more looks until it comes again. */
+    fun onShizukuGone() {
+        mainHandler.removeCallbacks(bindCheck)
+        bindBackoff.reset()
+    }
+
+    private fun checkBound() {
+        if (shellBound() && guardBound()) return
+        if (!status().granted) return
+        val wait = bindBackoff.next()
+        dev.kb896.aiusage.service.RestartLog.say("not bound yet (shell ${if (shellBound()) "yes" else "no"}, guard ${if (guardBound()) "yes" else "no"}) — binding again, next look in ${wait / 1000} s")
+        if (!shellBound()) service = null
+        if (!guardBound()) guard = null
+        bind()
+        mainHandler.postDelayed(bindCheck, wait)
+        runCatching { dev.kb896.aiusage.service.HealthCheck.cue(context, dev.kb896.aiusage.service.Health.Cue.BIND_RETRY, "still not bound") }
+    }
+
+    private fun boundNow() {
+        if (shellBound() && guardBound()) { mainHandler.removeCallbacks(bindCheck); bindBackoff.reset() }
+        runCatching { dev.kb896.aiusage.service.HealthCheck.cue(context, dev.kb896.aiusage.service.Health.Cue.BOUND, "bound") }
     }
 
     fun status(): Status {
@@ -858,6 +910,15 @@ class ShizukuBridge(private val context: Context) {
         runCatching { service?.setAmbient(lux, source) }
     }
 
+    /** The ":dots" process's binder (rear/dots/DotsLink), kept for a shell that connects later. */
+    @Volatile private var dots: IBinder? = null
+
+    /** IRearService.setDots: OpenAI's Dots character for the usage page, or null. */
+    fun setDots(b: IBinder?) {
+        dots = b
+        runCatching { service?.setDots(b) }
+    }
+
     /** The battery as the app last read it, kept for a shell that connects later. */
     @Volatile private var battery: Pair<Int, Boolean>? = null
 
@@ -993,17 +1054,25 @@ class ShizukuBridge(private val context: Context) {
 
     /** The live card's notification (a timer, a call), kept for a shell that connects later. */
     @Volatile private var live: android.os.Bundle? = null
+    /** The route being followed (NavigationNotification's packet, kept apart: a call or a timer does not replace it), likewise. */
+    @Volatile private var navigation: android.os.Bundle? = null
+
+    /** IRearService.health: the shell's half of the health check; null where no shell is bound. Blocks: off the main thread. */
+    fun health(again: Boolean): android.os.Bundle? = runCatching { service?.health(again) }.getOrNull()
 
     /** IRearService.pinVia: a pin of ours has just been handed to Xiaomi's own. False where no shell is bound to hear it. */
     fun pinVia(b: android.os.Bundle): Boolean = runCatching { service?.pinVia(b); service != null }.getOrDefault(false)
 
+    /** IRearService.earbuds: earbuds have connected; the back plays its moment if it may. False where no shell is bound. */
+    fun earbuds(b: android.os.Bundle): Boolean = runCatching { service?.earbuds(b); service != null }.getOrDefault(false)
+
     fun setLive(b: android.os.Bundle) {
-        live = b
+        if (b.getString("kind") == dev.kb896.aiusage.service.NavigationNotification.KIND) navigation = b else live = b
         runCatching { service?.setLive(b) }
     }
 
-    /** IRearService.setMusicLevel: how loud what is playing is (service/MusicLevel). Not kept: stale in a moment. */
-    fun setMusicLevel(level: Float) { runCatching { service?.setMusicLevel(level) } }
+    /** IRearService.setMusicSound: what the sound does now (service/MusicSound's packet). Not kept: stale in a moment. */
+    fun setMusicSound(v: FloatArray) { runCatching { service?.setMusicSound(v) } }
 
     /** What is playing, for the back's card; kept for a shell that connects later. */
     @Volatile private var media: android.os.Bundle? = null
@@ -1016,6 +1085,11 @@ class ShizukuBridge(private val context: Context) {
     /** A pinned note's bin was pressed on the back: taken off the list, and the payload pushed back (Graph). */
     var onPinRemoved: (at: Long) -> Unit = { }
 
+    /** The pinned notes were put in order on the back: their names, the first first (Graph keeps it: PinOrder.apply). */
+    var onPinsOrdered: (order: List<Long>) -> Unit = { }
+    /** "Not now" on a note standing at its place on the back (IRearEvents.onArrivalLater): it waits again (Graph). */
+    var onArrivalLater: (at: Long) -> Unit = { }
+
     /** The usage page was swiped in on the back: the poll service fetches and pushes (UsagePollService). */
     var onUsageShown: () -> Unit = { }
 
@@ -1027,6 +1101,14 @@ class ShizukuBridge(private val context: Context) {
 
     /** A press and hold on the back picked another face: saved, and the payload pushed back (Graph). */
     var onFacePicked: (file: String) -> Unit = { }
+
+    /** The face picker on the back chose a face (FaceCatalog key), the shell's choice number [seq]: saved and sent back (Graph). */
+    var onFaceChosen: (key: String, seq: Long) -> Unit = { _, _ -> }
+
+    /** The faces on the phone changed: the settings read the list again (faces/faces.json). */
+    var onFacesChanged: () -> Unit = { }
+    /** Listeners of [onFacesChanged] besides the Graph's (the settings' page, while it is open). */
+    val facesListeners = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
@@ -1084,6 +1166,22 @@ class ShizukuBridge(private val context: Context) {
             )
         }
 
+        // Thrown the snoozing way on the back (NoticeThrow): off the back's list as a dismissal is, and snoozed on the
+        // phone for the hour by the relay; Android brings it back by itself after, and the relay shows it again then.
+        override fun onNoticeSnoozed(key: String?, ms: Long) {
+            if (key.isNullOrEmpty() || key.length > 1024 || dev.kb896.aiusage.rear.NoticeThrow.isDemo(key) || key.startsWith(RearDialView.KEYLESS)) return
+            dev.kb896.aiusage.service.BackNotices.removed(context, key)
+            context.sendBroadcast(
+                android.content.Intent(RearActivity.ACTION_NOTIFICATION_REMOVED).setPackage(context.packageName)
+                    .putExtra(RearActivity.EXTRA_NOTIFICATION_KEY, key),
+            )
+            context.sendBroadcast(
+                android.content.Intent(RearActivity.ACTION_SNOOZE_NOTIFICATION).setPackage(context.packageName)
+                    .putExtra(RearActivity.EXTRA_NOTIFICATION_KEY, key)
+                    .putExtra(RearActivity.EXTRA_SNOOZE_MS, dev.kb896.aiusage.service.PhoneThrow.duration(ms)),
+            )
+        }
+
         override fun onPortalDpi(pkg: String?, dpi: Int) {
             if (pkg.isNullOrEmpty() || pkg.length > 255) return
             mainHandler.post { this@ShizukuBridge.onPortalDpi(pkg, dpi) }
@@ -1128,6 +1226,20 @@ class ShizukuBridge(private val context: Context) {
             CaptureStore.save(context, file, video)
         }
 
+        // A screenshot of the back: claimed from the shell first (ShotKeeper), so that one the shell saved itself while
+        // this app was frozen is not saved twice. No shell to ask (unbound, or it died): this app saves it.
+        override fun onShot(file: android.os.ParcelFileDescriptor?, name: String?) {
+            if (file == null) return
+            val shot = name?.takeIf { BackShots.isName(it) }
+            val claim = if (shot == null) ShotKeeper.Claim.SAVE
+            else runCatching { service?.claimShot(shot) }.getOrNull()?.let { ShotKeeper.Claim.of(it) } ?: ShotKeeper.Claim.SAVE
+            when (claim) {
+                ShotKeeper.Claim.SAVE -> CaptureStore.save(context, file, video = false, name = shot)
+                ShotKeeper.Claim.SCAN -> { runCatching { file.close() }; CaptureStore.scanShellShot(context, shot!!) }
+                ShotKeeper.Claim.NOTHING -> runCatching { file.close() }
+            }
+        }
+
         override fun onDeleteLastShot() {
             CaptureStore.deleteLastShot(context)
         }
@@ -1154,6 +1266,9 @@ class ShizukuBridge(private val context: Context) {
 
         override fun onPinRemoved(at: Long) { mainHandler.post { this@ShizukuBridge.onPinRemoved(at) } }
 
+        override fun onPinsOrdered(order: LongArray?) { val o = order?.toList() ?: return; mainHandler.post { this@ShizukuBridge.onPinsOrdered(o) } }
+        override fun onArrivalLater(at: Long) { mainHandler.post { this@ShizukuBridge.onArrivalLater(at) } }
+
         override fun onUsageShown() { mainHandler.post { this@ShizukuBridge.onUsageShown() } }
 
         override fun onRearTouch() { mainHandler.post { this@ShizukuBridge.onRearTouch() } }
@@ -1170,6 +1285,13 @@ class ShizukuBridge(private val context: Context) {
             if (file.isNullOrEmpty() || file.length > 255 || file.contains('/')) return
             mainHandler.post { this@ShizukuBridge.onFacePicked(file) }
         }
+
+        override fun onFaceChosen(key: String?, seq: Long) {
+            if (key.isNullOrEmpty() || key.length > 80 || !(FaceCatalog.ours(key) || Regex("xiaomi:[0-9a-fA-F-]{8,64}").matches(key))) return
+            mainHandler.post { this@ShizukuBridge.onFaceChosen(key, seq) }
+        }
+
+        override fun onFacesChanged() { mainHandler.post { this@ShizukuBridge.onFacesChanged() } }
 
         override fun onNoticeAction(key: String?, index: Int) {
             if (key.isNullOrEmpty()) return

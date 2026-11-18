@@ -25,6 +25,27 @@ class RowStatesTest {
         assertEquals(RowState(true), RowStates.followsMusic(stored = true, audioAllowed = true))
     }
 
+    @Test fun `our camera on the back - on by default once the camera is allowed, never shown on without it`() {
+        val fresh = dev.kb896.aiusage.data.PanelConfig().cameraOwnRear
+        assertTrue("the wish is on by default", fresh)
+        val missing = RowStates.ownCamera(stored = fresh, cameraAllowed = false)
+        assertFalse(missing.on)
+        assertTrue(missing.note!!.contains("camera"))
+        assertEquals("allowed: on by itself", RowState(true), RowStates.ownCamera(stored = true, cameraAllowed = true))
+        assertEquals("switched off: off, nothing to say", RowState(false), RowStates.ownCamera(stored = false, cameraAllowed = true))
+    }
+
+    @Test fun `sound in videos - a row only while the page is on and the microphone is missing`() {
+        val on = RowStates.ownCamera(stored = true, cameraAllowed = true)
+        val off = RowStates.ownCamera(stored = true, cameraAllowed = false)
+        assertNull(RowStates.videoSound(off, audioAllowed = false))
+        assertNull("sound on: no row", RowStates.videoSound(on, audioAllowed = true))
+        val silent = RowStates.videoSound(on, audioAllowed = false)
+        assertNotNull(silent)
+        assertFalse(silent!!.on)
+        assertTrue(silent.note!!.contains("microphone"))
+    }
+
     @Test fun `notifications - on only with notification access`() {
         assertEquals(RowState(false), RowStates.notifications(stored = false, access = true))
         val missing = RowStates.notifications(stored = true, access = false)

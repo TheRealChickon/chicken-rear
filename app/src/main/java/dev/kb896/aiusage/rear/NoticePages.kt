@@ -3,35 +3,17 @@ package dev.kb896.aiusage.rear
 import dev.kb896.aiusage.Panel
 import kotlin.math.abs
 
-/**
- * The notifications pulled down from the top, AS POP-UP PAGES. One notification fills the back exactly
- * as its pop-up does (NoticePop draws both); no cards, no rows, no time, no counter, no close button.
- *
- * THE PAGES LIE ON ONE ANOTHER, the newest on top, and everything comes from the top and goes back to it, as the
- * pop-up does: the pull brings the pile down; a stroke UP sends the page on top up and away, and the next is
- * under it; a stroke DOWN brings the one before back down over it. On the last page a stroke up takes the whole
- * pile away (shut), and from the bottom edge it does so on any page: the old list's own way out. A stroke
- * SIDEWAYS throws the page out, which dismisses its notification on the phone, from the very edge too. There is
- * no Back gesture and no Back tab on these pages, as on none of ours.
- *
- * [Scene.line] is what the line of app logos along the edge shows: one per waiting notification, and
- * [Scene.focus] says which is on top (between two while a page turns).
- *
- * [logosFirst] is the other way, kept behind a switch: the pull brings down a page of the
- * apps' logos alone; a tap on one, or a stroke up, goes to the pages under it.
- *
- * Pure: times are handed in, and what it means is said by [NoticeShade.Effect]s. In panel units. Not thread-safe:
- * ShellNotices holds the lock.
- *
- * @param left where the part of the back he sees starts (RearGeometry.cutoutUnits).
- */
 class NoticePages(private val left: Float) {
 
     /** One page as it stands: [item] null is the logos' page. [dy] 0 is in place, -HEIGHT fully away above. */
     class Page(val item: NoticeShade.Item?, val dx: Float, val dy: Float, val alpha: Float)
 
     /** A frame: [pages] from the lowest up; [line] and [focus] for the logos along the edge; [empty] for none at all. */
-    class Scene(val pages: List<Page>, val line: List<NoticeShade.Item>, val focus: Float, val empty: Boolean)
+    class Scene(
+        val pages: List<Page>, val line: List<NoticeShade.Item>, val focus: Float, val empty: Boolean,
+        /** "Dismissed" or "Snoozed 1 h" rising as a page is thrown; null when none. */
+        val label: NoticeThrow.Label? = null,
+    )
 
     /** The pull brings a page of logos first (the other reading). Set before a pull. */
     var logosFirst = false
@@ -55,9 +37,12 @@ class NoticePages(private val left: Float) {
     private var settleAt = 0L
     /** How far a drag up has taken the whole pile towards shut. */
     private var closing = 0f
+    /** How far short of its place the pile stood when the finger took it up; null while the finger has not. */
+    private var heldFrom: Float? = null
     private val pullChase = ControlCenter.Chase()
     private val closeChase = ControlCenter.Chase()
 
+    /** What a finger does: SIDE throws the page out, TURN sends the logos' page up, CLOSE takes the whole pile up. */
     private enum class Finger { NONE, UNDECIDED, SIDE, TURN, CLOSE }
     private var finger = Finger.NONE
     private var downX = 0f
@@ -72,16 +57,21 @@ class NoticePages(private val left: Float) {
     /** The last one was thrown out: the pile goes with it, and no "nothing waiting" page comes in its place. */
     private var emptied = false
 
-    /** A page under the finger, or let go and on its way: [moving] at [from]..[to] over [under]. */
+    /** The logos' page under the finger, or on its way (let go, or a logo tapped): [moving] at [from]..[to] over [under]. */
     private class Turn(val moving: String, val under: String?, val from: Float, val to: Float = from, val atMs: Long = -1L)
     private var turn: Turn? = null
 
     private var swipeDx = 0f
+    /** Where the finger has gone across; [swipeDx] is where the page stands (less, for one that may not be thrown). */
+    private var swipeRaw = 0f
     private var swiping = false
     private var springFrom = 0f
     private var springAt = -1L
     private class Leaving(val item: NoticeShade.Item, val fromDx: Float, val dir: Float, val atMs: Long)
     private var leaving: Leaving? = null
+    /** The last throw, for its label: what it did and when. */
+    private var thrown: NoticeThrow.Kind? = null
+    private var thrownAt = -1L
 
     private fun sheets(): List<String> =
         if (logosFirst && items.isNotEmpty()) listOf(LOGOS) + items.map { it.key } else items.map { it.key }
@@ -148,7 +138,8 @@ class NoticePages(private val left: Float) {
         closing = 0f; closeChase.reset()
         finger = Finger.NONE
         at = null; turn = null; leaving = null
-        swiping = false; swipeDx = 0f; springAt = -1L; emptied = false
+        swiping = false; swipeDx = 0f; swipeRaw = 0f; springAt = -1L; emptied = false
+        thrown = null; thrownAt = -1L
         swiped.clear()
     }
 
@@ -175,18 +166,30 @@ class NoticePages(private val left: Float) {
 
     fun isShut(now: Long): Boolean = !pulling && finger == Finger.NONE && progress(now) <= 0f
 
+    /**
+     * THE PILE STANDS OVER THE WHOLE BACK, STILL: down all the way ([progress], the frame's own), nothing [moving], no
+     * finger on it, and [s] (the frame) one page in its place, or the one line with nothing waiting. Each of these is
+     * the pop-up's own picture, opaque edge to edge (NoticePop's ground), so nothing under the pile can be seen
+     * (HiddenFrames). A finger landing on it ends this at once.
+     */
+    fun covers(progress: Float, moving: Boolean, s: Scene): Boolean =
+        finger == Finger.NONE && !moving && progress >= 1f &&
+            (if (s.pages.isEmpty()) s.empty else s.pages.all { it.dx == 0f && it.dy == 0f && it.alpha >= 1f })
+
     /** Something still moves of itself. */
     fun moving(now: Long): Boolean =
         pulling || now - settleAt < NoticeShade.SETTLE_MS || leaving != null ||
             (finger != Finger.NONE && closeChase.shown != closing) ||
             (turn?.let { it.atMs >= 0L && now - it.atMs < TURN_MS } ?: false) ||
-            (springAt >= 0L && now - springAt < NoticeShade.SPRING_MS)
+            (springAt >= 0L && now - springAt < NoticeThrow.SPRING_MS) ||
+            (thrownAt >= 0L && now - thrownAt < NoticeThrow.LABEL_MS)
 
     fun fingerDown(x: Float, y: Float, now: Long) {
         // What was still on its way is where it was going.
-        turn = null; springAt = -1L; swiping = false; swipeDx = 0f
+        turn = null; springAt = -1L; swiping = false; swipeDx = 0f; swipeRaw = 0f
         finger = Finger.UNDECIDED
         closeChase.snap(closing, now)
+        heldFrom = null
         downX = x; downY = y; lastY = y; lastMs = now; speed = 0f
         downMs = now
         fingerKey = top()
@@ -200,8 +203,10 @@ class NoticePages(private val left: Float) {
             if (maxOf(dx, dy) < EdgeGestures.SLOP) return
             finger = when {
                 dx > dy && itemOf(top()) != null -> Finger.SIDE
-                fromBottom -> Finger.CLOSE
-                else -> Finger.TURN
+                // The logos' page alone turns (up, to the pages under it). On a page, up or down, the finger is the
+                // whole pile's: up takes it away, down does nothing; no page is turned to the next or the one before.
+                top() == LOGOS && !fromBottom -> Finger.TURN
+                else -> Finger.CLOSE
             }
             swiping = finger == Finger.SIDE
         }
@@ -210,19 +215,28 @@ class NoticePages(private val left: Float) {
         lastMs = now
         val d = y - downY
         when (finger) {
-            Finger.SIDE -> swipeDx = x - downX
-            Finger.CLOSE -> closing = (-d).coerceAtLeast(0f)
-            Finger.TURN -> {
-                val s = sheets()
-                val i = s.indexOf(top())
-                when {
-                    i < 0 -> { closing = (-d).coerceAtLeast(0f); turn = null }
-                    // The last page has nothing under it: up, the whole pile goes.
-                    d < 0f && i == s.size - 1 -> { closing = -d; turn = null }
-                    d < 0f -> { closing = 0f; turn = Turn(s[i], s[i + 1], d.coerceAtLeast(-Panel.HEIGHT.toFloat())) }
-                    d > 0f && i > 0 -> { closing = 0f; turn = Turn(s[i - 1], s[i], (d - Panel.HEIGHT).coerceAtMost(0f)) }
-                    else -> { closing = 0f; turn = null }
+            Finger.SIDE -> {
+                swipeRaw = x - downX
+                // One that may not be thrown gives a little under the finger, and no more.
+                swipeDx = if (itemOf(fingerKey)?.clearable == false) NoticeThrow.give(swipeRaw) else swipeRaw
+            }
+            Finger.CLOSE -> {
+                // The pile is the finger's from the first move up, taken from where it stands then: still settling in
+                // after the pull, it stops there and does not jump back to its place first. From there it follows the
+                // finger both ways, no lower than its place. Down before that, nothing: it goes on as it was.
+                if (heldFrom == null && d < 0f) {
+                    val from = (1f - progress(now)) * ControlCenter.TRAVEL
+                    heldFrom = from
+                    settleFrom = settleTo
+                    closeChase.snap(from, now)
                 }
+                closing = heldFrom?.let { (it - d).coerceAtLeast(0f) } ?: 0f
+            }
+            Finger.TURN -> {
+                // Up, the logos' page goes up and the newest is under it; down, nothing.
+                val under = sheets().getOrNull(1)
+                closing = 0f
+                turn = if (d < 0f && top() == LOGOS && under != null) Turn(LOGOS, under, d.coerceAtLeast(-Panel.HEIGHT.toFloat())) else null
             }
             else -> Unit
         }
@@ -233,42 +247,43 @@ class NoticePages(private val left: Float) {
         finger = Finger.NONE
         return when (was) {
             Finger.SIDE -> {
-                val dx = swipeDx
+                val dx = swipeRaw
+                val shownDx = swipeDx
                 val item = itemOf(top())
                 swiping = false
-                swipeDx = 0f
+                swipeDx = 0f; swipeRaw = 0f
                 if (item == null) return emptyList()
                 // Thrown out on purpose: far enough, the page that was there as the finger landed, and a stroke, not a
                 // hand that rested and drifted (within a swipe's time of landing, as on every other page).
-                if (abs(dx) >= NoticeShade.DISMISS_DX && item.key == fingerKey && now - downMs <= SceneTouch.SWIPE_MS) {
+                val meant = item.key == fingerKey && NoticeThrow.meant(dx, downMs, now)
+                if (meant && item.clearable) {
                     val next = after(item.key)
-                    leaving = Leaving(item, dx, if (dx < 0f) -1f else 1f, now)
+                    // The page goes the way the finger went; what that does is NoticeThrow's (RearNav.DISMISS_WAY).
+                    val kind = NoticeThrow.kindOfDx(dx)
+                    leaving = Leaving(item, shownDx, if (dx < 0f) -1f else 1f, now)
+                    thrown = kind; thrownAt = now
                     swiped += item.key
                     items = items.filter { it.key != item.key }
                     at = next?.takeIf { it in sheets() }
+                    val effect = if (kind == NoticeThrow.Kind.DISMISS) NoticeShade.Effect.Dismissed(item.key) else NoticeShade.Effect.Snoozed(item.key)
                     // The last one: the pile goes up with it in the same step (no grey "nothing waiting" page jumps in).
-                    if (items.isEmpty()) { emptied = true; listOf(NoticeShade.Effect.Dismissed(item.key)) + settle(progress(now), false, now) }
-                    else listOf(NoticeShade.Effect.Dismissed(item.key))
+                    if (items.isEmpty()) { emptied = true; listOf(effect) + settle(progress(now), false, now) }
+                    else listOf(effect)
                 } else {
-                    springFrom = dx; springAt = now
-                    emptyList()
+                    // Short, or one that may not be thrown: back to its place on a spring, and it stays.
+                    springFrom = shownDx; springAt = now
+                    if (meant) listOf(NoticeShade.Effect.Refused(item.key)) else emptyList()
                 }
             }
-            Finger.CLOSE -> settle(progress(now), ControlCenter.release(true, -closing, speed), now)
+            Finger.CLOSE -> letGo(now)
             Finger.TURN -> {
                 val t = turn
-                when {
-                    closing > 0f -> settle(progress(now), ControlCenter.release(true, -closing, speed), now)
-                    // Dragged up and back down on the last page: let go while it still trails, it settles open (it stood part-way).
-                    t == null -> if (!closeChase.shown.isNaN() && closeChase.shown > 0f) settle(progress(now), true, now) else emptyList()
-                    else -> {
-                        val goingUp = t.moving == top()
-                        val away = if (goingUp) -t.from >= TURN_DY || speed < -ControlCenter.FLING
-                        else !(Panel.HEIGHT + t.from >= TURN_DY || speed > ControlCenter.FLING)
-                        turn = Turn(t.moving, t.under, t.from, if (away) -Panel.HEIGHT.toFloat() else 0f, now)
-                        at = if (away) t.under else t.moving
-                        emptyList()
-                    }
+                if (t == null) letGo(now) else {
+                    // The logos' page: far enough or flicked, it goes up and the newest is on top; else it comes back.
+                    val away = -t.from >= TURN_DY || speed < -ControlCenter.FLING
+                    turn = Turn(t.moving, t.under, t.from, if (away) -Panel.HEIGHT.toFloat() else 0f, now)
+                    at = if (away) t.under else t.moving
+                    emptyList()
                 }
             }
             Finger.UNDECIDED -> {
@@ -295,6 +310,15 @@ class NoticePages(private val left: Float) {
         }
     }
 
+    /** The whole pile let go: taken up, it shuts or comes back down by the stroke, from where it stands; never taken up, it goes on as it was. */
+    private fun letGo(now: Long): List<NoticeShade.Effect> = when {
+        closing > 0f -> settle(progress(now), ControlCenter.release(true, -closing, speed), now)
+        // Dragged up and back down: let go while it still trails, it settles open (it stood part-way).
+        !closeChase.shown.isNaN() && closeChase.shown > 0f -> settle(progress(now), true, now)
+        // Down, or up and back with the pile in its place again: nothing (a flick up at the end does not shut it).
+        else -> emptyList()
+    }
+
     /** What takes [key]'s place when it is thrown out: the one under it, else the one before it. */
     private fun after(key: String): String? {
         val s = sheets()
@@ -306,7 +330,8 @@ class NoticePages(private val left: Float) {
     fun scene(now: Long): Scene {
         leaving?.let { if (now - it.atMs >= NoticeShade.FLY_MS) leaving = null }
         turn?.let { if (it.atMs >= 0L && now - it.atMs >= TURN_MS) turn = null }
-        if (springAt >= 0L && now - springAt >= NoticeShade.SPRING_MS) springAt = -1L
+        if (springAt >= 0L && now - springAt >= NoticeThrow.SPRING_MS) springAt = -1L
+        if (thrownAt >= 0L && now - thrownAt >= NoticeThrow.LABEL_MS) { thrownAt = -1L; thrown = null }
 
         val pages = ArrayList<Page>(3)
         val on = top()
@@ -325,18 +350,22 @@ class NoticePages(private val left: Float) {
         } else if (on != null) {
             val dx = when {
                 swiping -> swipeDx
-                springAt >= 0L -> { val p = ((now - springAt).toFloat() / NoticeShade.SPRING_MS).coerceIn(0f, 1f); springFrom * (1f - p) * (1f - p) }
+                // Back on a spring: it passes its place a little once and comes to rest in it.
+                springAt >= 0L -> springFrom * (1f - NoticeThrow.spring((now - springAt).toFloat() / NoticeThrow.SPRING_MS))
                 else -> 0f
             }
             if (dx != 0f) after(on)?.let { pages += Page(itemOf(it), 0f, 0f, 1f) }
-            pages += Page(itemOf(on), dx, 0f, 1f - (abs(dx) / travel).coerceIn(0f, 1f))
+            // NO FADE: a page aside is the whole page, its corners the display's (NoticePagesArt).
+            pages += Page(itemOf(on), dx, 0f, 1f)
         }
         leaving?.let { l ->
             val p = ((now - l.atMs).toFloat() / NoticeShade.FLY_MS).coerceIn(0f, 1f)
             val dx = l.fromDx + (l.dir * travel - l.fromDx) * (1f - (1f - p) * (1f - p))
-            pages += Page(l.item, dx, 0f, 1f - (abs(dx) / travel).coerceIn(0f, 1f))
+            pages += Page(l.item, dx, 0f, 1f)
         }
-        return Scene(pages, items, focus, items.isEmpty() && leaving == null && !emptied)
+        // The last one thrown takes the pile up with it: its label is then on a layer of its own (ShellNotices), not on the pile.
+        val label = if (emptied) null else thrown?.let { k -> NoticeThrow.labelAt(k, now - thrownAt) }
+        return Scene(pages, items, focus, items.isEmpty() && leaving == null && !emptied, label)
     }
 
     /** How far a page goes sideways to be gone: the width of what he sees. */
@@ -346,9 +375,9 @@ class NoticePages(private val left: Float) {
         /** The logos' page, among the pages' keys. */
         const val LOGOS = "\u0000logos"
 
-        /** A stroke this long turns the page; shorter, it comes back (a flick turns it whatever its length). */
+        /** A stroke this long sends the logos' page up; shorter, it comes back (a flick sends it whatever its length). */
         const val TURN_DY = 100f
-        /** A page's way up or down once let go: about the pop-up's own way in. */
+        /** The logos' page's way up or back once let go: about the pop-up's own way in. */
         const val TURN_MS = 320L
 
         /** The pop-up's own easing as it comes in. */

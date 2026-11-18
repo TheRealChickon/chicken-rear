@@ -96,7 +96,7 @@ class BackChevron(private val layerStack: Int, private val rear: RearGeometry) {
                     continue
                 }
                 val p = progress(x0, fromY, atX, atY)
-                val c = surface.lockCanvas(null)
+                val c = ShellLayer.lockPanelCanvas(surface)
                 try {
                     c.drawColor(0, PorterDuff.Mode.CLEAR)
                     val armed = p >= 1f

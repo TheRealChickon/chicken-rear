@@ -20,13 +20,22 @@ import kotlin.math.abs
  *   longer on the scene it is the next thing.
  *
  * And on the scene alone:
- * - a PRESS AND HOLD ([SWITCH_MS]): the next face, where there is more than one
- *   ([Out.FirstDown] as it lands, then [heldAlone] asked once the time is up).
+ * - a PRESS AND HOLD ([PICKER_HOLD_MS], in place within [HOLD_SLOP]): the face picker (FacePicker, Xiaomi's own,
+ *   copied; its 300 ms long-press timeout is raised past [TAP_MS], so a slow tap stays a tap and the first tap of a
+ *   double tap never opens it) ([Out.FirstDown] as it lands, then [heldAlone] asked once the time is
+ *   up; the shell asks only while the face is what shows, so a press on a live page's button is never eaten).
  * - a DOUBLE TAP, THE SECOND HELD ([HOLD_MS]): the back off, until he wakes it himself
  *   ([Out.SecondDown] as the second lands, then [held] asked once the time is up).
  *
+ * And on the notes page alone:
+ * - a PRESS AND HOLD ([NOTE_HOLD_MS]): the note lifted to be put in order (RearNav's NoteHold; [Out.NotesDown] as it
+ *   lands, then [heldOnNotes] asked once the time is up). The moon's hold and double tap and hold are as they were.
+ *
  * A swipe is one made on purpose ([TRAVEL] within [SWIPE_MS], clearly one way): the hand that
  * holds the phone rests on this screen, and a short or slow drift of it is nothing.
+ *
+ * TWO OR MORE FINGERS DOWN TOGETHER ([crowded], told by the shell as RearTouches says so): none of the above comes of
+ * them. A finger that only rests there (the hand holding the phone) does not count: RearTouches lets it go.
  *
  * Pure: panel units in, as RearTouches gives them. One finger; a new landing starts over.
  */
@@ -43,6 +52,10 @@ class SceneTouch {
         NOTES,
         /** The charging page is what shows: a tap and a double tap are read, its swipe is its own. */
         CHARGE,
+        /** The face picker is up: its finger is its own (PickerTouch), and nothing here comes of it. */
+        PICKER,
+        /** A note's place reached, its page standing (Pin to location): its bin, a stroke down, and a double tap and hold is the back off. */
+        ARRIVAL,
     }
 
     enum class Way { LEFT, RIGHT, UP, DOWN }
@@ -67,8 +80,10 @@ class SceneTouch {
         }
         /** The second of a double tap has landed on the scene: ask [held] in [HOLD_MS]. */
         data object SecondDown : Out
-        /** A finger has landed on the scene, not as a double tap's second: ask [heldAlone] in [SWITCH_MS]. */
+        /** A finger has landed on the scene, not as a double tap's second: ask [heldAlone] in [PICKER_HOLD_MS]. */
         data object FirstDown : Out
+        /** A finger has landed on the notes page, not as a double tap's second: ask [heldOnNotes] in [NOTE_HOLD_MS]. */
+        data object NotesDown : Out
     }
 
     private var mode = Mode.NONE
@@ -79,6 +94,8 @@ class SceneTouch {
     private var isDown = false
     private var second = false
     private var strayed = false
+    /** Moved past [HOLD_SLOP] (or taken by another reader): not a hold for the picker. */
+    private var holdStrayed = false
     private var tapAt = 0L
     private var tapX = 0f
     private var tapY = 0f
@@ -87,19 +104,38 @@ class SceneTouch {
 
     /** The finger that is down is another reader's from here (PageDrag follows it): no swipe, tap or hold comes of it. */
     @Synchronized
-    fun take() { done = true; strayed = true }
+    fun take() { done = true; strayed = true; holdStrayed = true }
 
     /** The tap just made was a button's: it is not the first of a double tap. */
     @Synchronized
     fun forget() { tapAt = 0L }
 
     /**
+     * ANOTHER FINGER IS DOWN WITH THIS ONE (RearTouches.crowded; three fingers held are ThreeHold's): nothing comes of
+     * it any more (no tap, double tap, swipe, picker hold, notes hold, or double tap and hold), and a tap made before
+     * it is not the first of a double tap.
+     */
+    @Synchronized
+    fun crowded() { take(); forget() }
+
+    /**
      * Whether a finger that landed alone on the scene (not a double tap's second) is still held in
-     * place, [SWITCH_MS] after it landed. True once: that finger then means nothing more.
+     * place (within [HOLD_SLOP]), [PICKER_HOLD_MS] after it landed. True once: that finger then means nothing more here.
      */
     @Synchronized
     fun heldAlone(now: Long): Boolean {
-        if (!isDown || second || mode != Mode.SCENE || strayed || done || now - downAt < SWITCH_MS) return false
+        if (!isDown || second || mode != Mode.SCENE || holdStrayed || done || now - downAt < PICKER_HOLD_MS) return false
+        done = true
+        return true
+    }
+
+    /**
+     * Whether a finger that landed alone on the notes page is still held in place, [NOTE_HOLD_MS] after it landed.
+     * True once: that finger then means nothing more to this reader (no tap as it lifts, no swipe: the carousel has it).
+     */
+    @Synchronized
+    fun heldOnNotes(now: Long): Boolean {
+        if (!isDown || second || mode != Mode.NOTES || strayed || done || now - downAt < NOTE_HOLD_MS) return false
         done = true
         return true
     }
@@ -110,7 +146,7 @@ class SceneTouch {
      */
     @Synchronized
     fun held(now: Long): Boolean {
-        if (!isDown || !second || mode != Mode.SCENE || strayed || done || now - downAt < HOLD_MS) return false
+        if (!isDown || !second || (mode != Mode.SCENE && mode != Mode.ARRIVAL) || strayed || done || now - downAt < HOLD_MS) return false
         done = true
         return true
     }
@@ -121,14 +157,17 @@ class SceneTouch {
         is RearTouches.Down -> {
             mode = modeNow()
             downX = e.x; downY = e.y; downAt = e.atMs
-            done = false; isDown = true; strayed = false
+            done = false; isDown = true; strayed = false; holdStrayed = false
             gap = e.atMs - tapAt
             apart = maxOf(abs(e.x - tapX), abs(e.y - tapY))
-            second = mode != Mode.NONE && tapAt > 0L && gap <= DOUBLE_MS && apart <= DOUBLE_SLOP
+            // The picker's finger is the picker's: nothing of it here, and no tap of it is the first of a double tap.
+            if (mode == Mode.PICKER) { tapAt = 0L; done = true }
+            second = mode != Mode.NONE && mode != Mode.PICKER && tapAt > 0L && gap <= DOUBLE_MS && apart <= DOUBLE_SLOP
             when {
-                second && mode == Mode.SCENE -> listOf(Out.SecondDown)
+                second && (mode == Mode.SCENE || mode == Mode.ARRIVAL) -> listOf(Out.SecondDown)
                 second -> emptyList()
                 mode == Mode.SCENE -> listOf(Out.FirstDown)
+                mode == Mode.NOTES -> listOf(Out.NotesDown)
                 else -> emptyList()
             }
         }
@@ -136,8 +175,9 @@ class SceneTouch {
             val dx = e.x - downX
             val dy = e.y - downY
             if (maxOf(abs(dx), abs(dy)) >= SLOP) strayed = true
+            if (maxOf(abs(dx), abs(dy)) >= HOLD_SLOP) holdStrayed = true
             val way = when {
-                done || mode == Mode.NONE || e.atMs - downAt > SWIPE_MS -> null
+                done || mode == Mode.NONE || mode == Mode.PICKER || e.atMs - downAt > SWIPE_MS -> null
                 -dx >= TRAVEL && -dx > abs(dy) * 1.5f -> Way.LEFT
                 dx >= TRAVEL && dx > abs(dy) * 1.5f -> Way.RIGHT
                 -dy >= TRAVEL && -dy > abs(dx) * 1.5f -> Way.UP
@@ -148,7 +188,7 @@ class SceneTouch {
         }
         is RearTouches.Up -> {
             val out: List<Out> = when {
-                done || mode == Mode.NONE -> emptyList()
+                done || mode == Mode.NONE || mode == Mode.PICKER -> emptyList()
                 // The second of a double tap, lifted before it is a hold: the two are one thing, and not the first of a third.
                 second && maxOf(abs(e.x - downX), abs(e.y - downY)) < TAP_SLOP && e.atMs - downAt < HOLD_MS -> {
                     tapAt = 0L
@@ -193,7 +233,16 @@ class SceneTouch {
         const val DOUBLE_SLOP = 160f
         /** And held this long, it switches the back off. */
         const val HOLD_MS = 550L
-        /** A finger alone held this long, in place: the next face. */
-        const val SWITCH_MS = 650L
+        /**
+         * A finger alone held this long, in place: the face picker. Xiaomi's own is 300 (ViewConfiguration's long-press
+         * timeout on the phone), but HERE A TAP MAY BE DOWN UP TO [TAP_MS] (450: his own taps on the back were down
+         * 303 ms), so at 300 a slow tap, and the first tap of a double tap (the dim) or of a double tap held (off), opened
+         * the picker instead. It must be longer than a tap, as the notes' hold is ([NOTE_HOLD_MS]); a test holds that.
+         */
+        const val PICKER_HOLD_MS = 500L
+        /** Held in place for the picker: Xiaomi's touch slop, 22 px = 20 units. Kept apart from [SLOP], which other readers use. */
+        const val HOLD_SLOP = 20f
+        /** On the notes page, held this long in place: the note lifted to be put in order. Longer than a tap ([TAP_MS]). */
+        const val NOTE_HOLD_MS = 500L
     }
 }

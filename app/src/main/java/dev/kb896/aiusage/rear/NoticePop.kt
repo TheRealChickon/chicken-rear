@@ -258,9 +258,10 @@ object NoticePop {
 
     private fun cutHead(s: String, room: Float): String = cut(s.replace('\n', ' ').trim(), room) { who.measureText(it) }
 
-    private const val HEAD_SIZE = 38f
+    /** The head line's size and the room between its icon and who (the message island's open page lays out the same: IslandArt). */
+    const val HEAD_SIZE = 38f
     const val HEAD_ICON = 46f
-    private const val HEAD_GAP = 14f
+    const val HEAD_GAP = 14f
     /** Between the head line and the message's capitals. */
     private const val HEAD_BELOW = 30f
     /** The part of the back he sees: right of the lenses (296) to the panel's edge (976), top to bottom. */

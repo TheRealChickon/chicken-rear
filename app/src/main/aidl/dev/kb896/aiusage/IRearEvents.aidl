@@ -42,9 +42,10 @@ oneway interface IRearEvents {
     // The back's lock (BackLock) came on or went: the panel hides its notifications' words and
     // locks its control centre while it is on. Said on every change and on (re)connect.
     void onBackLock(boolean locked) = 12;
-    // A screenshot ([video] false) or recording of the back, made by the shell in its own space and
-    // handed over open ([file], read-only): the app copies it into the gallery. A path in the app's
-    // files was tried first: what the shell writes there the app may not read.
+    // A recording of the back ([video] true), made by the shell in its own space and handed over open
+    // ([file], read-only): the app copies it into the gallery. A path in the app's files was tried first:
+    // what the shell writes there the app may not read. A screenshot comes by onShot now; one that still
+    // comes here ([video] false, an older shell) is saved where onShot's are.
     void onCaptured(in ParcelFileDescriptor file, boolean video) = 13;
     // The back's recording began or ended: the panel's recording tile follows.
     void onRecording(boolean on) = 14;
@@ -76,4 +77,31 @@ oneway interface IRearEvents {
     void onRearTouch() = 24;
     /** A double tap on the back while it is dark: he wakes it by hand, which also ends "switched off by hand". */
     void onWokenByHand() = 25;
+    // The face picker on the back chose a face ([key]: "moon" or "xiaomi:<id>", FaceCatalog), choice number [seq]
+    // of the shell's: the app keeps it (PanelConfig.face, faceSeq) and sends it back with the payload. Code 28: 26 is
+    // onNoticeSnoozed's.
+    void onFaceChosen(String key, long seq) = 28;
+    // The faces on the phone changed (FaceScan): the list is in the app's files (faces/faces.json, faces/<key>.jpg).
+    void onFacesChanged() = 27;
+    /**
+     * The pinned notes were put in order on the back (held, carried, swapped): [order] is their names (Pin.at), the
+     * first first. The app keeps it on its list as it has it then (PinOrder.apply: a note pinned since keeps its place
+     * in front, one binned since is not there). Code 41, out of the way of the next ones in sequence.
+     */
+    void onPinsOrdered(in long[] order) = 41;
+    /** "Not now" on a note standing on the back at its place (a stroke down on it): it waits for his next visit (place/Places.later). */
+    void onArrivalLater(long at) = 61;
+    /**
+     * A notification thrown on the back the snoozing way (NoticeThrow; the other way is onNoticeDismissed): snoozed
+     * on the phone for [ms] (an hour), from the app's listener (NotificationRelay); Android brings it back after.
+     */
+    void onNoticeSnoozed(String key, long ms) = 26;
+    /**
+     * A screenshot of the back (the control centre's tile, or three fingers held: rear/ThreeHold), made by the shell
+     * and handed over open, read-only, with its file name (rear/BackShots.name). The app first CLAIMS it
+     * (IRearService.claimShot) and saves it into DCIM/Screenshots only when told to: not claimed within two seconds
+     * (HyperOS had the app frozen) the shell has saved it itself (rear/ShotKeeper). A high number of its own, as
+     * IRearService's 117: other branches take the next free ones.
+     */
+    void onShot(in ParcelFileDescriptor file, String name) = 113;
 }

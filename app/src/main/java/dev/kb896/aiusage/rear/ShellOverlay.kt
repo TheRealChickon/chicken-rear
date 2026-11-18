@@ -9,7 +9,6 @@ import android.util.Log
 import android.view.Surface
 import android.view.SurfaceControl
 import dev.kb896.aiusage.Panel
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * A sheet the shell service lays over the rear — the portal sheet (ShellSheet) or the
@@ -64,7 +63,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * from any thread; they publish and call [changed]. One render thread per opening only
  * draws: while the version moves — or the content says it moves of itself — sleeping
  * [FRAME_MS] between looks (~60 fps while anything changes, nothing redrawn while nothing
- * does: the last buffer stays on screen). The render thread never takes the instance lock,
+ * does: the last buffer stays on screen), and at rest asleep until [changed] (no look every
+ * [FRAME_MS] while nothing changes; the run's own RenderWake). The render thread never takes the instance lock,
  * so [end] may join it. All painting in this process happens under [DRAW]: the painters
  * share Glass's shaders, and a run outliving its join (a render thread stuck in the
  * driver) must not paint over the next one's uniforms.
@@ -101,6 +101,13 @@ class ShellOverlay(
          * painters are its own, so an overlapping run shares nothing mutable).
          */
         fun painter(): Painter
+
+        /**
+         * Read after the frame's [Painter.draw]: that frame covers the whole layer, opaque in every
+         * pixel, and nothing on it moves, so nothing under the sheet can be seen while it stands
+         * ([onCover]). False unless the content says so.
+         */
+        fun covers(): Boolean = false
     }
 
     /** One run's drawing. */
@@ -126,9 +133,9 @@ class ShellOverlay(
     ) {
         /** Between a successful [begin] and [end], and not after the render loop died. */
         @Volatile var live = true
+        /** Its render thread's version and wake at rest: its own, so a thread outliving its run never takes the next one's. */
+        val wake = RenderWake()
     }
-
-    private val version = AtomicInteger()
 
     /**
      * Told how far open the sheet is drawn, 0 to 1, with each frame the render thread posts,
@@ -138,6 +145,18 @@ class ShellOverlay(
     @Volatile var onProgress: ((Float) -> Unit)? = null
     /** So a render thread outliving its [end] cannot tell [onProgress] about a sheet that is gone. */
     private val progressLock = Any()
+
+    /**
+     * Told whether the sheet stands over the whole rear, opaque and still ([Content.covers]): true
+     * once such a frame is posted, false BEFORE a frame that is not is posted (what is under it
+     * moves again first), and false as it [end]s, before its layers go, if it had been told true.
+     * Told changes only. On the render thread or [end]'s, under the same lock as [onProgress]: it
+     * may wait a moment (the notifications' takes the service's light lock), and what it throws is
+     * logged, never in the way of a frame or of [end] hiding the layers.
+     */
+    @Volatile var onCover: ((Boolean) -> Unit)? = null
+    /** What [onCover] was last told. Under [progressLock]. */
+    private var told = false
 
     /** Volatile: [up] reads it from threads that do not hold the lock. */
     @Volatile private var thread: Thread? = null
@@ -156,8 +175,10 @@ class ShellOverlay(
      */
     val up: Boolean get() = run?.live == true
 
-    /** Something to draw changed: the next frame draws it. Any thread. */
-    fun changed() { version.incrementAndGet() }
+    /** Something to draw changed: the next frame draws it (a run that begins later draws its first frame anyway). Any thread. */
+    fun changed() {
+        run?.wake?.changed()
+    }
 
     /**
      * Makes the blocker and the sheet, shows both in one transaction, and starts the render
@@ -218,11 +239,15 @@ class ShellOverlay(
     fun end() {
         val r = run
         run = null
-        gen++
+        // No frame of the old run says it covers anything from here on, and what is under it moves again before its
+        // layers go (only if it had been told it covers; a throw there does not keep the layers up).
+        synchronized(progressLock) { gen++; if (told) { told = false; tellCover(false) } }
         if (r != null) synchronized(r) {
             r.live = false
             hide(r.blocker, r.sheet)
         }
+        // Its render thread, if asleep at rest, wakes to find its generation gone, even if the interrupt below is lost.
+        r?.wake?.changed()
         thread?.let { t ->
             t.interrupt()
             // The render thread never takes this lock, so waiting for it here is safe. If
@@ -233,7 +258,6 @@ class ShellOverlay(
         thread = null
         // After gen moved on: a late frame of the old run is not told after this.
         synchronized(progressLock) { onProgress?.invoke(0f) }
-        changed()
     }
 
     /** Draws [r] until it ends, then takes its layers off the rear and lets everything go. */
@@ -262,12 +286,15 @@ class ShellOverlay(
 
     private fun loop(r: Run) {
         val surface = r.surface
+        val wake = r.wake
         val painter = synchronized(DRAW) { content.painter() }
         val dim = Paint()
         // In panel units, under the fit's scale: the whole layer.
         val full = RectF(0f, 0f, Panel.WIDTH.toFloat(), Panel.HEIGHT.toFloat())
         var drawn = -1
         var moving = false
+        // The last frame posted covers the whole layer ([Content.covers]), as [onCover] was told.
+        var covering = false
         // As the frame: if the hardware canvas is refused, the software one (flat buttons).
         var hardware = true
         var blurred = -1
@@ -279,7 +306,7 @@ class ShellOverlay(
         try {
         while (!Thread.currentThread().isInterrupted && gen == r.gen) {
             val began = System.nanoTime()
-            val v = version.get()
+            val v = wake.version
             val drawing = v != drawn || moving
             if (drawing) {
                 val canvas = if (hardware) {
@@ -289,6 +316,7 @@ class ShellOverlay(
                     }
                 } else surface.lockCanvas(null)
                 var p = 0f
+                var covers = false
                 try {
                     canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
                     // Panel units from here on, stretched to the rear (see the class comment).
@@ -299,10 +327,14 @@ class ShellOverlay(
                         dim.color = dimColor(p)
                         canvas.drawRect(full, dim)
                         moving = painter.draw(canvas, p)
+                        covers = !moving && content.covers()
                     }
                 } finally {
+                    // What is under it moves again before a frame that may show any of it is posted.
+                    if (covering && !covers) { covering = false; cover(r, false) }
                     surface.unlockCanvasAndPost(canvas)
                 }
+                if (covers && !covering) { covering = true; cover(r, true) }
                 // With the frame it goes with, and only when it moves.
                 val radius = Math.round(blurMax * p)
                 if (blurs && radius != blurred && blur(r, radius)) blurred = radius
@@ -317,14 +349,30 @@ class ShellOverlay(
             }
             // MOVING, it draws again at once: posting a frame waits for the display to take one, so
             // the display's own rate paces it. A fixed sleep after each capped it at 60 a second and
-            // out of step with the display, which is what made the sheet and the list stutter.
-            // At rest, it only looks for changes now and then. The software canvas has no such wait.
+            // out of step with the display, which is what made the sheet and the list stutter. The
+            // software canvas has no such wait.
+            // AT REST, it looks again no sooner than a frame's time after its last look (changes are
+            // drawn no oftener than before), and then sleeps until something has [changed]: no look
+            // every [FRAME_MS] while nothing does.
             Thread.sleep(if (moving && hardware) 0L else maxOf(FRAME_MS - took, 1L))
+            if (!moving) wake.await(drawn)
         }
         } finally {
+            // Ended by itself (its end() tells this for it): what is under it moves again.
+            if (covering) cover(r, false)
             val ms = (System.nanoTime() - opened) / 1_000_000
             if (frames > 0) Log.i(TAG, "$what: $frames frames in $ms ms, $slow over ${SLOW_MS} ms, the slowest $worst ms")
         }
+    }
+
+    /** [onCover] told [covers] for [r], unless [r] has ended or it was told that already. */
+    private fun cover(r: Run, covers: Boolean) {
+        synchronized(progressLock) { if (gen == r.gen && told != covers) { told = covers; tellCover(covers) } }
+    }
+
+    /** [onCover] told [covers]; what it throws is logged and goes no further. Under [progressLock]. */
+    private fun tellCover(covers: Boolean) {
+        runCatching { onCover?.invoke(covers) }.onFailure { Log.w(TAG, "$what: onCover($covers) failed: ${it.message}") }
     }
 
     /**
@@ -351,7 +399,7 @@ class ShellOverlay(
 
     /** One transparent buffer, from the software canvas: no hardware renderer for a buffer posted once. */
     private fun clear(s: Surface) {
-        val c = s.lockCanvas(null)
+        val c = ShellLayer.lockPanelCanvas(s)
         try { c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR) } finally { s.unlockCanvasAndPost(c) }
     }
 

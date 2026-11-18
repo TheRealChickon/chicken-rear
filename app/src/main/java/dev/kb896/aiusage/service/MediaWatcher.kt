@@ -203,8 +203,9 @@ class MediaWatcher(private val context: Context) {
                 // place, never a drawn stand-in.
                 if (active) c?.packageName?.let { pkg -> playerIcon(pkg)?.let { b.putByteArray("icon", it) } }
                 Graph.of(context).bridge.setMedia(b)
-                // And, if he has it on, how loud it is (MusicLevel): started and stopped with the playing.
-                MusicLevel.sync(context, active && state == PlaybackState.STATE_PLAYING)
+                // And, if he has it on, what the sound does (MusicLevel): started and stopped with the playing; a new
+                // track (title and artist) is measured against its own range.
+                MusicLevel.sync(context, active && state == PlaybackState.STATE_PLAYING, if (active) title.orEmpty() + "\u0000" + artist.orEmpty() else null)
             }
             context.sendBroadcast(
                 Intent(RearActivity.ACTION_MEDIA)

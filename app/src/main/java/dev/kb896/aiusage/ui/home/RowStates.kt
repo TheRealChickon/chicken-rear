@@ -20,6 +20,25 @@ object RowStates {
         else -> RowState(false, "Needs permission. Tap to allow")
     }
 
+    /**
+     * "Our camera on the back": the stroke from the left opens this app's camera page on the back; it needs the camera
+     * permission (asked for here, by his tap, and nowhere else). Without it the stroke opens Xiaomi's Camera, as before.
+     */
+    fun ownCamera(stored: Boolean, cameraAllowed: Boolean): RowState = when {
+        !stored -> OFF
+        cameraAllowed -> ON
+        else -> RowState(false, "Needs the camera. Tap to allow")
+    }
+
+    /**
+     * "Sound in videos" of that page: only the microphone's permission (nothing stored; the same one "Follows the music"
+     * asks for). A row only while it is missing, so the films would be silent; null: no row (the page off, or sound on).
+     */
+    fun videoSound(ownCamera: RowState, audioAllowed: Boolean): RowState? = when {
+        !ownCamera.on || audioAllowed -> null
+        else -> RowState(false, "Videos are silent. Tap to allow the microphone")
+    }
+
     /** "Notifications": needs notification access for the relay. */
     fun notifications(stored: Boolean, access: Boolean): RowState = when {
         !stored -> OFF
@@ -32,6 +51,17 @@ object RowStates {
         running -> RowState(true, "On")
         enabledInSettings -> RowState(false, "On in Accessibility, not started yet")
         else -> RowState(false, "Off in Accessibility")
+    }
+
+    /**
+     * "Earbuds animation": needs a way onto the front, "Display over other apps" or the pin's glass service running
+     * (either is his to give). The level shown needs "Nearby devices"; without it the back's moment has no figure.
+     */
+    fun earbuds(stored: Boolean, overlay: Boolean, glassRunning: Boolean, nearby: Boolean): RowState = when {
+        !stored -> OFF
+        !overlay && !glassRunning -> RowState(false, "Needs “Display over other apps”. Tap to allow")
+        !nearby -> RowState(true, "No battery level without “Nearby devices”")
+        else -> ON
     }
 
     /** A note pinned for a place: what its line says, by the location permission as it is now. */

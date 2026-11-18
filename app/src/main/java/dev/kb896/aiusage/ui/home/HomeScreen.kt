@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.asPaddingValues
@@ -62,6 +63,7 @@ import dev.kb896.aiusage.data.ClipStore
 import dev.kb896.aiusage.data.PanelConfig
 import dev.kb896.aiusage.data.PortalApps
 import dev.kb896.aiusage.data.SceneClockStyle
+import dev.kb896.aiusage.data.ThreeFingers
 import dev.kb896.aiusage.rear.SceneFace
 import dev.kb896.aiusage.rear.WakeStyle
 import dev.kb896.aiusage.service.TestNotice
@@ -119,10 +121,6 @@ class HomeModel(private val host: CompanionHost, private val pickVideo: ((androi
 
     // -- Notes on the back (rear/PinFace), plain or for a place (service/PlaceNotes) ----------------
 
-    /** A position is being asked for, for a note pinned to this place. */
-    var locating by mutableStateOf(false)
-        private set
-
     fun pin(text: String) = write { it.copy(pins = dev.kb896.aiusage.ui.PinActivity.added(it.pins, text, System.currentTimeMillis())) }
 
     fun removePin(at: Long) {
@@ -135,6 +133,19 @@ class HomeModel(private val host: CompanionHost, private val pickVideo: ((androi
      * first turning on (Android's dialog calls it recording audio; nothing is recorded or kept: one level, twenty
      * times a second, while the back's music page is lit). Not given: the switch stays off.
      */
+    /** ChatGPT's vessel gets the next of OpenAI's launch characters (and a renderer that stopped before is tried again). */
+    fun nextChatGptDot() {
+        val next = dev.kb896.aiusage.rear.dots.DotsSource.nextHero(config.chatGptDot)
+        write { it.copy(chatGptDot = next.id) }
+        dev.kb896.aiusage.rear.dots.DotsLink.clearStrikes(host.activity)
+    }
+
+    /** "ChatGPT's character" on or off; turned on, a renderer that crashed before is tried again. */
+    fun chatGptDots(on: Boolean) {
+        write { it.copy(usageDots = on) }
+        if (on) dev.kb896.aiusage.rear.dots.DotsLink.clearStrikes(host.activity)
+    }
+
     fun followMusic(on: Boolean) {
         val a = host.activity
         // The wish is kept; the row shows on only once the permission is there (RowStates.followsMusic), by itself
@@ -147,9 +158,63 @@ class HomeModel(private val host: CompanionHost, private val pickVideo: ((androi
         dev.kb896.aiusage.service.MusicLevel.sync(a)
     }
 
+    fun refreshCameraPermissions() {
+        val a = host.activity
+        cameraAllowed = a.checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        audioAllowed = dev.kb896.aiusage.service.MusicLevel.allowed(a)
+    }
+
+    /** "Our camera on the back": the wish kept; switched on without the camera permission, it is asked for. */
+    fun ownCamera(on: Boolean) {
+        write { it.copy(cameraOwnRear = on) }
+        if (on && !cameraAllowed) host.askCameraPermission(android.Manifest.permission.CAMERA)
+    }
+
+    /** "Sound in videos": the microphone asked for (nothing stored: the camera page records sound when it is allowed). */
+    fun videoSound() {
+        if (!audioAllowed) host.askCameraPermission(android.Manifest.permission.RECORD_AUDIO)
+    }
+
     // -- what is real outside the app, read each time the page comes to the front (RowStates) --------
     var audioAllowed by mutableStateOf(false)
         private set
+    var cameraAllowed by mutableStateOf(false)
+        private set
+    /** "Display over other apps" for the earbuds animation. */
+    var overlayAllowed by mutableStateOf(false)
+        private set
+    /** "Nearby devices" for the earbuds' battery level. */
+    var nearbyAllowed by mutableStateOf(false)
+        private set
+
+    /** "Earbuds animation": the wish is kept; what it still needs is asked for here, each his to give. */
+    fun earbudsAnim(on: Boolean) {
+        write { it.copy(earbudsAnim = on) }
+        if (on && !overlayAllowed && !glassRunning) askOverlay()
+    }
+
+    /** To the phone's own page for "Display over other apps", for this app. */
+    fun askOverlay() {
+        val a = host.activity
+        runCatching { a.startActivity(android.content.Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:" + a.packageName))) }
+        toast("Allow “Display over other apps”: the earbuds animation, a moment when they connect")
+    }
+
+    /** "Nearby devices", for the level the earbuds report. */
+    fun askNearby() {
+        host.activity.requestPermissions(arrayOf(android.Manifest.permission.BLUETOOTH_CONNECT), 74)
+        toast("Only to read the battery level your earbuds report")
+    }
+
+    /** "Try it": plays it for the earbuds connected now, as they are (no made-up level). */
+    fun tryEarbuds() {
+        val a = host.activity
+        val d = dev.kb896.aiusage.service.EarbudsWatch.connectedNow(a) ?: run { toast("No earbuds connected"); return }
+        val way = dev.kb896.aiusage.service.EarbudsGate.way(glassRunning, overlayAllowed)
+        if (way == dev.kb896.aiusage.service.EarbudsGate.Way.NONE) { askOverlay(); return }
+        // It plays over whatever is in front: here, this page.
+        dev.kb896.aiusage.service.EarbudsWatch.play(a, d.address, d.productName?.toString(), way)
+    }
     var glassRunning by mutableStateOf(false)
         private set
     var locationFine by mutableStateOf(false)
@@ -167,73 +232,56 @@ class HomeModel(private val host: CompanionHost, private val pickVideo: ((androi
         if (on && !locationAny) host.activity.requestPermissions(arrayOf(android.Manifest.permission.ACCESS_COARSE_LOCATION), 74)
     }
 
-    /**
-     * [text] pinned for where the phone is now: it comes back when he comes back here. The location
-     * permission is asked for here, at the first such note, and nowhere else: first the position
-     * itself, then (a second press) "all the time", without which an arrival is not noticed while
-     * the app is not open. [done] with whether the note was pinned.
-     */
-    fun pinHere(text: String, done: (Boolean) -> Unit) {
-        val a = host.activity
-        val notes = dev.kb896.aiusage.service.PlaceNotes
-        if (!notes.fine(a)) {
-            a.requestPermissions(arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION), 71)
-            toast("Allow the position, then press it again")
-            return done(false)
-        }
-        if (!notes.always(a)) {
-            a.requestPermissions(arrayOf(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION), 72)
-            toast("Choose \"Allow all the time\", then press it again")
-            return done(false)
-        }
-        val lm = a.getSystemService(android.location.LocationManager::class.java) ?: return done(false)
-        val provider = listOf("fused", android.location.LocationManager.GPS_PROVIDER, android.location.LocationManager.NETWORK_PROVIDER)
-            .firstOrNull { runCatching { lm.isProviderEnabled(it) }.getOrDefault(false) }
-            ?: run { toast("Location is switched off on the phone"); return done(false) }
-        locating = true
-        runCatching {
-            lm.getCurrentLocation(provider, null, a.mainExecutor) { here ->
-                locating = false
-                if (here == null) { toast("No position yet. Try again."); done(false); return@getCurrentLocation }
-                val clean = text.trim().take(dev.kb896.aiusage.ui.PinActivity.LONGEST)
-                write { c ->
-                    c.copy(pins = (listOf(dev.kb896.aiusage.data.Pin(clean, System.currentTimeMillis(), here.latitude, here.longitude)) + c.pins.filter { it.text != clean })
-                        .take(dev.kb896.aiusage.ui.PinActivity.MOST))
-                }
-                notes.sync(a)
-                toast("Pinned for this place")
-                done(true)
-            }
-        }.onFailure { locating = false; toast("The position could not be read"); done(false) }
-    }
-
     // -- Claude: who is signed in, for the usage page on the back ----------------------------------
 
     /** Which accounts have a stored sign-in. Read again after a sign-in or a sign-out. */
     var signedIn by mutableStateOf(dev.kb896.aiusage.data.Account.entries.associateWith { runCatching { host.graph.store.load(it) != null }.getOrDefault(false) })
         private set
-    /** The account whose browser sign-in is under way; null for none. */
-    var signingIn by mutableStateOf<dev.kb896.aiusage.data.Account?>(null)
+    /**
+     * The account whose browser sign-in waits; null for none. The sign-in is the app's (auth/SignIns), not this
+     * page's: it goes on while this page is stopped behind the browser, and this only shows where it stands.
+     */
+    var signingIn by mutableStateOf(host.graph.signIns.state.value.waiting)
+        private set
+    /** Which attempt that is (auth/SignIns counts them); 0 while none waits. A new number is a new wait. */
+    var signInAttempt by mutableStateOf(host.graph.signIns.state.value.attempt)
+        private set
+    /** Why an account's last sign-in did not work, in plain words; none once it works or a new one begins. */
+    var signInFailures by mutableStateOf(host.graph.signIns.state.value.failures)
         private set
 
     private fun readSignedIn() {
         signedIn = dev.kb896.aiusage.data.Account.entries.associateWith { runCatching { host.graph.store.load(it) != null }.getOrDefault(false) }
     }
 
-    /** Claude's own sign-in page in the browser, for [account]; the answer comes back to the app by itself. */
-    fun signIn(account: dev.kb896.aiusage.data.Account) {
-        val main = host.activity as? dev.kb896.aiusage.ui.MainActivity ?: return toast("Sign-in is not available here")
-        signingIn = account
-        main.signInFor(account) { failure ->
-            signingIn = null
-            readSignedIn()
-            toast(failure ?: "Signed in. Swipe left on the back to see it.")
+    init {
+        // Also while this page is not in front: the row is right when he comes back to it, toast seen or not.
+        // Posted, not run at once: the first value comes while this model is still being made.
+        scope.launch(Dispatchers.Main) {
+            host.graph.signIns.state.collect { now ->
+                signingIn = now.waiting
+                signInAttempt = now.attempt
+                signInFailures = now.failures
+                val ended = now.last ?: return@collect
+                readSignedIn()
+                if (host.graph.signIns.takeToast(ended)) toast(ended.failure ?: "Signed in. Swipe left on the back to see it.")
+            }
         }
     }
+
+    /** The account's own sign-in page in the browser; the answer comes back to the app by itself (up to ten minutes). */
+    fun signIn(account: dev.kb896.aiusage.data.Account) = host.graph.signIns.start(account)
+
+    /** No longer waiting for the browser. Does nothing in a sign-in's first moments (auth/SignIns says why). */
+    fun cancelSignIn() { host.graph.signIns.cancel() }
+
+    /** How long until "Cancel" acts on the sign-in that waits; 0 when it does now. */
+    fun cancelSignInInMs(): Long = host.graph.signIns.cancelInMs()
 
     fun signOut(account: dev.kb896.aiusage.data.Account) {
         runCatching { host.graph.store.clear(account) }
         if (account == dev.kb896.aiusage.data.Account.CHATGPT) runCatching { host.graph.chatAccountId = null }
+        host.graph.signIns.forget(account)
         readSignedIn()
         scope.launch {
             runCatching { host.graph.repository.refresh(force = true) }
@@ -257,11 +305,36 @@ class HomeModel(private val host: CompanionHost, private val pickVideo: ((androi
         toast("Downloaded apps, then “Pin to back: glass”")
     }
 
+    // -- the faces (rear/FaceCatalog, as the shell wrote them: data/FacesStore) ------------------------------------
+
+    var faces by mutableStateOf(emptyList<dev.kb896.aiusage.data.FacesStore.Face>())
+        private set
+    val facePictures = mutableStateMapOf<String, Bitmap>()
+    private val facesChanged: () -> Unit = { host.activity.runOnUiThread { readFaces() } }
+
+    fun readFaces() {
+        faces = dev.kb896.aiusage.data.FacesStore.read(host.activity)
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            for (f in faces) {
+                val file = f.picture ?: continue
+                val bm = runCatching { android.graphics.BitmapFactory.decodeFile(file.path) }.getOrNull() ?: continue
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { facePictures["${f.key}@${file.lastModified()}"] = bm }
+            }
+        }
+        host.graph.bridge.facesListeners.add(facesChanged)
+    }
+
+    /** A tap on a face in the settings: it is the face, the next choice after the last one kept. */
+    fun chooseFace(key: String) = write { it.copy(face = key, faceSeq = dev.kb896.aiusage.rear.FaceCatalog.nextSeq(it.faceSeq, System.currentTimeMillis())) }
+
     fun refresh() {
         val a = host.activity
+        readFaces()
         pinGlass = dev.kb896.aiusage.service.PinGlassService.enabled(a)
         glassRunning = dev.kb896.aiusage.service.PinGlassService.running()
-        audioAllowed = dev.kb896.aiusage.service.MusicLevel.allowed(a)
+        refreshCameraPermissions()
+        overlayAllowed = android.provider.Settings.canDrawOverlays(a)
+        nearbyAllowed = dev.kb896.aiusage.service.EarbudsWatch.btAllowed(a)
         locationFine = dev.kb896.aiusage.service.PlaceNotes.fine(a)
         locationAlways = dev.kb896.aiusage.service.PlaceNotes.always(a)
         locationAny = locationFine || a.checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -440,6 +513,11 @@ class HomeModel(private val host: CompanionHost, private val pickVideo: ((androi
         }
     }
 
+    fun switchNavigation(on: Boolean) {
+        write { it.copy(navigationOn = on) }
+        if (on && !noticeAccess) fix(CompanionRows.Fix.ALLOW_NOTIFICATIONS)
+    }
+
     fun switchNotifications(on: Boolean) {
         write { CompanionRows.switched(it, Readiness.Feature.NOTICES, on) }
         if (on && !noticeAccess) fix(CompanionRows.Fix.ALLOW_NOTIFICATIONS)
@@ -450,18 +528,25 @@ class HomeModel(private val host: CompanionHost, private val pickVideo: ((androi
         return PreviewState(
             sceneOn = c.sceneOn,
             wakePath = clipPath(c.sceneWake),
-            loopPath = clipPath(c.sceneLoop),
+            // The dust face (a key, drawn by the engine itself) when it is the face; else our clip, as before.
+            loopPath = if (c.face == dev.kb896.aiusage.rear.FaceCatalog.DUST) dev.kb896.aiusage.rear.FaceCatalog.DUST else clipPath(c.sceneLoop),
             look = SceneFace.Look(c.sceneClock, c.sceneClockStyle, c.sceneDate, c.sceneBattery, battery, charging = false, hour24 = c.clock12h != true),
             depth = c.sceneDepth,
             chargeOn = c.chargeAnim, chargeStyle = c.chargeStyle, chargePercent = c.chargePercent,
-            noticesOn = c.showNotifications, noticeText = c.showNotificationText,
+            noticesOn = c.showNotifications, noticeText = c.showNotificationText, messageStyle = c.messageStyle,
             usage = runCatching {
-                dev.kb896.aiusage.rear.UsageFace.model(host.graph.repository.state.value, System.currentTimeMillis()).takeIf { it.columns.isNotEmpty() }
+                dev.kb896.aiusage.rear.UsageFace.model(host.graph.repository.state.value, System.currentTimeMillis(), fiveHours = c.usageFiveHours).takeIf { it.columns.isNotEmpty() }
             }.getOrNull(),
-            note = c.pins.maxByOrNull { it.freshAt }?.text,
+            usageFiveHours = c.usageFiveHours,
+            chatGptDot = c.chatGptDot,
+            // The first in his order (PinOrder) that the back lists: the note the swipe up shows first on the back (a note
+            // for a place only while the phone is there: place/Here). The Notes section below lists them all.
+            note = dev.kb896.aiusage.place.Here.onBack(c.pins).firstOrNull()?.text,
+            noteImage = dev.kb896.aiusage.place.Here.onBack(c.pins).firstOrNull()?.image,
             xiaomi = xiaomi,
             // As the back would be in a lit room, in the hand: so the slider is seen at work here.
             gain = if (c.rearAdaptive) dev.kb896.aiusage.rear.RearLight.gain(dev.kb896.aiusage.rear.RearLight.light(dev.kb896.aiusage.rear.RearLight.NO_READING_LUX, dev.kb896.aiusage.rear.RearLight.Doing(3), c.rearLightBias)) else 0.74f,
+            musicFloor = c.musicFloor,
         )
     }
 }
@@ -536,15 +621,18 @@ fun HomeScreen(model: HomeModel, dark: Boolean, onAdvanced: () -> Unit) {
                     // Only what belongs to the page he has selected under the preview (HomeSections).
                     val sections = HomeSections.of(shown)
                     for (s in sections) when (s) {
+                        HomeSection.FACES -> Faces(model)
                         HomeSection.CLAUDE -> Claude(model)
                         HomeSection.NOTES -> Notes(model)
                         HomeSection.ALWAYS_ON -> AlwaysOn(model)
                         HomeSection.APPS -> Apps(model)
                         HomeSection.ANIMATIONS -> Animations(model)
                         HomeSection.MUSIC -> Music(model)
+                        HomeSection.NAVIGATION -> Navigation(model)
                         HomeSection.CHARGING -> Charging(model)
                         HomeSection.NOTIFICATIONS -> Notifications(model)
                         HomeSection.CAMERA -> Camera(model)
+                        HomeSection.THREE_FINGERS -> ThreeFingersHeld(model)
                         HomeSection.ADVANCED -> Pane(Modifier.clickable(role = Role.Button, onClick = onAdvanced), radius = 26.dp) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Label("Advanced", Modifier.weight(1f), size = 17, weight = 600)
@@ -614,9 +702,12 @@ private fun Notes(model: HomeModel) {
         Head("Notes on the back")
         for (pin in model.config.pins) {
             Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
-                    Label(pin.text, size = 16, weight = 500, maxLines = 2)
-                    if (pin.placed) Label(RowStates.placeNote(model.locationFine, model.locationAlways), size = 13, weight = 450, color = tone.ink3)
+                // A picture's note: a small picture of it first (read off the main thread), its caption or "Picture" beside.
+                if (pin.image != null) { NoteThumb(pin.image); GapW(12.dp) }
+                // A note for a place: where, its zone, or what it lacks to be noticed; a tap moves it (Pin to location).
+                androidx.compose.foundation.layout.Column(Modifier.weight(1f).then(if (pin.placed) Modifier.clickable { dev.kb896.aiusage.ui.place.PlaceSettings.move(model.context as android.app.Activity, pin.at) } else Modifier)) {
+                    Label(pin.text.ifBlank { if (pin.image != null) "Picture" else pin.text }, size = 16, weight = 500, maxLines = 2)
+                    if (pin.placed) Label(dev.kb896.aiusage.ui.place.PlaceSettings.line(pin, model.locationFine && model.locationAlways), size = 13, weight = 450, color = tone.ink3)
                 }
                 GapW(10.dp)
                 Chip("Remove") { model.removePin(pin.at) }
@@ -651,12 +742,27 @@ private fun Notes(model: HomeModel) {
         }
         Row(Modifier.padding(top = 12.dp), horizontalArrangement = RowGap) {
             Chip("Pin", strong = true, enabled = draft.isNotBlank()) { model.pin(draft); draft = "" }
-            Chip(if (model.locating) "Finding…" else "Pin for this place", enabled = draft.isNotBlank() && !model.locating) {
-                val text = draft
-                model.pinHere(text) { ok -> if (ok) draft = "" }
-            }
+            // The same prompt as from any app's menu: a map, his quick tiles, the zone (ui/place).
+            Chip("Pin to location", enabled = draft.isNotBlank()) { dev.kb896.aiusage.ui.place.PlaceSettings.pin(model.context as android.app.Activity, draft); draft = "" }
         }
+        dev.kb896.aiusage.ui.place.PlaceRows(model.context as android.app.Activity, model.config.homeNet.isNotEmpty(), model.locationFine, model.locationAlways)
     }
+}
+
+/** A pinned picture, small (its file read off the main thread; its place a plain well until then, or if it is gone). */
+@Composable
+private fun NoteThumb(name: String) {
+    val tone = LocalTone.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val shot by androidx.compose.runtime.produceState<Bitmap?>(null, name) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { dev.kb896.aiusage.data.PinImageFiles.read(context, name, most = 160) }
+    }
+    val shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp)
+    val b = shot
+    if (b != null) androidx.compose.foundation.Image(
+        b.asImageBitmap(), null, Modifier.size(44.dp).clip(shape).background(tone.well, shape),
+        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+    ) else androidx.compose.foundation.layout.Box(Modifier.size(44.dp).background(tone.well, shape))
 }
 
 /** Claude: sign in here, and the usage page is one swipe left of the picture on the back. */
@@ -670,6 +776,7 @@ private fun Claude(model: HomeModel) {
             val name = if (account == dev.kb896.aiusage.data.Account.CHATGPT) "ChatGPT (Codex limits)"
                 else model.config.accounts.getOrNull(account.ordinal)?.label?.takeIf { it.isNotBlank() } ?: account.title
             val inNow = model.signedIn[account] == true
+            val waiting = !inNow && model.signingIn == account
             Line(name) {
                 if (inNow) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -677,9 +784,55 @@ private fun Claude(model: HomeModel) {
                         GapW(12.dp)
                         Chip("Sign out") { model.signOut(account) }
                     }
+                } else if (waiting) {
+                    // The browser has its page; the answer is waited for up to ten minutes, whatever is in front.
+                    // "Cancel" would stand where "Sign in" stood a frame ago, under the second tap of a double
+                    // tap: it is not there (and auth/SignIns would not act on it) until the browser has long
+                    // covered this row. Until then the word alone.
+                    androidx.compose.runtime.key(model.signInAttempt) {
+                        var mayCancel by remember { mutableStateOf(model.cancelSignInInMs() == 0L) }
+                        LaunchedEffect(Unit) {
+                            while (true) {
+                                val left = model.cancelSignInInMs()
+                                if (left == 0L) break
+                                kotlinx.coroutines.delay(left)
+                            }
+                            mayCancel = true
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Label("Waiting…", size = 14, weight = 500, color = tone.ink2)
+                            if (mayCancel) {
+                                GapW(12.dp)
+                                Chip("Cancel") { model.cancelSignIn() }
+                            }
+                        }
+                    }
                 } else {
-                    Chip(if (model.signingIn == account) "Waiting…" else "Sign in", strong = true, enabled = model.signingIn == null) { model.signIn(account) }
+                    Chip("Sign in", strong = true) { model.signIn(account) }
                 }
+            }
+            // Why the last try did not work, in words that say what to do (auth/SignIns writes them).
+            if (!inNow && !waiting) model.signInFailures[account]?.let { why ->
+                Label(why, Modifier.padding(top = 6.dp), size = 13, weight = 450, color = tone.ink3, maxLines = 5)
+            }
+        }
+        Gap(4.dp)
+        // Off by default: each account is its week alone.
+        Line("Five-hour limits") {
+            Toggle(model.config.usageFiveHours, "Five-hour limits") { on -> model.write { it.copy(usageFiveHours = on) } }
+        }
+        // ChatGPT's vessel may have one of OpenAI's own Dots characters (rear/dots), drawn by the ChatGPT app's own
+        // renderer on this phone: off until he switches it on (PanelConfig.usageDots); on, a chip picks which.
+        if (model.signedIn[dev.kb896.aiusage.data.Account.CHATGPT] == true) {
+            val on = model.config.usageDots
+            Line("ChatGPT's character") {
+                if (on) {
+                    val dot = model.config.chatGptDot
+                    val name = dev.kb896.aiusage.rear.dots.DotsSource.HEROES.firstOrNull { it.id == dot }?.name ?: dot
+                    Chip(name) { model.nextChatGptDot() }
+                    Spacer(Modifier.width(10.dp))
+                }
+                Toggle(on, "ChatGPT's character") { model.chatGptDots(it) }
             }
         }
         Gap(12.dp)
@@ -890,6 +1043,23 @@ private fun Still(picture: Bitmap?, name: String, chosen: Boolean, enabled: Bool
     }
 }
 
+/**
+ * The navigation page (rear/NavFace): found with Navigation selected under the preview. A route is read from its app's
+ * notification, so the switch is on only with notification access (the message pop-ups' own switch is apart from it).
+ */
+@Composable
+private fun Navigation(model: HomeModel) {
+    val state = RowStates.notifications(model.config.navigationOn, model.noticeAccess)
+    val tone = LocalTone.current
+    Pane {
+        Head("Navigation")
+        Line("Navigation on the back") {
+            Toggle(state.on, "Navigation on the back") { model.switchNavigation(it) }
+        }
+        state.note?.let { Gap(12.dp); Label(it, size = 13, weight = 450, color = tone.ink3) }
+    }
+}
+
 /** The music page: found with Music selected under the preview. */
 @Composable
 private fun Music(model: HomeModel) {
@@ -905,6 +1075,27 @@ private fun Music(model: HomeModel) {
         }
         follows.note?.let { Gap(12.dp); Label(it, size = 13, weight = 450, color = tone.ink3) }
         Label("Nothing is recorded.", size = 13, weight = 450, color = tone.ink3)
+        // The body's least size, 0 to 100 (PanelConfig.musicFloor, MusicBody.floorPx): the slider the brightness has, from
+        // 0, and the number. Saved and sent to the back as it moves; the preview above follows it.
+        Line("Fluid size") {
+            Slide(c.musicFloor / 100f, "Fluid size", from = 0f, modifier = Modifier.width(156.dp)) { v ->
+                model.write { it.copy(musicFloor = Math.round(v * 100f).coerceIn(0, 100)) }
+            }
+            Box(Modifier.width(40.dp), contentAlignment = Alignment.CenterEnd) {
+                Label("${c.musicFloor}", size = 15, weight = 500, color = tone.ink3)
+            }
+        }
+        // Earbuds connecting (service/EarbudsWatch): the ripple on the front, its moment on the back.
+        val buds = RowStates.earbuds(c.earbudsAnim, model.overlayAllowed, model.glassRunning, model.nearbyAllowed)
+        Line("Earbuds animation") {
+            Toggle(buds.on, "Earbuds animation") { on -> model.earbudsAnim(on) }
+        }
+        buds.note?.let { Gap(12.dp); Label(it, size = 13, weight = 450, color = tone.ink3) }
+        Row(Modifier.padding(top = 12.dp), horizontalArrangement = RowGap) {
+            if (c.earbudsAnim && !model.overlayAllowed && !model.glassRunning) Chip("Allow", strong = true) { model.askOverlay() }
+            if (c.earbudsAnim && !model.nearbyAllowed) Chip("Battery level") { model.askNearby() }
+            Chip("Try it", enabled = c.earbudsAnim && (model.overlayAllowed || model.glassRunning)) { model.tryEarbuds() }
+        }
     }
 }
 
@@ -936,6 +1127,9 @@ private fun Charging(model: HomeModel) {
     }
 }
 
+/** "Message style"'s three choices, in PanelConfig.MessageStyle's order. */
+internal val MESSAGE_STYLES = listOf("Full page", "Island · Tint", "Island · Sweep")
+
 @Composable
 private fun Notifications(model: HomeModel) {
     val c = model.config
@@ -954,15 +1148,84 @@ private fun Notifications(model: HomeModel) {
         Line("Also while locked", enabled = on && c.showNotificationText) {
             Toggle(c.noticeTextWhenLocked, "Show the message while locked", enabled = on && c.showNotificationText) { v -> model.write { it.copy(noticeTextWhenLocked = v) } }
         }
+        // How a message shows on the back: the whole back (rear/NoticePop), or the message island (rear/MessageIsland) whose
+        // open page tints the live face in the app's colour, or dims it under one sweep of Xiaomi's light. Read at each message.
+        Label("Message style", size = 16, weight = 500, modifier = Modifier.padding(top = 16.dp))
+        Segmented(MESSAGE_STYLES, c.messageStyle.ordinal, enabled = on, modifier = Modifier.padding(top = 8.dp), size = 13) { i ->
+            model.write { it.copy(messageStyle = dev.kb896.aiusage.data.MessageStyle.entries[i]) }
+            model.mode = PreviewMode.ALERT
+        }
+        // The pull with nothing waiting lights the back's rim (rear/EmptyRim): white, or Xiaomi's own rear-glow colours.
+        Label("Empty pull light", size = 16, weight = 500, modifier = Modifier.padding(top = 16.dp))
+        Segmented(listOf("White", "Xiaomi colours"), if (c.emptyPullXiaomi) 1 else 0, modifier = Modifier.padding(top = 8.dp)) { i ->
+            model.write { it.copy(emptyPullXiaomi = i == 1) }
+        }
         Row(Modifier.padding(top = 16.dp)) { Chip("Send a test", strong = true, enabled = on) { model.testNotification() } }
+    }
+}
+
+@Composable
+private fun Faces(model: HomeModel) {
+    val tone = LocalTone.current
+    val c = model.config
+    val offered = model.faces.filter { it.offered }
+    Pane {
+        Head("Faces")
+        for (f in offered) {
+            val chosen = f.key == c.face || (offered.none { it.key == c.face } && f.key == "moon")
+            Row(
+                Modifier.fillMaxWidth().padding(top = 12.dp).clickable(role = Role.RadioButton) { model.chooseFace(f.key) },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val pic = f.picture?.let { model.facePictures["${f.key}@${it.lastModified()}"] }
+                // The card's own corners: 61 of its 580 px.
+                Box(Modifier.width(112.dp).aspectRatio(976f / 596f).clip(RoundedCornerShape((112 * 61f / 580f).dp)).background(Color.Black)) {
+                    if (pic != null) Image(pic.asImageBitmap(), f.title, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                }
+                Label(f.title, Modifier.weight(1f).padding(start = 14.dp), size = 16, weight = 550)
+                Box(Modifier.size(22.dp).border(2.dp, tone.ink, CircleShape), contentAlignment = Alignment.Center) {
+                    if (chosen) Box(Modifier.size(11.dp).background(tone.ink, CircleShape))
+                }
+            }
+        }
+        // Dust in Light's one choice: whether it follows the phone's movement (PanelConfig.dustMovesWithPhone).
+        if (c.face == dev.kb896.aiusage.rear.FaceCatalog.DUST) {
+            Gap(12.dp)
+            Line("Moves with the phone") { Toggle(c.dustMovesWithPhone, "Moves with the phone") { on -> model.write { it.copy(dustMovesWithPhone = on) } } }
+        }
+    }
+}
+
+/**
+ * What three fingers held on the back do (rear/ThreeHold, rear/ThreeFingersAct): one row of choices, as the pin
+ * animation's, a screenshot of the back by default. The same plain segments, no colour.
+ */
+@Composable
+private fun ThreeFingersHeld(model: HomeModel) {
+    val c = model.config
+    Pane {
+        Label("Three fingers held", size = 16, weight = 500)
+        Segmented(listOf("Screenshot", "Recording", "Back off", "Nothing"), c.threeFingers.ordinal, modifier = Modifier.padding(top = 8.dp)) { i ->
+            model.write { it.copy(threeFingers = ThreeFingers.entries[i]) }
+        }
     }
 }
 
 @Composable
 private fun Camera(model: HomeModel) {
     val c = model.config
+    val tone = LocalTone.current
     Pane {
         Head("Camera")
-        Line("Keep the back in use") { Toggle(c.cameraKeepRear, "Keep the back in use while the camera is open") { on -> model.write { it.copy(cameraKeepRear = on) } } }
+        // The stroke from the left on the back: our camera page there (ui/camera), or Xiaomi's Camera. On by default; in
+        // force only with the camera permission, asked for here by his tap (RowStates.ownCamera).
+        val own = RowStates.ownCamera(c.cameraOwnRear, model.cameraAllowed)
+        Line("Our camera on the back") { Toggle(own.on, "Our camera on the back") { on -> model.ownCamera(on) } }
+        own.note?.let { Label(it, size = 13, weight = 450, color = tone.ink3) }
+        RowStates.videoSound(own, model.audioAllowed)?.let { sound ->
+            Line("Sound in videos") { Toggle(sound.on, "Sound in videos") { on -> if (on) model.videoSound() } }
+            sound.note?.let { Label(it, size = 13, weight = 450, color = tone.ink3) }
+        }
+        Label("Turn on Rear display preview in Xiaomi Camera.", size = 14, color = LocalTone.current.ink2)
     }
 }

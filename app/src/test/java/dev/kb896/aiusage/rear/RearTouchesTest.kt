@@ -1,6 +1,7 @@
 package dev.kb896.aiusage.rear
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -125,5 +126,94 @@ class RearTouchesTest {
         drag.run(listOf(slot(0), "0003 0035 ${hex(50000)}", syn), 900L)
         assertTrue(drag.run(landIn(1, 20000, 30000, 2), 2_000L).isEmpty())
         assertTrue(drag.run(listOf(slot(0), "0003 0035 ${hex(40000)}", syn), 2_100L).single() is RearTouches.Move)
+    }
+
+
+    /** Feeds [lines] at [at]: whether any of them began the crowding. */
+    private fun RearTouches.crowds(lines: List<String>, at: Long): Boolean {
+        var began = false
+        for (l in lines) { feed(l, at); if (crowdBegan) began = true }
+        return began
+    }
+
+    @Test fun `a second finger landing while the first is down crowds it, once, until it lifts - and makes no event`() {
+        val t = touches()
+        assertTrue(t.run(landIn(0, 60000, 30000, 1), 0L).single() is RearTouches.Down)
+        assertFalse(t.crowded)
+        var events = emptyList<RearTouches.Event>()
+        val began = run { var b = false; for (l in landIn(1, 40000, 30000, 2)) { events = events + t.feed(l, 100L); if (t.crowdBegan) b = true }; b }
+        assertTrue("began as the second landed", began)
+        assertTrue(events.isEmpty())
+        assertTrue(t.crowded)
+        // Once: a third finger, moves, the second lifting: no new beginning, and still crowded.
+        assertFalse(t.crowds(landIn(2, 20000, 30000, 3), 150L))
+        assertFalse(t.crowds(listOf(slot(1), "0003 0039 ffffffff", syn), 200L))
+        assertFalse(t.crowds(listOf(slot(0), "0003 0035 ${hex(61000)}", syn), 250L))
+        assertTrue("crowded until it lifts", t.crowded)
+        assertTrue(t.run(listOf(slot(0), "0003 0039 ffffffff", syn), 300L).single() is RearTouches.Up)
+        assertFalse(t.crowded)
+    }
+
+    @Test fun `a resting grip finger and one real finger are not crowded - the takeover works as it did`() {
+        val t = touches()
+        t.run(landIn(0, 5000, 30000, 1), 0L)
+        var e = emptyList<RearTouches.Event>()
+        var began = false
+        for (l in landIn(1, 80000, 30000, 2)) { e = e + t.feed(l, 2_000L); if (t.crowdBegan) began = true }
+        assertEquals(listOf("Up", "Down"), e.map { it::class.simpleName })
+        assertFalse(began)
+        assertFalse(t.crowded)
+        // And the next real finger after it, with the grip still resting, is alone too.
+        t.run(listOf(slot(1), "0003 0039 ffffffff", syn), 2_200L)
+        assertFalse(t.crowds(landIn(1, 70000, 30000, 3), 3_000L))
+        assertFalse(t.crowded)
+    }
+
+    @Test fun `a resting grip finger and two real fingers - the second real one crowds the first`() {
+        val t = touches()
+        t.run(landIn(0, 5000, 30000, 1), 0L)
+        t.run(landIn(1, 60000, 30000, 2), 2_000L)       // the takeover: this one is the finger
+        assertFalse(t.crowded)
+        assertTrue(t.crowds(landIn(2, 75000, 30000, 3), 2_060L))
+        assertTrue(t.crowded)
+    }
+
+    @Test fun `two fingers landing in one frame crowd the first at once`() {
+        val t = touches()
+        val both = listOf(slot(0), "0003 0039 ${hex(1)}", "0003 0035 ${hex(60000)}", "0003 0036 ${hex(30000)}",
+            slot(1), "0003 0039 ${hex(2)}", "0003 0035 ${hex(40000)}", "0003 0036 ${hex(30000)}", syn)
+        var e = emptyList<RearTouches.Event>(); var began = false
+        for (l in both) { e = e + t.feed(l, 0L); if (t.crowdBegan) began = true }
+        assertTrue(e.single() is RearTouches.Down)
+        assertTrue(began)
+    }
+
+    @Test fun `a finger left down from a touch of two crowds the next one, unless it has rested there since`() {
+        val t = touches()
+        t.run(landIn(0, 60000, 30000, 1), 0L)
+        t.run(landIn(1, 40000, 30000, 2), 50L)
+        t.run(listOf(slot(0), "0003 0039 ffffffff", syn), 200L)
+        // Landed 250 ms after the first lifted, the other still down from 50: two down.
+        assertTrue(t.crowds(landIn(0, 61000, 30000, 3), 450L))
+        t.run(listOf(slot(0), "0003 0039 ffffffff", syn), 500L)
+        // That one has rested since (down from 50, not moved, more than 700 ms): it is the hand, not a finger.
+        assertFalse(t.crowds(landIn(0, 61000, 30000, 4), 1_500L))
+        assertFalse(t.crowded)
+    }
+
+    @Test fun `the crowding applies after a frame's last landing and before anything else of it`() {
+        val d = RearTouches.Down(1f, 1f, 0L); val u = RearTouches.Up(1f, 1f, 0L); val m = RearTouches.Move(1f, 1f, 0L)
+        assertEquals(0, RearTouches.crowdIndex(emptyList()))
+        assertEquals(0, RearTouches.crowdIndex(listOf(m)))
+        assertEquals(1, RearTouches.crowdIndex(listOf(d)))
+        assertEquals(1, RearTouches.crowdIndex(listOf(d, u)))       // a light tap in the frame another landed in: no tap of it
+        assertEquals(2, RearTouches.crowdIndex(listOf(u, d)))       // a takeover's new finger is the one crowded
+        assertEquals(0, RearTouches.crowdIndex(listOf(u)))
+    }
+
+    @Test fun `a line is read as type, code and value, hex, with or without the device`() {
+        assertEquals(Triple(3, 0x39, -1), RearTouches.parse("0003 0039 ffffffff"))
+        assertEquals(Triple(3, 0x35, 60100), RearTouches.parse("/dev/input/event7: 0003 0035 0000eac4"))
+        assertEquals(null, RearTouches.parse("add device 3: /dev/input/event7"))
     }
 }

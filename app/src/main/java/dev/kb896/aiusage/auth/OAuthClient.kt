@@ -73,7 +73,7 @@ class OAuthClient(
             .build().toString()
 
     /**
-     * Exchanges an authorization code (from [LoopbackServer.awaitCode]) and its PKCE
+     * Exchanges an authorization code (from [LoopbackServer.serve]) and its PKCE
      * verifier for tokens. `code` and `verifier` are single-use credential material —
      * see the class doc on [Failure] — so neither may appear in a thrown message, and
      * neither is logged here.
