@@ -24,7 +24,7 @@ import kotlinx.coroutines.withContext
  *
  * The posture rules come in two groups, because on Xiaomi's base they are two kinds of thing.
  * Those under "These act on Xiaomi's screen" light or dim Xiaomi's rear screen by themselves,
- * which fights its own screen management, so they start off (PanelConfig.companionStart).
+ * independently of Xiaomi's own screen management.
  * "Off when lying on its back" only holds back this app's own wakes, so it stays on.
  * Always-on and "stay on in the hand" are not here: they relight the back after Xiaomi turns
  * it off, which is Xiaomi's AOD's job; they live on in Replace mode.
@@ -33,9 +33,11 @@ object AdvancedPage {
     /** "Faces left out" opened. */
     private var facesOpen = false
 
-    fun build(column: LinearLayout, host: CompanionHost) {
+    fun build(column: LinearLayout, host: CompanionHost, openSetup: () -> Unit) {
         val context = host.activity
         val config = host.config()
+
+        SettingsRows.navigation(CompanionUi.card(column), "Setup guide", onClick = openSetup)
 
         // HEALTH: what something the back leans on says is wrong, in a few words with what to do; nothing when all is
         // well (service/Health, looked at by service/HealthCheck at start and after any change).
@@ -52,7 +54,7 @@ object AdvancedPage {
 
         val xiaomi = CompanionUi.card(column)
         SettingsRows.title(xiaomi, "These act on Xiaomi's screen")
-        SettingsRows.note(xiaomi, "Off to start: each one lights or dims Xiaomi's rear screen by itself.")
+        SettingsRows.note(xiaomi, "These rules change the rear screen’s power or brightness.")
         SettingsRows.toggle(xiaomi, "Wake when picked up", config.wakeOnLift) { on -> host.write { it.copy(wakeOnLift = on) } }
         SettingsRows.toggle(xiaomi, "Face down: back bright, front dimmed", config.tableMode) { on -> host.write { it.copy(tableMode = on) }; host.rebuild() }
         if (config.tableMode) {
@@ -77,8 +79,8 @@ object AdvancedPage {
         SettingsRows.title(keep, "Keep it running")
         SettingsRows.note(keep, "Advice only: nothing waits on these. Without them HyperOS may stop the app in the background.")
         val unrestricted = (context.getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(context.packageName)
-        if (unrestricted) SettingsRows.note(keep, "Battery: no restrictions.")
-        else SettingsRows.navigation(keep, "Battery: no restrictions") {
+        if (unrestricted) SettingsRows.note(keep, "Android battery optimization is off.")
+        SettingsRows.navigation(keep, "Battery settings") {
             Privacy.disclose(context, Privacy.Access.BATTERY, next = "Next: this app's page. Set its battery use to no restrictions.") {
                 open(host, Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(Uri.fromParts("package", context.packageName, null)))
             }

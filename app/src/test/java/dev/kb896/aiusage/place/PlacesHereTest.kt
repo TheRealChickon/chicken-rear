@@ -20,6 +20,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLog
 
 /**
  * THE BACK FOLLOWS A CHANGE OF PLACE: a fence's EXIT or ENTER, a fix at pin time, each is saved onto the notes
@@ -139,21 +140,61 @@ class PlacesHereTest {
     }
 
     @Test fun `another note for a place he is at - the fix at pin time keeps its notes on the back`() {
-        val inside = Visit(where = Where.INSIDE, owed = false)
-        given(listOf(note("water", 3, gym, here = true), note("towels", 1, gym, here = true)), mapOf(gym.key to inside))
-        Places.settled(app, gym, fix(gym, north = 30.0), before = inside)
+        val position = fix(gym, north = 30.0)
+        val inside = Visit(where = Where.INSIDE, owed = false, confirmedAt = position.at)
+        given(listOf(note("water", 3, gym, here = true), note("towels", 1, gym, here = true))
+            .map { it.copy(hereConfirmedAt = position.at) }, mapOf(gym.key to inside))
+        Places.settled(app, gym, position, before = inside)
         assertEquals(Where.INSIDE, PlaceStore(app).load().visits.getValue(gym.key).where)
-        assertTrue("nothing changed on the back", told.isEmpty())
+        assertTrue("a duplicate fix does not change the back", told.isEmpty())
     }
 
     @Test fun `a fence's word between the pin and its fix stands - the fix does not take the place back out`() {
         val inside = Visit(where = Where.INSIDE, owed = false)
         // Left and back again (an EXIT, then an ENTER) while the fix was on its way: what the fences said stands.
-        val since = inside.copy(exitAt = System.currentTimeMillis() - 60_000L, exitClean = false)
-        given(listOf(note("water", 3, gym, here = true)), mapOf(gym.key to since))
+        val time = System.currentTimeMillis()
+        val since = inside.copy(exitAt = time - 60_000L, exitClean = false, confirmedAt = time)
+        given(listOf(note("water", 3, gym, here = true).copy(hereConfirmedAt = time)), mapOf(gym.key to since))
         Places.settled(app, gym, fix(gym, north = 3_000.0), before = inside)
         assertEquals(since, PlaceStore(app).load().visits.getValue(gym.key))
         assertTrue(told.isEmpty())
+    }
+
+    @Test fun `a passive fix ends the visit on both pages even when every note is standing`() {
+        val now = System.currentTimeMillis()
+        val time = now - 10_000L
+        val visit = Visit(where = Where.INSIDE, confirmedAt = time)
+        val pin = note("private title", 2, gym, here = true).copy(
+            arrivedAt = time, hereConfirmedAt = time, place = "private place"
+        )
+        given(listOf(pin, note("plain", 1)), mapOf(gym.key to visit))
+        Places.check(app, "passive fused", fix(gym, north = 673.0))
+        assertEquals(Where.OUTSIDE, PlaceStore(app).load().visits.getValue(gym.key).where)
+        assertEquals(listOf("plain"), lastShown())
+        assertTrue(PinList.arrivals(told.single().pins).isEmpty())
+        assertEquals(0L, stored().first().arrivedAt)
+        val log = ShadowLog.getLogsForTag("AiUsagePlace").map { it.msg }.last { "leave via passive fused" in it }
+        assertTrue("distance=670m accuracy=20m" in log)
+        assertFalse("private" in log)
+        assertFalse("10.0" in log || "20.0" in log)
+    }
+
+    @Test fun `no permission or position lets both pages expire without deleting the note`() {
+        val time = System.currentTimeMillis() - Arrivals.CONFIRM_FOR_MS - 1
+        val old = Visit(where = Where.INSIDE, confirmedAt = time)
+        given(listOf(note("place note", 2, gym, here = true).copy(arrivedAt = time, hereConfirmedAt = time)), mapOf(gym.key to old))
+        Places.check(app, "periodic", null)
+        assertEquals(Where.UNKNOWN, PlaceStore(app).load().visits.getValue(gym.key).where)
+        assertTrue(lastShown().isEmpty())
+        assertTrue(PinList.arrivals(told.single().pins).isEmpty())
+        assertEquals(1, stored().size)
+    }
+
+    @Test fun `legacy inner exit is ignored and the expanded exit is routed to its place`() {
+        assertNull(Fences.eventKey(Event.EXIT, gym.key))
+        assertEquals(gym.key, Fences.eventKey(Event.EXIT, "exit:" + gym.key))
+        assertEquals(gym.key, Fences.eventKey(Event.ENTER, gym.key))
+        assertNull(Fences.eventKey(Event.DWELL, "exit:" + gym.key))
     }
 
     @Test fun `each initial trigger is Play services' own flag`() {

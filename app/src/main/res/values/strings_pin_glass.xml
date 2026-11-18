@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="pin_glass_label">Pin to back: glass</string>
-    <string name="pin_glass_desc">Takes one picture of the screen at the moment you pin a note to the back, so the animation can show the page behind it through glass, and shows that animation over whatever is on the screen for about two seconds. The picture is kept only while the animation plays. It is never saved, sent or logged. This service reads nothing else: no screen content, no typing, no events; its animation takes no touches.</string>
+    <string name="pin_glass_desc">Takes a screenshot for pin animations. If you enable Circle to Search, holding the navigation bar captures the screen for text selection and on-device translation. Selecting text or an image searches Google. Scroll translation follows changes on screen. This service does not read the accessibility window tree.</string>
 </resources>

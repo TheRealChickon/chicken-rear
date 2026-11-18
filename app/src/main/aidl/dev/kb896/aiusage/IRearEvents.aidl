@@ -104,4 +104,7 @@ oneway interface IRearEvents {
      * IRearService's 117: other branches take the next free ones.
      */
     void onShot(in ParcelFileDescriptor file, String name) = 113;
+    void onCircleGesture(long session, String action, long uptime, boolean onHome) = 114;
+    // Real rear display wake edge; location access stays with the app.
+    void onRearWoke() = 181;
 }

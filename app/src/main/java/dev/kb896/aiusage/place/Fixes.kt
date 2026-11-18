@@ -61,6 +61,26 @@ object Fixes {
         }
     }
 
+    /** A passive fused feed while an inside place needs checking. Closing it also ignores queued callbacks. */
+    @SuppressLint("MissingPermission")
+    fun passive(context: Context, done: (Arrivals.Fix) -> Unit, failed: () -> Unit): AutoCloseable {
+        val client = LocationServices.getFusedLocationProviderClient(context)
+        var open = true
+        val listener = com.google.android.gms.location.LocationListener { location ->
+            if (open && Fences.possible(context)) done(of(location))
+        }
+        val request = com.google.android.gms.location.LocationRequest.Builder(Priority.PRIORITY_PASSIVE, 30_000L)
+            .setMinUpdateIntervalMillis(15_000L)
+            .setMaxUpdateAgeMillis(Arrivals.OWN_FIX_MS)
+            .build()
+        client.requestLocationUpdates(request, context.mainExecutor, listener)
+            .addOnFailureListener { if (open) failed() }
+        return AutoCloseable {
+            open = false
+            client.removeLocationUpdates(listener)
+        }
+    }
+
     /** Whether the phone has a working data connection now (for the GPS try on waking). */
     fun online(context: Context): Boolean = runCatching {
         val cm = context.getSystemService(android.net.ConnectivityManager::class.java)

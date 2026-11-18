@@ -2,6 +2,7 @@ package dev.kb896.aiusage.place
 
 import dev.kb896.aiusage.data.Pin
 
+/** Which place notes the back can show. The shell also enforces the deadline on its cached payload. */
 object Here {
     /** The places the phone is at now, by their keys (Arrivals.key): those whose state is INSIDE. */
     fun keys(visits: Map<String, Arrivals.Visit>): Set<String> =
@@ -22,6 +23,20 @@ object Here {
         }
         return if (changed) out else pins
     }
+
+    /** Project visit state onto both rear pages, clearing any arrival whose visit ended. */
+    fun visits(pins: List<Pin>, visits: Map<String, Arrivals.Visit>, now: Long): List<Pin> = pins.map { pin ->
+        val key = PinList.keyOf(pin) ?: return@map pin
+        val visit = visits[key]
+        val at = visit?.confirmedAt?.takeIf { visit.where == Arrivals.Where.INSIDE && Arrivals.freshConfirmation(it, now) } ?: 0L
+        pin.copy(here = at != 0L, hereConfirmedAt = at, arrivedAt = if (at == 0L) 0L else pin.arrivedAt)
+    }
+
+    /** Older payloads with no proof of presence are hidden until the app rechecks them. */
+    fun current(pin: Pin, now: Long): Pin =
+        if (pin.placed && (!pin.here || !Arrivals.freshConfirmation(pin.hereConfirmedAt, now)))
+            pin.copy(here = false, hereConfirmedAt = 0L, arrivedAt = 0L)
+        else pin
 
     /**
      * The notes the back's notes page lists, in their order: every plain note, a note for a place only while it is

@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The pin's glass (service/PinGlassService): no events, no window content, no gestures. Only the right to take a
-     picture of the screen, used once as a note is pinned. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes=""
     android:accessibilityFeedbackType="feedbackGeneric"

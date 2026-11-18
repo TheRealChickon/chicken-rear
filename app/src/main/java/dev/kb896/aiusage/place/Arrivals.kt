@@ -11,8 +11,9 @@ object Arrivals {
     const val DRIVING_MPS = 8f
     /** A position he could only have reached at this speed from the last fix seen is a jump (250 km/h). */
     const val JUMP_MPS = 70f
-    /** A clean exit is a fix beyond the zone by its error, and by this at least. */
-    const val EXIT_MARGIN_M = 50f
+    /** The gap between the entry and exit radii, before adding the fix’s error. */
+    const val EXIT_MARGIN_M = 100
+    const val CONFIRM_FOR_MS = 3 * 60 * 60_000L
     /** Outside this long after a clean exit before he may arrive again; after a doubtful one, [AGAIN_DOUBTFUL_MS]. */
     const val AGAIN_CLEAN_MS = 10 * 60_000L
     const val AGAIN_DOUBTFUL_MS = 45 * 60_000L
@@ -69,6 +70,9 @@ object Arrivals {
         val heldAt: Long = 0L,
         /** Its fence is to be set (again): not known to be held by Play services. */
         val owed: Boolean = true,
+        /** Wall time of the fix that last confirmed this visit, and the last accepted transition. */
+        val confirmedAt: Long = 0L,
+        val changedAt: Long = 0L,
     )
 
     enum class Quality { CLEAN, NO_FIX, OLD, MOCK, LOOSE, OUTSIDE, DRIVING, JUMP }
@@ -99,15 +103,29 @@ object Arrivals {
         fix == null -> Quality.NO_FIX
         fix.mock -> Quality.MOCK
         fix.ageMs > maxAge -> Quality.OLD
-        fix.accuracy > place.radius -> Quality.LOOSE
-        distance(place, fix) > place.radius + fix.accuracy -> Quality.OUTSIDE
+        !accurate(place, fix) -> Quality.LOOSE
+        distance(place, fix) > place.radius -> Quality.OUTSIDE
         (fix.speed ?: 0f) >= DRIVING_MPS -> Quality.DRIVING
         jump(fix, last) -> Quality.JUMP
         else -> Quality.CLEAN
     }
 
-    /** Clearly outside: beyond the zone by the fix's error, and by [EXIT_MARGIN_M] at least. */
-    fun clearlyOut(place: Place, fix: Fix): Boolean = distance(place, fix) > place.radius + maxOf(EXIT_MARGIN_M.toDouble(), fix.accuracy.toDouble())
+    private fun accurate(place: Place, fix: Fix): Boolean =
+        fix.accuracy.isFinite() && fix.accuracy in 0f..place.radius.toFloat()
+
+    fun clearlyOut(place: Place, fix: Fix): Boolean =
+        accurate(place, fix) && distance(place, fix) > place.radius + EXIT_MARGIN_M + fix.accuracy
+
+    fun freshConfirmation(at: Long, now: Long): Boolean = at > 0L && now - at in 0 until CONFIRM_FOR_MS
+
+    private fun confirm(v: Visit, at: Long): Visit =
+        v.copy(confirmedAt = maxOf(v.confirmedAt, at), heldAt = 0L)
+
+    private fun leave(v: Visit, now: Long, at: Long, clean: Boolean) =
+        v.copy(where = Where.OUTSIDE, exitAt = now, exitClean = clean, heldAt = 0L, confirmedAt = 0L, changedAt = at)
+
+    private fun superseded(v: Visit, fix: Fix): Boolean =
+        fix.at < maxOf(v.confirmedAt, v.changedAt)
 
     /** He may arrive now: he was outside long enough after his last exit, or it was never known that he was inside. */
     fun mayArrive(v: Visit, now: Long): Boolean = when (v.where) {
@@ -116,66 +134,82 @@ object Arrivals {
         Where.OUTSIDE -> v.exitAt == 0L || now - v.exitAt >= if (v.exitClean) AGAIN_CLEAN_MS else AGAIN_DOUBTFUL_MS
     }
 
-    private fun arrive(v: Visit, now: Long, why: String): Result =
-        if (mayArrive(v, now)) Result(v.copy(where = Where.INSIDE, arrivedAt = now, heldAt = 0L), true, why)
-        else Result(v.copy(where = Where.INSIDE, heldAt = 0L), false, "inside again too soon after leaving: not a new visit")
+    private fun arrive(v: Visit, now: Long, at: Long, why: String): Result {
+        val inside = confirm(v.copy(where = Where.INSIDE, changedAt = at), at)
+        return if (mayArrive(v, now)) Result(inside.copy(arrivedAt = now), true, why)
+        else Result(inside, false, "inside again too soon after leaving: no new arrival")
+    }
 
     enum class Event { ENTER, DWELL, EXIT }
 
-    /**
-     * A fence's event for [place]. A fence's ENTER and DWELL are transitions (no initial ENTER is set where he might
-     * be inside, [initial]), so an ENTER while the state is not known is an arrival, as from outside. An initial EXIT
-     * (set where he was inside) is an EXIT like any other: he has left.
-     */
-    fun fence(event: Event, place: Place, v: Visit, fix: Fix?, last: Seen?, now: Long): Result = when (event) {
-        Event.ENTER -> when {
-            v.where == Where.INSIDE -> Result(v.copy(heldAt = 0L), false, "entered while already inside")
-            else -> when (val q = judge(place, fix, last)) {
-                Quality.CLEAN -> arrive(v, now, "entered, a clean fix")
-                else -> Result(v.copy(heldAt = now), false, "entered, held: ${q.name.lowercase().replace('_', ' ')}")
+    fun fence(event: Event, place: Place, v: Visit, fix: Fix?, last: Seen?, now: Long): Result {
+        if (fix != null && (superseded(v, fix) || (event != Event.ENTER && fix.mock))) return Result(v, false, "ignored mock or superseded fix")
+        val at = fix?.at ?: now
+        return when (event) {
+            Event.ENTER -> when (val quality = judge(place, fix, last)) {
+                Quality.CLEAN -> if (v.where == Where.INSIDE) Result(confirm(v, at), false, "confirmed inside")
+                else arrive(v, now, at, "entered, a clean fix")
+                else -> Result(if (v.where == Where.INSIDE) v else v.copy(heldAt = now), false, "entry held: ${quality.name.lowercase()}")
             }
-        }
-        // Still inside two minutes on: whatever held the ENTER, he is there.
-        Event.DWELL -> if (v.where == Where.INSIDE) Result(v.copy(heldAt = 0L), false, "still inside")
-        else arrive(v, now, if (v.heldAt != 0L) "a held entry confirmed by staying" else "stayed inside")
-        Event.EXIT -> {
-            val clean = fix != null && !fix.mock && fix.ageMs <= EVENT_FIX_MS && clearlyOut(place, fix)
-            when (v.where) {
-                // Already outside (a held ENTER and then out again): the held one is dropped without a trace.
-                Where.OUTSIDE -> Result(v.copy(heldAt = 0L), false, "left again before it counted")
-                else -> Result(v.copy(where = Where.OUTSIDE, exitAt = now, exitClean = clean, heldAt = 0L), false, if (clean) "left, a clean exit" else "left, a doubtful exit")
+            Event.DWELL -> when {
+                fix != null && judge(place, fix, last) != Quality.CLEAN -> Result(v, false, "dwell fix did not confirm inside")
+                v.where != Where.INSIDE && (fix != null || (v.heldAt > 0L && now - v.heldAt in 0..STALE_MS)) ->
+                    arrive(v, now, at, "entered, confirmed by dwell")
+                fix != null -> Result(confirm(v, at), false, "confirmed inside by dwell")
+                else -> Result(v, false, "dwell without current evidence")
+            }
+            // Production delivers EXIT only from the expanded fence. A fix, when supplied, must independently
+            // clear the uncertainty band for an INSIDE visit (see [fenceExit]).
+            Event.EXIT -> if (v.where == Where.OUTSIDE) Result(v.copy(heldAt = 0L), false, "already outside")
+            else {
+                val clean = fix != null && fix.ageMs <= EVENT_FIX_MS && clearlyOut(place, fix)
+                Result(leave(v, now, at, clean), false, if (clean) "left, a clean fence exit" else "left, a doubtful fence exit")
             }
         }
     }
 
-    /** A look of our own on waking ([fix] one of ours, at most [OWN_FIX_MS] old). It confirms a held entry, finds a missed one, or settles a state not known. */
-    fun look(place: Place, v: Visit, fix: Fix, last: Seen?, now: Long): Result {
-        if (fix.mock || fix.ageMs > OWN_FIX_MS) return Result(v, false, "the fix does not count")
-        if (jump(fix, last)) return Result(v, false, "the fix is a jump")
-        val d = distance(place, fix)
-        val inside = d <= place.radius && fix.accuracy <= place.radius && (fix.speed ?: 0f) < DRIVING_MPS
+    fun fenceExit(place: Place, v: Visit, fix: Fix?, last: Seen?, now: Long): Result =
+        if (v.where == Where.INSIDE && fix != null) look(place, v, fix, last, now, EVENT_FIX_MS)
+        else fence(Event.EXIT, place, v, fix, last, now)
+
+    /** Reconcile a visit using the position we have, even if the fence has said nothing. */
+    fun look(place: Place, v: Visit, fix: Fix?, last: Seen?, now: Long, maxAge: Long = OWN_FIX_MS): Result {
+        val unusable = when {
+            fix == null -> "no fix"
+            fix.mock -> "mock fix"
+            fix.ageMs > maxAge -> "old fix"
+            superseded(v, fix) -> "superseded fix"
+            !accurate(place, fix) -> "poor accuracy"
+            jump(fix, last) -> "position jump"
+            else -> null
+        }
+        if (fix == null || unusable != null) return unconfirmed(v, now, unusable ?: "no fix")
         return when {
-            inside -> when (v.where) {
-                Where.INSIDE -> Result(v.copy(heldAt = 0L), false, "still inside")
-                Where.UNKNOWN -> if (v.heldAt != 0L) arrive(v, now, "a held entry confirmed on waking")
-                else Result(v.copy(where = Where.INSIDE), false, "found inside, not known before: no arrival")
-                Where.OUTSIDE -> arrive(v, now, if (v.heldAt != 0L) "a held entry confirmed on waking" else "found inside on waking")
+            distance(place, fix) <= place.radius && (fix.speed ?: 0f) < DRIVING_MPS -> when (v.where) {
+                Where.INSIDE -> Result(confirm(v, fix.at), false, "confirmed inside")
+                Where.UNKNOWN -> if (v.heldAt != 0L) arrive(v, now, fix.at, "entered, a held entry confirmed")
+                else Result(confirm(v.copy(where = Where.INSIDE, changedAt = fix.at), fix.at), false, "found inside")
+                Where.OUTSIDE -> arrive(v, now, fix.at, "entered, found inside")
             }
             clearlyOut(place, fix) -> when (v.where) {
-                Where.INSIDE -> Result(v.copy(where = Where.OUTSIDE, exitAt = now, exitClean = true, heldAt = 0L), false, "found outside on waking: a clean exit")
-                Where.UNKNOWN -> Result(v.copy(where = Where.OUTSIDE, heldAt = 0L), false, "found outside, not known before")
-                Where.OUTSIDE -> Result(v.copy(heldAt = 0L), false, "still outside")
+                Where.INSIDE -> Result(leave(v, now, fix.at, clean = true), false, "left, fix beyond exit radius and accuracy")
+                else -> Result(v.copy(where = Where.OUTSIDE, heldAt = 0L, changedAt = fix.at), false, "confirmed outside")
             }
-            else -> Result(v, false, "the fix says neither")
+            else -> unconfirmed(v, now, "fix did not confirm inside or outside")
         }
     }
+
+    private fun unconfirmed(v: Visit, now: Long, why: String): Result =
+        if (v.where == Where.INSIDE && !freshConfirmation(v.confirmedAt, now))
+            Result(v.copy(where = Where.UNKNOWN, confirmedAt = 0L, heldAt = 0L), false, "visit expired: $why")
+        else Result(v, false, why)
 
     /** The state at pin time from one fix (or none in time): inside, outside or not known. Pinned while inside: no arrival now. */
     fun pinned(place: Place, fix: Fix?): Visit {
         if (fix == null || fix.mock || fix.ageMs > OWN_FIX_MS) return Visit(owed = true)
         return when {
-            distance(place, fix) <= place.radius && fix.accuracy <= place.radius -> Visit(where = Where.INSIDE, owed = true)
-            clearlyOut(place, fix) -> Visit(where = Where.OUTSIDE, owed = true)
+            distance(place, fix) <= place.radius && accurate(place, fix) -> Visit(where = Where.INSIDE, confirmedAt = fix.at, changedAt = fix.at)
+            clearlyOut(place, fix) -> Visit(where = Where.OUTSIDE, changedAt = fix.at)
             else -> Visit(owed = true)
         }
     }

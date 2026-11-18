@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         screen?.resume()
+        dev.kb896.aiusage.place.PlaceWatch.look(this, "app resumed", foreground = true)
         // With this page in front the phone gives a position; in the background it gives none
         // (LastPlace). Taken here, kept roughly, for the weather behind the moon's clouds.
         lifecycleScope.launch {

@@ -134,7 +134,15 @@ fun deviceFix(context: Context): suspend () -> Pair<Double, Double>? = {
         }
         val last = if (current == null) lm.getLastKnownLocation(LocationManager.FUSED_PROVIDER) else null
         val loc = current ?: last
-        if (loc != null) LastPlace.keep(context, loc.latitude, loc.longitude)
+        if (loc != null) {
+            LastPlace.keep(context, loc.latitude, loc.longitude)
+            if (dev.kb896.aiusage.place.PlacePermission.fine(context)) {
+                val fix = dev.kb896.aiusage.place.Fixes.of(loc)
+                if (fix.ageMs <= dev.kb896.aiusage.place.Arrivals.OWN_FIX_MS) {
+                    dev.kb896.aiusage.place.Places.check(context, "weather position", fix)
+                }
+            }
+        }
         val kept = if (loc == null) LastPlace.read(context) else null
         Log.i("AiUsageWeather", "position: now ${current != null}, last known ${last != null}, remembered ${kept != null}")
         loc?.let { it.latitude to it.longitude } ?: kept

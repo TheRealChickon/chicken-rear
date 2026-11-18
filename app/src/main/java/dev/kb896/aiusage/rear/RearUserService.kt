@@ -5,6 +5,8 @@ import android.util.Log
 import androidx.core.graphics.drawable.toBitmap
 import dev.kb896.aiusage.BuildConfig
 import dev.kb896.aiusage.IRearEvents
+import dev.kb896.aiusage.place.Arrivals
+import dev.kb896.aiusage.place.Here
 import dev.kb896.aiusage.IRearService
 import dev.kb896.aiusage.Panel
 import dev.kb896.aiusage.data.StatePayload
@@ -108,6 +110,7 @@ class RearUserService : IRearService.Stub {
     }
 
     override fun destroy() {
+        setCircleSession(0, -1)
         // Going anyway with the process, the token dying with it; said first, so it is seen to.
         letGoOfBack("the service is going")
         // The sheet's blocker must not outlive us: an untrusted layer left up takes every
@@ -3564,7 +3567,7 @@ class RearUserService : IRearService.Stub {
     // ---- PIN TO LOCATION: A NOTE WHOSE PLACE HE REACHED STANDS ON THE BACK (dev.kb896.aiusage.place, SPEC section 5) ----
     //
     // A STATE IN THE PAYLOAD, not news: whenever the notes carry an arrivedAt the page stands (RearNav's arrivals), also
-    // after a restart of this process (then without its slide), until he puts it away: the bin (done), a stroke down
+    // after a restart of this process (then without its slide), until the visit ends or it is dismissed: the bin (done), a stroke down
     // (not now), told to the app and told again with every payload that still carries it (ArrivalPuts).
 
     /** The notes standing as arrivals, newest arrival first, less what he has put away. */
@@ -3604,12 +3607,12 @@ class RearUserService : IRearService.Stub {
     }
 
     /** The arrivals as a payload has them (or the demo's): the navigation told how many stand, and what he put away told again. */
-    private fun onArrivals(next: List<dev.kb896.aiusage.data.Pin>) {
+    private fun onArrivals(next: List<dev.kb896.aiusage.data.Pin>, reconcilePuts: Boolean = true) {
         val first = arrivalsPlayed == null
         val shown = arrivalPuts.visible(next)
         if (first) arrivalsPlayed = shown.map { it.arrivedAt }.toMutableSet()
         arrived = shown
-        if (!demoArrivalsUp) for (put in arrivalPuts.untaken(next)) runCatching {
+        if (reconcilePuts && !demoArrivalsUp) for (put in arrivalPuts.untaken(next)) runCatching {
             Log.i(TAG, "arrival: told again that he put one away (${if (put.bin) "the bin" else "not now"}) — the app had not taken it")
             if (put.bin) events?.onPinRemoved(put.at) else events?.onArrivalLater(put.at)
         }
@@ -3660,16 +3663,19 @@ class RearUserService : IRearService.Stub {
      *
      * THE NOTES PAGE LISTS A NOTE FOR A PLACE ONLY WHILE THE PHONE IS THERE (dev.kb896.aiusage.place.Here: the app sends
      * each note's Pin.here, and [pins] is Here.onBack of the payload's list). The arrivals are taken from the whole
-     * list (a note standing at its place stands also after he has left), and so is what is fresh (a place note coming
+     * list after the presence deadline is applied, and so is what is fresh (a place note coming
      * back onto the page as he reaches it is not a new pin). A fresh note for a place is listed while its pin lands
      * ([landing]), whatever is learnt of its place meanwhile. Every note keeps its own name (Pin.at), so the bin, the
      * paging and the order told to the app act on the notes listed; the app puts a told order on its whole list with
      * the hidden notes in their places (PinOrder.apply). A note for a place coming or going while he reads another
      * leaves him on his ([listPins]).
      */
+    @Synchronized
     private fun onPins(given: List<dev.kb896.aiusage.data.Pin>) {
         // The order he gave them on the back, until the app's list has it (keptOrder).
-        var next = keptOrder(given)
+        val now = System.currentTimeMillis()
+        var next = keptOrder(given).map { Here.current(it, now) }
+        schedulePlaceExpiry(next, now)
         // A debug build's made-up notes are on the page for a look ("pins|…"): his own are kept aside and come back after.
         if (!demoArrivalsUp) onArrivals(next) else ownArrived = next
         if (demoPinsUp) { ownPins = dev.kb896.aiusage.place.Here.onBack(next, landing.at); return }
@@ -3698,6 +3704,39 @@ class RearUserService : IRearService.Stub {
             beamMade = true
             beamWithPicture(pins.firstOrNull()?.image, android.os.SystemClock.uptimeMillis())
         } else pinsPage.changed()
+    }
+
+    private val placeExpiry = Runnable { expirePlaceNotes() }
+    private var placeExpiresAt = 0L
+
+    private fun schedulePlaceExpiry(notes: List<dev.kb896.aiusage.data.Pin>, now: Long) {
+        placeExpiresAt = notes.filter { it.placed && it.here }.minOfOrNull { it.hereConfirmedAt + Arrivals.CONFIRM_FOR_MS } ?: 0L
+        musicHandler.removeCallbacks(placeExpiry)
+        if (placeExpiresAt > now) musicHandler.postDelayed(placeExpiry, placeExpiresAt - now)
+    }
+
+    /** The shell can hide cached notes and arrivals even when the app cannot run. */
+    @Synchronized
+    private fun expirePlaceNotes() {
+        if (placeExpiresAt == 0L) return
+        val now = System.currentTimeMillis()
+        val cachedNotes = if (demoPinsUp) ownPins else pins
+        val cachedArrivals = if (demoArrivalsUp) ownArrived else arrived
+        (cachedNotes + cachedArrivals).asSequence()
+            .filter { it.placed && it.here && !Arrivals.freshConfirmation(it.hereConfirmedAt, now) }
+            .mapNotNull(dev.kb896.aiusage.place.PinList::keyOf).distinct().forEach { _ ->
+                Log.i("AiUsagePlace", "place: leave via rear cache — visit expired; distance=unknown accuracy=unknown")
+            }
+        val visible = Here.onBack(cachedNotes.map { Here.current(it, now) }, landing.at)
+        if (demoPinsUp) ownPins = visible
+        else if (visible != pins) {
+            listPins(visible, fresh = false, why = "place confirmation expired")
+            pinsPage.changed()
+        }
+        val arrivals = cachedArrivals.map { Here.current(it, now) }
+        if (demoArrivalsUp) ownArrived = arrivals
+        else if (arrivals != arrived) onArrivals(arrivals, reconcilePuts = false)
+        schedulePlaceExpiry(visible + arrivals, now)
     }
 
     /**
@@ -3753,7 +3792,7 @@ class RearUserService : IRearService.Stub {
         demoArrivalsUp = false
         arrivalTurn.end()
         arrived = emptyList()
-        onArrivals(ownArrived); ownArrived = emptyList()
+        onArrivals(ownArrived, reconcilePuts = false); ownArrived = emptyList()
         Log.i(TAG, "arrival: demo arrivals ended")
     }
 
@@ -4781,7 +4820,7 @@ class RearUserService : IRearService.Stub {
         FaceCatalog.dust(),
     )
     /** The chosen face (PanelConfig.face) and which choice it is (faceSeq): the shell's copy, kept in [FACE_FILE]. */
-    @Volatile private var faceKey: String = FaceCatalog.MOON
+    @Volatile private var faceKey: String = dev.kb896.aiusage.data.PanelConfig.FRESH.face
     @Volatile private var faceSeq = 0L
     /** By sha1: faces that failed in this process (FaceCatalog rule 8), with why. */
     private val faceFailed = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -7359,7 +7398,17 @@ class RearUserService : IRearService.Stub {
     /** The app process's ear (setEvents); null until it registers, or after it died. */
     @Volatile private var events: IRearEvents? = null
 
-    override fun setEvents(events: IRearEvents?) {
+    private var circle: dev.kb896.aiusage.circle.CircleWatch? = null
+
+    @Synchronized override fun setCircleSession(session: Long, launcherUid: Int) {
+        circle?.close()
+        circle = null
+        val callback = events ?: return
+        if (session != 0L && launcherUid >= 0) circle = dev.kb896.aiusage.circle.CircleWatch(callback, session, launcherUid).also { it.start() }
+    }
+
+    @Synchronized override fun setEvents(events: IRearEvents?) {
+        setCircleSession(0, -1)
         this.events = events
         // Changes made while nobody listened go now.
         if (events != null) {
@@ -8705,7 +8754,7 @@ class RearUserService : IRearService.Stub {
             val rest = line.substringAfter('|', "")
             val place = rest.substringBefore('|').trim().ifEmpty { "Gym" }
             val words = rest.substringAfter('|', "").split("||").map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { listOf("A note for this place") }.take(3)
-            if (!demoArrivalsUp) ownArrived = pins
+            if (!demoArrivalsUp) ownArrived = arrived
             demoArrivalsUp = true
             val now = System.currentTimeMillis()
             val made = words.mapIndexed { i, text -> dev.kb896.aiusage.data.Pin("$text (Demo)", now - 1_000_000_000L - i, 0.0, 0.0, radius = 150, place = place, arrivedAt = now - i, watched = true) }
@@ -9140,7 +9189,11 @@ class RearUserService : IRearService.Stub {
         val now = WakeStyle.light(rearState(rearDisplay()))
         val was = rearLight
         rearLight = now
-        if (WakeStyle.isWakeEdge(was, now)) onWakeEdge(seenAt)
+        if (WakeStyle.isWakeEdge(was, now)) {
+            expirePlaceNotes()
+            runCatching { events?.onRearWoke() }
+            onWakeEdge(seenAt)
+        }
         if (now != WakeStyle.Light.ON) {
             // Dark while it was to be lit: WHO PUT IT DOWN is asked of the power manager and said (the log is all
             // there is to go by afterwards).

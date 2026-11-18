@@ -6,6 +6,28 @@ Versions are the upstream release this fork is based on plus the fork's own coun
 
 Nothing yet.
 
+## 1.2.1-cr3
+
+### Added
+
+- Optional Circle to Search under Idle, with text selection, Google and Lens search, and on-device
+  translation. Text recognition models are bundled. The Shizuku trigger and shared accessibility
+  service stay inactive for this feature while the standalone Circle Search app is installed.
+- A four-step setup guide for Shizuku, notifications, optional permissions and battery settings.
+  Open it again from Advanced.
+
+### Changed
+
+- Fresh installs start with Dust in Light, with updated defaults for rear power, weather and music.
+  Existing saved configurations carry over.
+- The in-app privacy notice explains Circle to Search, Google search and the on-device ML Kit features.
+- Android version code is now 3.
+
+### Fixed
+
+- Place notes leave the rear display when you leave the place or a visit can no longer be confirmed.
+  The saved note remains available for the next visit.
+
 ## 1.2.1-cr2
 
 ### Added

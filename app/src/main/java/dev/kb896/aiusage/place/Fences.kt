@@ -9,18 +9,7 @@ import com.google.android.gms.location.Geofence
 import com.google.android.gms.location.GeofencingRequest
 import com.google.android.gms.location.LocationServices
 
-/**
- * THE WATCH: one Play-services geofence per PLACE (not per note), ENTER, DWELL (2 minutes) and EXIT, never expiring,
- * responsiveness 0, its id the place's key (SPEC section 4). Play services (a privileged system app) does the
- * watching, not our process: an arrival comes as a broadcast to [FenceReceiver], from which the service may be
- * started. No key or account of any kind is needed for this (it is not Google's Maps).
- *
- * There is no way to ask Play services which fences it holds, so each place is "owed" until a set succeeded, and
- * set again ([sync], same id: it replaces) at every point SPEC R16 names: the tap on Pin, the service's start (after
- * a reboot or an update), Location back on, the permission back, once a day. Each with the initial trigger its stored
- * state calls for (Arrivals.initial: an ENTER where he was outside, never at the tap on Pin; an EXIT where he was
- * inside, so an EXIT missed meanwhile is made up for). A place with no note left loses its fence.
- */
+/** Play services watches entry/dwell at the chosen radius and exit at a wider radius. */
 object Fences {
     private const val TAG = "AiUsagePlace"
     const val ACTION = "dev.kb896.aiusage.PLACE_FENCE"
@@ -32,11 +21,17 @@ object Fences {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
     )
 
-    private fun fence(p: Arrivals.Place): Geofence = Geofence.Builder()
-        .setRequestId(p.key)
-        .setCircularRegion(p.lat, p.lng, p.radius.toFloat())
+    private const val EXIT_PREFIX = "exit:"
+
+    internal fun eventKey(event: Arrivals.Event, id: String): String? =
+        if (event == Arrivals.Event.EXIT) id.takeIf { it.startsWith(EXIT_PREFIX) }?.removePrefix(EXIT_PREFIX)
+        else id.takeUnless { it.startsWith(EXIT_PREFIX) }
+
+    private fun fence(p: Arrivals.Place, exit: Boolean): Geofence = Geofence.Builder()
+        .setRequestId(if (exit) EXIT_PREFIX + p.key else p.key)
+        .setCircularRegion(p.lat, p.lng, (p.radius + if (exit) Arrivals.EXIT_MARGIN_M else 0).toFloat())
         .setExpirationDuration(Geofence.NEVER_EXPIRE)
-        .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_DWELL or Geofence.GEOFENCE_TRANSITION_EXIT)
+        .setTransitionTypes(if (exit) Geofence.GEOFENCE_TRANSITION_EXIT else Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_DWELL)
         .setLoiteringDelay(DWELL_MS)
         .setNotificationResponsiveness(0)
         .build()
@@ -58,22 +53,26 @@ object Fences {
         if (places.isEmpty()) { done(emptySet()); return }
         if (!possible(app)) { done(emptySet()); return }
         val client = runCatching { LocationServices.getGeofencingClient(app) }.getOrNull() ?: run { done(emptySet()); return }
-        val groups = places.groupBy { it.second }
-        val ok = HashSet<String>()
+        val groups = listOf(false, true).flatMap { exit ->
+            places.groupBy { (_, initial) ->
+                if (exit && initial == Arrivals.Initial.EXIT || !exit && initial == Arrivals.Initial.ENTER) initial else Arrivals.Initial.NONE
+            }.map { (initial, group) -> Triple(exit, initial, group.map { it.first }) }
+        }
+        val successes = HashMap<String, Int>()
         var left = groups.size
-        for ((initial, group) in groups) {
+        for ((exit, initial, group) in groups) {
             val req = GeofencingRequest.Builder()
                 .setInitialTrigger(trigger(initial))
-                .addGeofences(group.map { fence(it.first) })
+                .addGeofences(group.map { fence(it, exit) })
                 .build()
             val finish = { set: Boolean ->
-                if (set) ok += group.map { it.first.key }
+                if (set) group.forEach { successes[it.key] = (successes[it.key] ?: 0) + 1 }
                 left--
-                if (left == 0) done(ok)
+                if (left == 0) done(successes.filterValues { it == 2 }.keys)
             }
             runCatching {
                 client.addGeofences(req, intent(app))
-                    .addOnSuccessListener { Log.i(TAG, "fences: ${group.size} set${when (initial) { Arrivals.Initial.ENTER -> ", with an initial entry"; Arrivals.Initial.EXIT -> ", with an initial exit"; Arrivals.Initial.NONE -> "" }}"); finish(true) }
+                    .addOnSuccessListener { Log.i(TAG, "fences: ${group.size} ${if (exit) "exit" else "entry"} fences set"); finish(true) }
                     .addOnFailureListener { e -> Log.w(TAG, "fences: ${group.size} not set (${(e as? com.google.android.gms.common.api.ApiException)?.statusCode ?: e.javaClass.simpleName})"); finish(false) }
             }.onFailure { Log.w(TAG, "fences: not set (${it.javaClass.simpleName})"); finish(false) }
         }
@@ -81,7 +80,7 @@ object Fences {
 
     fun remove(context: Context, keys: Collection<String>) {
         if (keys.isEmpty()) return
-        runCatching { LocationServices.getGeofencingClient(context.applicationContext).removeGeofences(keys.toList()) }
+        runCatching { LocationServices.getGeofencingClient(context.applicationContext).removeGeofences(keys.flatMap { listOf(it, EXIT_PREFIX + it) }) }
         Log.i(TAG, "fences: ${keys.size} removed")
     }
 

@@ -136,7 +136,7 @@ data class RingLayout(
  * A note pinned to the back: its words, and when (wall clock, ms), which is also what names it.
  * With a place ([lat], [lng], [radius] m, [place] its name or none) it is a reminder for there ("Pin to location",
  * dev.kb896.aiusage.place): reaching the zone puts it on the back as a page that stands ([arrivedAt], 0 while it
- * waits) until he dismisses it. [watched]: the zone's fence is known to be set and the position may be read, so an
+ * waits) until dismissed or the visit ends. [watched]: the zone's fence is known to be set and the position may be read, so an
  * arrival can be noticed; false, its mark is hollow ("Needs location"). [shownAt]: when it was last news otherwise.
  * [here]: the phone is at its place now, by the app's own state of that place (dev.kb896.aiusage.place.Here; the
  * app keeps it as it keeps [watched], and it crosses to the back with the notes): the back's notes page lists a note
@@ -158,6 +158,8 @@ data class Pin(
     val watched: Boolean = false,
     val here: Boolean = false,
     val image: String? = null,
+    /** Device-local evidence for place visibility, including while the app process is frozen. */
+    val hereConfirmedAt: Long = 0L,
 ) {
     val placed: Boolean get() = lat != null && lng != null
     /** A picture's note (its words, if any, are the caption). */
@@ -1284,12 +1286,20 @@ data class PanelConfig(
         fun encode(config: PanelConfig): String = json.encodeToString(serializer(), config)
 
         /**
-         * What a phone with no stored config starts on: companion mode, with the rules that
-         * act on the rear screen by themselves off ([companionStart]). [DEFAULT] keeps every
-         * field's own default (the Replace mode's posture rules on), which is what a stored
-         * config's missing field reads as. The message text is on, locked or not.
+         * New installs only. Keep the codec defaults and companion migration stable for saved settings.
          */
-        val FRESH: PanelConfig = DEFAULT.companionStart().copy(showNotificationText = true)
+        val FRESH: PanelConfig = DEFAULT.companionStart().copy(
+            face = "dust",
+            weather = "auto",
+            aodBattery = true,
+            pocketMode = true,
+            cameraLight = true,
+            infoClock = false,
+            glassStyle = GlassStyle.DEFAULT,
+            wakeOnLift = true,
+            homeDetect = true,
+            musicFollows = true,
+        )
 
         /** Whether [raw], a stored config, still says Replace mode: read as companion, but Xiaomi's rear app may be away. */
         fun storedReplace(raw: String?): Boolean = raw != null && Regex("\"$REAR_MODE_KEY\"\\s*:\\s*\"REPLACE\"").containsMatchIn(raw)

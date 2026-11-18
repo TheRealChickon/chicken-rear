@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.os.IBinder
 import android.util.Log
+import dev.kb896.aiusage.circle.CircleWatch
 import dev.kb896.aiusage.IRearEvents
 import dev.kb896.aiusage.IRearService
 import dev.kb896.aiusage.Panel
@@ -83,7 +84,7 @@ class ShizukuBridge(private val context: Context) {
 
     private val args by lazy {
         Shizuku.UserServiceArgs(ComponentName(context.packageName, RearUserService::class.java.name))
-            .daemon(false).processNameSuffix("rear").debuggable(false).version(1)
+            .daemon(false).processNameSuffix("rear").debuggable(false).version(2)
     }
 
     private val connection = object : ServiceConnection {
@@ -115,6 +116,7 @@ class ShizukuBridge(private val context: Context) {
                 else context.sendBroadcast(android.content.Intent(RearActivity.ACTION_MIRROR_SYNC).setPackage(context.packageName))
             }
             runCatching { service?.setEvents(events) }
+            dev.kb896.aiusage.circle.CircleOption.refresh(context, reconnect = true)
             quickStates?.let { (states, reachable) -> runCatching { service?.setQuickStates(states, reachable) } }
             // A new shell process thinks no camera is in use: told again if one is.
             if (cameraInUse) runCatching { service?.setCameraInUse(true) }
@@ -145,6 +147,7 @@ class ShizukuBridge(private val context: Context) {
         if (service == null && goneAt != 0L && android.os.SystemClock.elapsedRealtime() - goneAt < 1_000L) return
         goneAt = android.os.SystemClock.elapsedRealtime()
         service = null
+        dev.kb896.aiusage.circle.CircleOption.refresh(context)
         Log.w(TAG, "the shell service is gone ($why) — binding it again")
         runCatching { dev.kb896.aiusage.service.HealthCheck.cue(context, dev.kb896.aiusage.service.Health.Cue.SHELL_GONE, "the shell gone") }
         for (after in longArrayOf(0L, 500L, 2_000L, 6_000L)) mainHandler.postDelayed({ if (service == null) bindWhenReachable() }, after)
@@ -201,6 +204,7 @@ class ShizukuBridge(private val context: Context) {
      * [dev.kb896.aiusage.service.Backoff]'s waits until both are. Not allowed in Shizuku: nothing to bind, said once.
      */
     fun onShizukuArrived() {
+        dev.kb896.aiusage.circle.CircleOption.refresh(context)
         mainHandler.removeCallbacks(bindCheck)
         bindBackoff.reset()
         if (!status().granted) { dev.kb896.aiusage.service.RestartLog.say("Shizuku is there, but this app is not allowed in it: nothing bound"); return }
@@ -210,6 +214,7 @@ class ShizukuBridge(private val context: Context) {
 
     /** Shizuku's binder is gone: no more looks until it comes again. */
     fun onShizukuGone() {
+        dev.kb896.aiusage.circle.CircleOption.refresh(context)
         mainHandler.removeCallbacks(bindCheck)
         bindBackoff.reset()
     }
@@ -1095,6 +1100,7 @@ class ShizukuBridge(private val context: Context) {
 
     /** A finger on the back while the back was not held lit (IRearEvents.onRearTouch): the stay-on rule looks again. */
     var onRearTouch: () -> Unit = { }
+    var onRearWoke: () -> Unit = { }
 
     /** Night as "Sleep at night" means it (NightRule.now), set by the service that has the settings. */
     var nightNow: () -> Boolean = { false }
@@ -1148,7 +1154,33 @@ class ShizukuBridge(private val context: Context) {
     /** A banner that could not be handed over yet: see [setNotices]. */
     private val pendingPop = dev.kb896.aiusage.service.PendingPop()
 
+    private var circleSession = 0L
+    @Volatile internal var circleListening = false
+        private set
+
+    internal fun syncCircle(on: Boolean, launcherUid: Int, reconnect: Boolean) {
+        if (!reconnect && on == (circleSession != 0L)) return
+        circleListening = false
+        circleSession = if (on) android.os.SystemClock.elapsedRealtimeNanos() else 0
+        runCatching { service?.setCircleSession(circleSession, launcherUid) }
+            .onFailure { circleSession = 0L }
+    }
+
     private val events = object : IRearEvents.Stub() {
+        override fun onCircleGesture(session: Long, action: String?, uptime: Long, onHome: Boolean) {
+            if (android.os.Binder.getCallingUid() != android.os.Process.SHELL_UID || action == null) return
+            mainHandler.post {
+                if (session == 0L || session != circleSession || !shellBound()) return@post
+                when (action) {
+                    CircleWatch.LISTENING, CircleWatch.WAITING -> {
+                        circleListening = action == CircleWatch.LISTENING
+                        dev.kb896.aiusage.circle.CircleOption.refresh(context)
+                    }
+                    else -> dev.kb896.aiusage.service.PinGlassService.circleGesture(action, uptime, onHome)
+                }
+            }
+        }
+
         // A row swiped away over a guest: gone from the panel's list too, and from the front if
         // they are kept the same (PanelConfig.matchFrontNotifications), as the panel's own swipe is.
         override fun onNoticeDismissed(key: String?) {
@@ -1270,6 +1302,8 @@ class ShizukuBridge(private val context: Context) {
         override fun onArrivalLater(at: Long) { mainHandler.post { this@ShizukuBridge.onArrivalLater(at) } }
 
         override fun onUsageShown() { mainHandler.post { this@ShizukuBridge.onUsageShown() } }
+
+        override fun onRearWoke() { mainHandler.post { this@ShizukuBridge.onRearWoke() } }
 
         override fun onRearTouch() { mainHandler.post { this@ShizukuBridge.onRearTouch() } }
 

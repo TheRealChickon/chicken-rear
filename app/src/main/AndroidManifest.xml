@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:tools="http://schemas.android.com/tools" xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
@@ -24,7 +24,10 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <!-- so the app may ask whether HyperOS's rear-screen app is installed (Setup.kt) -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <queries>
+        <package android:name="dev.chicken.circlesearch" />
+        <package android:name="com.google.android.googlequicksearchbox" />
         <package android:name="com.xiaomi.subscreencenter" />
         <!-- The health check (service/Health.WATCHED): their versions, and Shizuku's page for its button. -->
         <package android:name="com.android.incallui" />
@@ -278,10 +281,15 @@
             android:exported="false"
             android:process=":dots" />
 
-        <!--
-          The pin's glass: one picture of the screen as a note is pinned (service/PinGlassService). It asks for no
-          events and no window content. Off until HE switches it on in Settings, Accessibility.
-        -->
+        <activity
+            android:name=".circle.AnchorActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:launchMode="singleInstance"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <service
             android:name=".service.PinGlassService"
             android:exported="true"
@@ -395,5 +403,8 @@
             android:enabled="true"
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+        <service android:name="com.google.android.datatransport.runtime.backends.TransportBackendDiscovery" tools:node="remove" />
+        <service android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.JobInfoSchedulerService" tools:node="remove" />
+        <receiver android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.AlarmManagerSchedulerBroadcastReceiver" tools:node="remove" />
     </application>
 </manifest>

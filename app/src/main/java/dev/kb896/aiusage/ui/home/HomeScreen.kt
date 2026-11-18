@@ -33,6 +33,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import dev.kb896.aiusage.circle.CircleOption
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -330,6 +332,7 @@ class HomeModel(private val host: CompanionHost, private val pickVideo: ((androi
     fun refresh() {
         val a = host.activity
         readFaces()
+        CircleOption.refresh(a)
         pinGlass = dev.kb896.aiusage.service.PinGlassService.enabled(a)
         glassRunning = dev.kb896.aiusage.service.PinGlassService.running()
         refreshCameraPermissions()
@@ -1208,6 +1211,12 @@ private fun ThreeFingersHeld(model: HomeModel) {
         Segmented(listOf("Screenshot", "Recording", "Back off", "Nothing"), c.threeFingers.ordinal, modifier = Modifier.padding(top = 8.dp)) { i ->
             model.write { it.copy(threeFingers = ThreeFingers.entries[i]) }
         }
+        val circle by CircleOption.changes.collectAsState()
+        Line("Circle to Search") {
+            Toggle(circle.available && circle.requested, "Circle to Search", enabled = circle.available) { CircleOption.setEnabled(model.context, it) }
+        }
+        Label(circle.hint, size = 13, weight = 450, color = LocalTone.current.ink3)
+        if (!circle.serviceEnabled && !circle.standaloneInstalled) Chip("Accessibility") { model.openPinGlass() }
     }
 }
 

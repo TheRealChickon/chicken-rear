@@ -14,6 +14,7 @@ from its release 1.2.1. Not affiliated with Xiaomi.
 - [Features](#features)
 - [What it needs](#what-it-needs)
 - [Install](#install)
+- [Circle to Search](#circle-to-search)
 - [After a reboot](#after-a-reboot)
 - [Gestures on the back](#gestures-on-the-back)
 - [What is not included](#what-is-not-included)
@@ -52,13 +53,14 @@ text is centred in the part you can see.
 | **Calls** | Ringing: decline and answer. In the call: speaker and end. Works with the phone's own dialer; other apps' calls use their notification buttons. |
 | **Timers** | The Xiaomi Clock's timer with the time left, water that sinks as it runs, pause / continue, and an X that cancels it. |
 | **Charging** | The battery level as a fluid that fills the panel, coloured by level, with the percent. Stays while the charger is in; at 100% it shows one short moment and leaves. |
-| **Notifications** | Choose a full-page message or one of two island styles. Messages can show the app’s icon, sender and text. Pull down from the right half of the top edge for the waiting ones as a pile of pages; swipe a page sideways to dismiss or snooze it on the phone. |
-| **Pinned notes** | "Pin to back" from any text selection or share sheet. Swipe up on the face for the notes, sideways between them, the bin removes one. Pin text or an image, reorder notes, or tie a note to a place and show it when you arrive. The pin animation is Xiaomi's own or the app's. |
+| **Notifications** | Choose a full-page message or a message island. **Island · Tint** colours the live face behind the message; **Island · Sweep** dims the face and sweeps a band of light behind the text. Messages can show the app’s icon, sender and text. Pull down from the right half of the top edge for the waiting ones as a pile of pages; swipe a page sideways to dismiss or snooze it on the phone. |
+| **Pinned notes** | "Pin to back" from any text selection or share sheet. Swipe up on the face for the notes, sideways between them, the bin removes one. Pin text or an image, reorder notes, or tie a note to a place so it appears when you arrive and leaves the rear display when you leave. The pin animation is Xiaomi's own or the app's. |
 | **AI usage** | Claude and ChatGPT Codex usage limits have been tested with the real services. Weekly limits show by default, with optional five-hour limits. Claude has its animated mascot, and ChatGPT uses the installed app’s icon or its optional Dots animation. |
 | **Always-on rules** | The back is lit while the phone is in use or lies face down, and off in a pocket, lying on its back, or after you switch it off by hand. At night (22:00 to 07:00 or Do Not Disturb) with the front off it goes dark after two minutes so the phone can sleep. Optional home detection by Wi-Fi. |
 | **Brightness** | Follows the room's light through the rear light sensor, dimmer than Xiaomi's own floor in the dark, with one slider for the overall level. A double tap dims, a tap brightens. Lying face down, the back is bright and the front is dimmed. |
-| **Apps and camera** | Chosen apps can be opened on the back. A swipe opens the rear camera. Enable Chicken Rear’s camera in Settings for photo and video, plus Portrait where supported. |
-| **Navigation** | Ongoing navigation notifications can show the next instruction and route progress on the rear display. |
+| **Apps and camera** | Chosen apps can be opened on the back. A swipe opens the rear camera. In **Settings → Camera**, enable **Our camera on the back** and grant camera access for a rear viewfinder, photo and video, and Portrait where supported. |
+| **Navigation** | While a Google Maps route is active, Chicken Rear reads its navigation notification to show the next turn, distance and route progress. Other apps with compatible navigation notifications can use the same page. |
+| **Circle to Search** | Hold the front navigation bar, then select text or circle part of the screen to search. The overlay can also translate text in place. Off by default. |
 | **Settings** | One page on the front screen: a live preview of the back drawn by the same code, a row of pages under it, and only the settings of the selected page. Follows the phone's light and dark mode. |
 
 ## What it needs
@@ -78,7 +80,10 @@ text is centred in the part you can see.
 1. **Set up Shizuku** using the [steps above](#before-you-start-shizuku).
 2. **Install Chicken Rear.** Download `chicken-rear-<version>.apk` from [Releases](../../releases)
    and open it. Allow your browser or file manager to install apps when prompted.
-3. **Open Chicken Rear**, review the privacy notice and allow Shizuku access as described above.
+3. **Open Chicken Rear** and review the privacy notice. The four-step setup guide covers Shizuku,
+   notification access, optional permissions for place notes, the rear camera and the earbud animation,
+   and HyperOS battery settings. You can skip it or open it again under **Advanced → Setup guide**.
+   Fresh installs start with **Dust in Light** and the face clock off. Saved settings carry over on update.
 4. **Set up the features you use.** Choose a page under the rear preview to see its settings.
    1. *Message, Notifications*: the switch is on. If the strip says "Notifications need access",
       press "Fix ›", then "Continue". With Shizuku running it is granted at once; otherwise allow
@@ -90,11 +95,12 @@ text is centred in the part you can see.
       the back stops updating.
    3. *Usage*: choose Claude or ChatGPT and use the sign-in row. Approve the request in
       your browser, then return to Chicken Rear. The usage page is then one swipe away on the back.
-   4. Optional, each asked for only when you switch its feature on: location (approximate for the
+   4. Optional permissions for the features you use: location (approximate for the
       lightning effect; precise and "Allow all the time" for notes tied to a place), the
       microphone permission ("Follows the music"; nothing is recorded), and the accessibility
       service "Pin to back: glass" (lets the pin animation play above other overlays). The glass
-      service matters only with *Notes*, "Pin animation: Ours". If its switch is greyed out in
+      service is shared by *Notes*, "Pin animation: Ours", and [Circle to Search](#circle-to-search).
+      If its switch is greyed out in
       Accessibility, open Chicken Rear's App info, the menu at the top right, "Allow restricted
       settings", then switch it on.
 5. **Choose a face.** Use the face picker for a built-in or installed face. To use your own clip,
@@ -129,6 +135,19 @@ under Animations, and a press and hold on the back goes to the next one. A file 
 `*.wake.mp4` can be chosen to play once as the back wakes. "Add a clip" in the app cuts a video
 from the phone to the panel's shape, but saves it without `.loop` in its name, so it is not offered
 as a face; use the `adb push` above.
+
+## Circle to Search
+
+Go to **Settings → Idle → Circle to Search**. Enable **Pin to back: glass** in Android's
+Accessibility settings. The same service handles the glass pin animation and screen capture for
+search. The navigation-bar trigger runs in the Shizuku shell and requires the HyperOS launcher.
+The option stays off while the standalone Circle Search app is installed.
+
+Hold the front navigation bar to open the overlay. Select text to search Google or circle an image
+to search Google Lens. You can also copy or pin text, or translate it on the screen, including while
+you scroll. The APK bundles the text recognition models. On-device translation is powered by Google
+Translate through ML Kit and can download language models on first use.
+[Google Translation documentation](https://cloud.google.com/translate)
 
 ## After a reboot
 
@@ -184,8 +203,7 @@ until something new happens; it is one swipe right of the face meanwhile.
 
 ## Privacy
 
-There is no analytics, no account with this project and no server of its own. What leaves the
-phone:
+Chicken Rear has no account, server or analytics of its own. What leaves the phone:
 
 - **Claude usage**: requests to Anthropic with your own account: the sign-in in your browser at
   `claude.ai`, the token exchange at `platform.claude.com`, usage and profile from
@@ -195,6 +213,10 @@ phone:
   `chatgpt.com`, with your own account, kept the same way.
 - **Place search and maps (optional)**: Photon receives typed search text and, when available,
   the map centre rounded to a tenth of a degree. OpenFreeMap serves the map tiles.
+- **Circle to Search (optional)**: text queries go to Google Search and selected image crops go to
+  Google Lens. Voice and song search open the Google app. Text recognition and translation process
+  screen content on the phone. ML Kit can download translation models and Google may collect SDK
+  diagnostics. [ML Kit terms and privacy](https://developers.google.com/ml-kit/terms)
 - **Weather (optional)**: with "Lightning when it storms" on, the phone's approximate position,
   rounded to two decimals (about a kilometre), to [Open-Meteo](https://open-meteo.com/) every five
   minutes while the back is lit.
@@ -209,7 +231,9 @@ list), pinned notes, the places of notes (for which the app asks for the precise
 time, and gives it to Android's own proximity alert), the last rough position for the weather (to a
 tenth of a degree), the home Wi-Fi's identity (its gateway and name servers, not its name), and the
 one screenshot the optional "glass" service takes as you pin, which is held in memory for the two
-seconds of the animation and never saved. "Follows the music" measures the level of the sound being
+seconds of the animation and never saved. Circle to Search holds the captured screen in memory
+while the overlay is open. An image crop selected for Lens is written to the app's cache, where the
+next image search clears previous crops. "Follows the music" measures the level of the sound being
 played; nothing is recorded.
 
 The app shows the same in its privacy note on first start, and its "Privacy policy" row (under

@@ -17,18 +17,33 @@ class PanelConfigCompanionTest {
     private val before = """{"showNotifications":true,"alwaysOn":true,"stayOnInHand":true,"tableDim":true,""" +
         """"offOnBack":true,"cameraLight":true,"aodPocket":true,"title":"MINE","portalApps":["org.mozilla.firefox"]}"""
 
-    @Test fun `a fresh install starts in companion mode, its posture rules off`() {
+    @Test fun `a fresh install starts in companion mode, with the selected defaults`() {
         val c = PanelConfig.FRESH
         assertEquals(RearMode.COMPANION, c.rearMode)
         assertTrue(c.companion)
         assertFalse(c.alwaysOn)
         assertFalse(c.stayOnInHand)
         assertFalse(c.tableMode)
-        assertFalse(c.cameraLight)
-        assertFalse(c.pocketMode)
-        assertFalse(c.wakeOnLift)
+        assertTrue(c.cameraLight)
+        assertTrue(c.pocketMode)
+        assertTrue(c.wakeOnLift)
+        assertEquals("dust", c.face)
+        assertEquals("auto", c.weather)
+        assertTrue(c.aodBattery)
+        assertEquals(false, c.infoClock)
+        assertEquals(GlassStyle.DEFAULT, c.glassStyle)
+        assertTrue(c.homeDetect)
+        assertTrue(c.musicFollows)
+        assertEquals("", c.homeNet)
+        assertTrue(c.pins.isEmpty())
         // Kept: it only declines this app's own wakes now.
         assertTrue(c.offOnBack)
+    }
+
+    @Test fun `saved choices keep the previous fresh defaults`() {
+        val saved = PanelConfig.DEFAULT.companionStart()
+        assertEquals(saved, PanelConfig.decode(PanelConfig.encode(saved)))
+        assertFalse(saved == PanelConfig.FRESH)
     }
 
     @Test fun `the four additions are on by default, and the rest at their own defaults`() {

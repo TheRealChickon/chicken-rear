@@ -111,7 +111,7 @@ object PinList {
     fun moved(pins: List<Pin>, at: Long, lat: Double, lng: Double, radius: Int, name: String?): Pair<List<Pin>, String?> {
         val pin = pins.firstOrNull { it.at == at && it.placed } ?: return pins to null
         val old = keyOf(pin)
-        val next = pins.map { if (it.at == at) it.copy(lat = lat, lng = lng, radius = Arrivals.zone(radius), place = name?.trim()?.take(NAME_MOST)?.ifBlank { null }, arrivedAt = 0L, watched = false, here = false) else it }
+        val next = pins.map { if (it.at == at) it.copy(lat = lat, lng = lng, radius = Arrivals.zone(radius), place = name?.trim()?.take(NAME_MOST)?.ifBlank { null }, arrivedAt = 0L, watched = false, here = false, hereConfirmedAt = 0L) else it }
         return next to old
     }
 }

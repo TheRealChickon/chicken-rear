@@ -32,7 +32,7 @@ object Privacy {
      * that leaves this alone does not. Stored as the last version seen, not a "seen" flag,
      * so the first notice and every later one are the same mechanism.
      */
-    const val NOTICE_VERSION = 3
+    const val NOTICE_VERSION = 4
 
     /**
      * Short on purpose: what leaves the phone, what stays, and what is not there at all.
@@ -50,7 +50,11 @@ object Privacy {
             "• Only while \"Pin to location\" is open: the map of the area it shows, from " +
             "OpenFreeMap (tiles.openfreemap.org), and what you type in its search, with the map's " +
             "middle rounded to a tenth of a degree, to Photon (photon.komoot.io). Arrivals at a " +
-            "note's place are watched by Google Play services on the phone.\n\n" +
+            "note's place are watched by Google Play services on the phone.\n" +
+            "• Only with Circle to Search on: text and image searches go to Google. A selected " +
+            "image crop is kept in the app cache. Text recognition and translation run on the " +
+            "phone with Google ML Kit. Translation can download language models, and Google " +
+            "may collect SDK diagnostics.\n\n" +
             "What stays on it: your sign-in tokens, encrypted; your pinned notes, and the place of " +
             "a note you tie to one (for that the app asks for the precise position, all the time); " +
             "the last rough position, to a tenth of a degree, for the weather; the home Wi-Fi's " +
@@ -59,7 +63,7 @@ object Privacy {
             "\"Follows the music\" measures how loud the sound is and records nothing. With the " +
             "glass service on, a pin takes one picture of the screen, kept in memory for the " +
             "animation only. Captures of the rear screen are kept in memory only.\n\n" +
-            "No ads, no analytics, no trackers."
+            "No ads or Chicken Rear analytics."
 
     /**
      * Under the two ways to connect an account (AccountSettingsSheet.chooseConnection),

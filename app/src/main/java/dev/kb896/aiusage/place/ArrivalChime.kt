@@ -41,8 +41,12 @@ object ArrivalChime {
         val s = store.load()
         if (s.chimeOwedAt == 0L) return
         val now = System.currentTimeMillis()
-        store.update { it.copy(chimeOwedAt = 0L, chimedAt = if (Arrivals.afterCall(s.chimeOwedAt, now)) now else it.chimedAt) }
-        if (Arrivals.afterCall(s.chimeOwedAt, now)) play(app) else Log.i(TAG, "chime: the call was too long — the arrival is old news")
+        val standing = dev.kb896.aiusage.data.ConfigStore(app).load().pins.any {
+            Arrivals.afterCall(Here.current(it, now).arrivedAt, now)
+        }
+        val due = standing && Arrivals.afterCall(s.chimeOwedAt, now)
+        store.update { it.copy(chimeOwedAt = 0L, chimedAt = if (due) now else it.chimedAt) }
+        if (due) play(app) else Log.i(TAG, "chime: the held arrival ended or expired")
     }
 
     /** A debug build's made-up arrival: the same sound by the same rules (silent, vibrate, Do Not Disturb kept), nothing stored. */

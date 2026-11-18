@@ -283,4 +283,5 @@ interface IRearService {
     // (rear/ShotKeeper.Claim's code): 0 save it, 1 the shell has saved it itself (the app only asks the
     // media store to look at it), 2 nothing to do (binned on the back). A high number of its own.
     int claimShot(String name) = 311;
+    oneway void setCircleSession(long session, int launcherUid) = 312;
 }

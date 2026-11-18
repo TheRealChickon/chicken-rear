@@ -2,4 +2,5 @@
 <!-- The pinned pictures' folder (data/PinImage.DIR), and nothing else of the app's. -->
 <paths>
     <external-files-path name="pins" path="pins/" />
+    <cache-path name="lens" path="lens/" />
 </paths>

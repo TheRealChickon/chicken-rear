@@ -12,5 +12,6 @@ class App : Application() {
         super.onCreate()
         if (getProcessName() != packageName) return
         dev.kb896.aiusage.service.ShizukuArrival.install(this)
+        dev.kb896.aiusage.circle.CircleOption.observePackages(this)
     }
 }

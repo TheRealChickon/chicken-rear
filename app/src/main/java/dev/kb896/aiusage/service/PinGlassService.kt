@@ -1,5 +1,8 @@
 package dev.kb896.aiusage.service
 
+import dev.kb896.aiusage.circle.CircleOption
+import dev.kb896.aiusage.circle.CircleOverlay
+import dev.kb896.aiusage.circle.NavHold
 import android.accessibilityservice.AccessibilityService
 import android.content.ComponentName
 import android.content.Context
@@ -9,29 +12,52 @@ import android.util.Log
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 
-/**
- * THE PIN'S GLASS SEES THE PAGE BEHIND IT. A see-through activity gets nothing of what is
- * under it (the compositor's blur is the compositor's), and glass that bends and lights the page needs its pixels.
- * An accessibility service may take a screenshot without asking each time (`takeScreenshot`, declared
- * `canTakeScreenshot`), so this is one that does ONLY that: it asks for no events and no window content
- * (`res/xml/pin_glass.xml`), and [shot] is its whole work.
- *
- * ONE PICTURE PER PIN, taken as the pin begins (before anything of the pin's own is on the screen), handed to the
- * pin's screen, held there in memory for the two seconds of the animation and let go ([PinActivity]). NEVER saved,
- * sent or logged; only that it came, how large and how long it took is said.
- *
- * HE SWITCHES IT ON HIMSELF (Settings, Accessibility; the app's Notes section has the row that leads there): an
- * accessibility service is not ours to enable. Off, or refused, or slower than the animation: the pin plays over
- * the system's blur as before, and never waits.
- */
+/** Shared screenshot service for pin glass and the optional navigation-bar gesture. */
 class PinGlassService : AccessibilityService() {
-    override fun onServiceConnected() { live = this; Log.i(TAG, "glass: the service is on") }
-    override fun onUnbind(intent: android.content.Intent?): Boolean { if (live === this) live = null; return super.onUnbind(intent) }
-    override fun onDestroy() { if (live === this) live = null; super.onDestroy() }
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
-    override fun onInterrupt() = Unit
+    private var circle: CircleOverlay? = null
+
+    override fun onServiceConnected() {
+        live = this
+        CircleOption.refresh(this)
+    }
+
+    private fun disconnect() {
+        if (live === this) live = null
+        circle?.close()
+        circle = null
+        CircleOption.refresh(this)
+    }
+
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        disconnect()
+        return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() { disconnect(); super.onDestroy() }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) { if (event != null) circle?.onAccessibilityEvent(event) }
+    override fun onInterrupt() { circle?.cancelArm(); circle?.dismiss() }
 
     companion object {
+        internal fun enableCircle(on: Boolean) {
+            val service = live ?: return
+            if (on && service.circle == null) service.circle = CircleOverlay(service).also { it.start() }
+            if (!on) {
+                service.circle?.close()
+                service.circle = null
+            }
+        }
+
+        internal fun circleWantsAnchor() = live?.circle?.wantsAnchor == true
+
+        internal fun circleGesture(action: String, at: Long, onHome: Boolean) {
+            val overlay = live?.circle ?: return
+            when (action) {
+                NavHold.PREPARE -> overlay.prepare()
+                NavHold.ARM -> overlay.arm(at, onHome)
+                NavHold.CANCEL -> overlay.cancelArm()
+            }
+        }
+
         private const val TAG = "AiUsagePin"
         @Volatile private var live: PinGlassService? = null
         @Volatile private var lastAt = 0L

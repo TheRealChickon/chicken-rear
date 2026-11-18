@@ -24,13 +24,15 @@ class FenceReceiver : BroadcastReceiver() {
             if (event.errorCode == GeofenceStatusCodes.GEOFENCE_NOT_AVAILABLE) Fences.dropped(app)
             return
         }
+        if (!Fences.possible(app)) return
         val kind = when (event.geofenceTransition) {
             Geofence.GEOFENCE_TRANSITION_ENTER -> Arrivals.Event.ENTER
             Geofence.GEOFENCE_TRANSITION_DWELL -> Arrivals.Event.DWELL
             Geofence.GEOFENCE_TRANSITION_EXIT -> Arrivals.Event.EXIT
             else -> return
         }
-        val keys = event.triggeringGeofences.orEmpty().map { it.requestId }
+        val keys = event.triggeringGeofences.orEmpty().mapNotNull { Fences.eventKey(kind, it.requestId) }
+        if (keys.isEmpty()) return
         val fix = event.triggeringLocation?.let { Fixes.of(it) }
         val pending = goAsync()
         val began = android.os.SystemClock.uptimeMillis()

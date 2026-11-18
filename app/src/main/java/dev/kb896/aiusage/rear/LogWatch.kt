@@ -24,8 +24,24 @@ object LogWatch {
     internal fun command(buffer: String, filters: List<String>): String {
         require(buffer.isNotEmpty() && buffer.all { it.isLetterOrDigit() || it == ',' } && filters.all { f -> f.all { it.isLetterOrDigit() || it == '_' || it == ':' } }) { "a tag or buffer name only" }
         val logcat = "logcat -b $buffer -T 1 -v brief ${filters.joinToString(" ")} '*:S'"
-        return "$logcat & L=\$!; trap 'kill \$L 2>/dev/null' EXIT TERM HUP INT; while read _; do :; done; kill \$L 2>/dev/null"
+        return guarded(logcat)
     }
+
+    private const val NAV_LINES = """Starting long press detection|Long press condition met|nav_long_press_ready=false|action: Some\((Up|Cancel)\)|Home on_touch_event , action=Move|Started\(Drag\)"""
+
+    fun startNavGesture(launcherUid: Int): Process = follow("logcat --uid=$launcherUid -b main -T 1 -v brief hyper_launcher_app:I '*:S' -e '$NAV_LINES'")
+
+    fun startFrontTouch(device: String): Process {
+        require(Regex("/dev/input/event[0-9]+").matches(device))
+        return follow("getevent -lt $device")
+    }
+
+    private fun follow(source: String): Process =
+        ProcessBuilder("sh", "-c", guarded(source)).redirectErrorStream(true).start()
+
+    // Closing the supervisor's output lets readers see EOF even if the child exits first.
+    private fun guarded(source: String) =
+        "$source & L=\$!; trap 'kill \$L 2>/dev/null' TERM HUP INT; exec 1>&- 2>&-; while read _; do :; done; kill \$L 2>/dev/null"
 
     /** Ends [p] and its logcat: its input is closed, which is what its shell waits for; then the shell itself. */
     fun stop(p: Process?) {

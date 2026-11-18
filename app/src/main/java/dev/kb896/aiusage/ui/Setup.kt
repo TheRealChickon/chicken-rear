@@ -1,15 +1,17 @@
 package dev.kb896.aiusage.ui
 
+import android.app.NotificationManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
-import android.content.pm.PackageManager
 import android.os.PowerManager
 import android.provider.Settings
-import androidx.core.app.NotificationManagerCompat
 import dev.kb896.aiusage.Panel
 import dev.kb896.aiusage.rear.ShizukuBridge
+import dev.kb896.aiusage.service.NotificationRelay
 
 /**
  * What has to be true before the panel works, and whether it is.
@@ -63,7 +65,7 @@ object Setup {
     fun shizukuIntent(context: Context): Intent =
         context.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
             ?: Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://shizuku.rikka.app/"))
-    private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
+    internal const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 
     /**
      * Whether HyperOS's rear-screen app is in the panel's way for this user: true if it is
@@ -199,7 +201,8 @@ object Setup {
      * asked for when one of those is switched on.
      */
     fun notificationAccess(context: Context): Boolean =
-        NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
+        context.getSystemService(NotificationManager::class.java)
+            .isNotificationListenerAccessGranted(ComponentName(context, NotificationRelay::class.java))
 
     fun notificationAccessIntent(): Intent = Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
 

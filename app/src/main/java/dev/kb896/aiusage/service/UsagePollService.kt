@@ -166,6 +166,7 @@ class UsagePollService : Service() {
             Graph.of(this@UsagePollService).bridge.clearManualOff("the back lit while switched off by hand")
             // And whenever our own rule had it off: lit by his hand (StayOn.rearWoke), which looks again.
             stayOn?.rearWoke()
+            dev.kb896.aiusage.place.PlaceWatch.look(this@UsagePollService, "rear woke")
             // THE BACKSTOP for the dozing flag. Everything else that clears it depends on
             // the panel still being alive to say so, and the one case the supervisors
             // exist for is the panel not being alive. A lit display is proof the sleep is
@@ -413,6 +414,7 @@ class UsagePollService : Service() {
         }
         // A finger on a back that is not held lit: the stay-on rule looks again (it has stopped looking by then).
         app.bridge.onRearTouch = { stayOn?.sync() }
+        app.bridge.onRearWoke = { dev.kb896.aiusage.place.PlaceWatch.look(this, "rear woke") }
         // The fences for notes with a place, set again in every new process; Location switched on and off heard (place/PlaceWatch).
         runCatching { dev.kb896.aiusage.place.PlaceWatch.start(this) }
         // The playing card's buttons on the back: the same commands the panel's media page gave.
@@ -603,7 +605,9 @@ class UsagePollService : Service() {
             // The front going on or off, the lock opening: the stay-on rule looks again.
             when (intent?.action) { Intent.ACTION_SCREEN_ON, Intent.ACTION_SCREEN_OFF, Intent.ACTION_USER_PRESENT -> stayOn?.sync() }
             // A place note waiting: one look of ours as the front comes on (place/PlaceWatch keeps its limits).
-            if (intent?.action == Intent.ACTION_SCREEN_ON) runCatching { dev.kb896.aiusage.place.PlaceWatch.front(this@UsagePollService) }
+            if (intent?.action == Intent.ACTION_SCREEN_ON || intent?.action == Intent.ACTION_SCREEN_OFF) {
+                runCatching { dev.kb896.aiusage.place.PlaceWatch.front(this@UsagePollService) }
+            }
             // The camera is not a placement problem, so it does not go through the
             // supervisor: that path exists to get the panel back where it belongs, and
             // running it here would have a camera tap second-guessing the panel's
@@ -1237,6 +1241,7 @@ class UsagePollService : Service() {
         earbuds?.stop()
         earbuds = null
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+        Graph.of(this).bridge.onRearWoke = { }
         runCatching { dev.kb896.aiusage.place.PlaceWatch.stop(this) }
         try { unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(chargeNews) } catch (_: Exception) {}

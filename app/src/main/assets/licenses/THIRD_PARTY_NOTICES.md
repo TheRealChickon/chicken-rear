@@ -16,6 +16,11 @@ Selected libraries from `:app:releaseRuntimeClasspath`. All are Apache-2.0 excep
 | AndroidX CameraX (Camera2, lifecycle, view, video, extensions) | 1.4.2 | Apache-2.0 |
 | MapLibre Native for Android, OpenGL | 13.7.1 | BSD-2-Clause, see below |
 | Google Play services location | 21.3.0 | [Android SDK terms](https://developer.android.com/studio/terms) |
+| Google ML Kit Text Recognition (bundled Latin, Chinese, Devanagari, Japanese and Korean models) | 16.0.1 | [ML Kit Terms of Service](https://developers.google.com/ml-kit/terms) |
+| Google ML Kit Language Identification and Translation | 17.0.6 and 17.0.3 | [ML Kit Terms of Service](https://developers.google.com/ml-kit/terms) |
+| Android Data Transport (API, runtime and CCT backend) | 2.2.1, 2.2.6 and 2.3.3 | Apache-2.0 |
+| Firebase Components and Encoders (including JSON) | 16.1.0, 16.1.0 and 17.1.0 | Apache-2.0 |
+| Android ODML Image | 1.0.0-beta1 | [Android SDK terms](https://developer.android.com/studio/terms) |
 | AndroidX Media3 (transformer, effect, common and their dependencies) | 1.11.1 | Apache-2.0 |
 | Kotlin standard library, kotlinx.coroutines, kotlinx.serialization | 2.3.10, 1.9.0, 1.7.3 | Apache-2.0 |
 | OkHttp, Okio (Square) | 4.12.0, 3.6.0 | Apache-2.0 |
@@ -27,6 +32,14 @@ Selected libraries from `:app:releaseRuntimeClasspath`. All are Apache-2.0 excep
 
 The MIT licence's text, which both MIT entries above are under with their own copyright lines, is
 the one in [LICENSE](LICENSE). The Apache License 2.0 is in `assets/licenses/Apache-2.0-MaterialSymbols.txt`.
+
+### Google ML Kit
+
+The ML Kit libraries, their Google SDK dependencies and the bundled recognition models carry
+their upstream terms. The ML Kit terms incorporate the
+[Google APIs Terms of Service](https://developers.google.com/terms). On-device translations
+are powered by Google Translate. See the
+[ML Kit Translation usage and attribution guidelines](https://developers.google.com/ml-kit/language/translation/translation-terms).
 
 ### MapLibre Native licence
 

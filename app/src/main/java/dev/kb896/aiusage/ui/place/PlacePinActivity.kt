@@ -304,6 +304,7 @@ class PlacePinActivity : ComponentActivity() {
         Fixes.one(this) { fix ->
             hereBusy = false
             if (fix == null) { shakes++; return@one }
+            Places.check(this, "map position", fix)
             positioned = true
             map?.fly(fix.lat, fix.lng, maxOf(map?.zoom ?: 15.0, 15.0)) ?: run { lat = fix.lat; lng = fix.lng; zoom = 15.0 }
         }
@@ -398,11 +399,10 @@ class PlacePinActivity : ComponentActivity() {
         Places.holdForPin(this)
         // On the back's notes page at once where the phone is known to be at that place already (another note there);
         // a new place waits for its fix at pin time (Places.settled), and the pin lands on the note meanwhile.
-        val here = Places.hereNow(this)
         Places.write(this, "pinned to a location") { c ->
             val added = PinList.added(c.pins, text, now, where, image = image)
             dropped = added.dropped.any { it.placed }
-            c.copy(pins = dev.kb896.aiusage.place.Here.marked(added.pins, here))
+            c.copy(pins = Places.withPresence(this, added.pins))
         }
         Places.pinned(applicationContext, Arrivals.Place(a, b, Arrivals.zone(r)))
         // A place note pushed out of the twenty: its fence goes with it (the new one is set by Places.pinned).
@@ -434,8 +434,7 @@ class PlacePinActivity : ComponentActivity() {
             Mode.TILE -> tileId?.let { id -> store.update { it.copy(tiles = Tiles.place(it.tiles, id, a, b, radius)) } }
             Mode.NEW_TILE -> store.update { s -> Tiles.add(s.tiles, text, System.currentTimeMillis(), a, b, radius)?.let { s.copy(tiles = it) } ?: s }
             Mode.MOVE_PIN -> {
-                val here = Places.hereNow(this)
-                Places.write(this, "a place note moved") { c -> PinList.moved(c.pins, pinAt, a, b, radius, Prompt.name(placeName, namedLat, namedLng, a, b, radius)).first.let { c.copy(pins = dev.kb896.aiusage.place.Here.marked(it, here)) } }
+                Places.write(this, "a place note moved") { c -> PinList.moved(c.pins, pinAt, a, b, radius, Prompt.name(placeName, namedLat, namedLng, a, b, radius)).first.let { c.copy(pins = Places.withPresence(this, it)) } }
                 Places.pinned(applicationContext, Arrivals.Place(a, b, Arrivals.zone(radius)))
                 dev.kb896.aiusage.place.Fences.sync(applicationContext, "a place note moved")
             }

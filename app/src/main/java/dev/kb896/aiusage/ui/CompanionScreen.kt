@@ -23,6 +23,7 @@ import dev.kb896.aiusage.R
 import dev.kb896.aiusage.data.ConfigStore
 import dev.kb896.aiusage.data.PanelConfig
 import dev.kb896.aiusage.data.StatePayload
+import dev.kb896.aiusage.place.PlacePermission
 import dev.kb896.aiusage.service.Graph
 import dev.kb896.aiusage.service.NotificationRelay
 import dev.kb896.aiusage.service.WeatherPoll
@@ -34,6 +35,7 @@ import dev.kb896.aiusage.ui.glass.Backdrop
 import dev.kb896.aiusage.ui.glass.Ink
 import dev.kb896.aiusage.ui.glass.UiTheme
 import dev.kb896.aiusage.ui.glass.Unclip
+import rikka.shizuku.Shizuku
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -59,6 +61,7 @@ class CompanionScreen(
     enum class Page(val title: String) {
         HOME("Chicken Rear"),
         ADVANCED("Advanced"),
+        SETUP("Setup"),
     }
 
     private val store = ConfigStore(activity)
@@ -69,11 +72,16 @@ class CompanionScreen(
         val p = CompanionUi.dp(activity, 24)
         setPadding(p, CompanionUi.dp(activity, 12), p, p)
     }
-    private var page = Page.HOME
+    private val setupPrefs = activity.getSharedPreferences("onboarding", android.content.Context.MODE_PRIVATE)
+    private val restored = activity.savedStateRegistry.consumeRestoredStateForKey("companionPage")
+    private var setupStep = Onboarding.Step.entries.getOrNull(restored?.getInt("step") ?: 0) ?: Onboarding.Step.SHIZUKU
+    private var fromAdvanced = restored?.getBoolean("fromAdvanced") ?: false
+    private var page = restored?.getString("page")?.let(Page::valueOf)
+        ?: if (!setupPrefs.getBoolean("seen", false) && store.raw() == null) Page.SETUP else Page.HOME
     private var legacyPane: View? = null
 
     private val back = object : OnBackPressedCallback(false) {
-        override fun handleOnBackPressed() = open(Page.HOME)
+        override fun handleOnBackPressed() = goBack()
     }
 
     /** The one page (ui/home): the preview and its sections, in Compose over the same window. */
@@ -98,6 +106,9 @@ class CompanionScreen(
     private val askCamera = activity.registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         cameraPermissionResult(Manifest.permission.CAMERA, it)
     }
+    private val askPlaceLocation = activity.registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        if (page == Page.SETUP) rebuild()
+    }
     private val askMicrophone = activity.registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         cameraPermissionResult(Manifest.permission.RECORD_AUDIO, it)
     }
@@ -105,6 +116,7 @@ class CompanionScreen(
     private fun cameraPermissionResult(permission: String, granted: Boolean) {
         cameraPermissionHistory.edit().putBoolean(permission, !granted).apply()
         model.refreshCameraPermissions()
+        if (page == Page.SETUP) rebuild()
     }
 
     override fun askCameraPermission(permission: String) {
@@ -144,16 +156,37 @@ class CompanionScreen(
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             insets
         }
+        activity.savedStateRegistry.registerSavedStateProvider("companionPage") {
+            android.os.Bundle().apply {
+                putString("page", page.name)
+                putInt("step", setupStep.ordinal)
+                putBoolean("fromAdvanced", fromAdvanced)
+            }
+        }
+        back.isEnabled = page != Page.HOME
         activity.onBackPressedDispatcher.addCallback(activity, back)
         rebuild()
     }
 
-    /** Back on screen: Shizuku's answer, notification access, the battery page may all have changed. */
-    /** Off screen: the preview's clip stops, so nothing decodes for a page nobody sees. */
-    fun pause() { model.visible = false }
+    private fun refreshSetupAccess() {
+        if (page == Page.SETUP && setupStep == Onboarding.Step.SHIZUKU) rebuild()
+    }
+    private val binderReceived = Shizuku.OnBinderReceivedListener { refreshSetupAccess() }
+    private val binderDead = Shizuku.OnBinderDeadListener { refreshSetupAccess() }
+    private val permissionChanged = Shizuku.OnRequestPermissionResultListener { _, _ -> refreshSetupAccess() }
+
+    fun pause() {
+        model.visible = false
+        Shizuku.removeBinderReceivedListener(binderReceived)
+        Shizuku.removeBinderDeadListener(binderDead)
+        Shizuku.removeRequestPermissionResultListener(permissionChanged)
+    }
 
     fun resume() {
-        model.visible = true
+        model.visible = page == Page.HOME
+        Shizuku.addBinderReceivedListener(binderReceived)
+        Shizuku.addBinderDeadListener(binderDead)
+        Shizuku.addRequestPermissionResultListener(permissionChanged)
         if (graph.bridge.status().granted) graph.bridge.bind()
         if (Setup.notificationAccess(activity)) listenerSettingsOpened = false
         model.refresh()
@@ -162,6 +195,7 @@ class CompanionScreen(
 
     fun open(next: Page) {
         page = next
+        model.visible = page == Page.HOME
         back.isEnabled = next != Page.HOME
         rebuild()
         scroll.scrollTo(0, 0)
@@ -272,6 +306,64 @@ class CompanionScreen(
         try { activity.startActivity(intent) } catch (_: Exception) { toast(failure) }
     }
 
+    private fun goBack() {
+        if (page != Page.SETUP) open(Page.HOME)
+        else if (setupStep == Onboarding.Step.SHIZUKU) finishSetup()
+        else showStep(Onboarding.Step.entries[setupStep.ordinal - 1])
+    }
+
+    private fun showStep(step: Onboarding.Step) {
+        setupStep = step
+        open(Page.SETUP)
+    }
+
+    private fun finishSetup() {
+        setupPrefs.edit().putBoolean("seen", true).apply()
+        open(if (fromAdvanced) Page.ADVANCED else Page.HOME)
+        fromAdvanced = false
+    }
+
+    private fun setupAction(action: Onboarding.Action) {
+        when (action) {
+            Onboarding.Action.MANAGER -> fix(CompanionRows.Fix.OPEN_SHIZUKU)
+            Onboarding.Action.GUIDE -> start(Intent(Intent.ACTION_VIEW,
+                Uri.parse("https://rear.896.ro/en/guides/shizuku/")), "Could not open the guide")
+            Onboarding.Action.AUTHORIZE -> fix(CompanionRows.Fix.ALLOW_SHIZUKU)
+            Onboarding.Action.LISTENER -> if (Setup.notificationAccess(activity)) openListenerSettings() else allowNotifications()
+            Onboarding.Action.LOCATION -> askSetupLocation()
+            Onboarding.Action.CAMERA -> {
+                if (activity.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+                    fix(CompanionRows.Fix.OPEN_APP_INFO)
+                else askCameraPermission(Manifest.permission.CAMERA)
+            }
+            Onboarding.Action.OVERLAY -> model.askOverlay()
+            Onboarding.Action.POWER -> fix(CompanionRows.Fix.OPEN_APP_INFO)
+        }
+    }
+
+    private fun askSetupLocation() {
+        val need = PlacePermission.need(activity)
+        val fine = Manifest.permission.ACCESS_FINE_LOCATION
+        val askPrecise = need == PlacePermission.Need.PRECISE &&
+            (!setupPrefs.getBoolean("askedPrecise", false) || activity.shouldShowRequestPermissionRationale(fine))
+        val next = when {
+            askPrecise -> "Choose precise location for place notes."
+            need == PlacePermission.Need.LOCATION_OFF -> "Turn on Location on the next screen."
+            else -> "In Permissions, choose Location, precise and all the time."
+        }
+        Privacy.disclose(activity, Privacy.Access.LOCATION, next = next) {
+            when {
+                askPrecise -> {
+                    setupPrefs.edit().putBoolean("askedPrecise", true).apply()
+                    askPlaceLocation.launch(arrayOf(fine, Manifest.permission.ACCESS_COARSE_LOCATION))
+                }
+                need == PlacePermission.Need.LOCATION_OFF ->
+                    start(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS), "Could not open Location")
+                else -> fix(CompanionRows.Fix.OPEN_APP_INFO)
+            }
+        }
+    }
+
     // ---- building -----------------------------------------------------------------------------
 
     override fun rebuild() {
@@ -283,7 +375,18 @@ class CompanionScreen(
         header()
         when (page) {
             Page.HOME -> Unit
-            Page.ADVANCED -> AdvancedPage.build(column, this)
+            Page.ADVANCED -> AdvancedPage.build(column, this) {
+                fromAdvanced = true
+                setupStep = Onboarding.Step.SHIZUKU
+                open(Page.SETUP)
+            }
+            Page.SETUP -> {
+                val status = graph.bridge.status()
+                Onboarding.build(column, setupStep, status.running, status.granted, ::setupAction, {
+                    val next = Onboarding.Step.entries.getOrNull(setupStep.ordinal + 1)
+                    if (next == null) finishSetup() else showStep(next)
+                }, ::finishSetup)
+            }
         }
         Unclip.tree(column)
     }
@@ -291,7 +394,11 @@ class CompanionScreen(
     /** The page's name over the wallpaper; a sub-page's is also the way back. */
     private fun header() {
         val title = TextView(activity).apply {
-            text = if (page == Page.HOME) page.title else "‹  ${page.title}"
+            text = when (page) {
+                Page.SETUP -> "‹  Setup · ${setupStep.ordinal + 1} of ${Onboarding.Step.entries.size}"
+                Page.ADVANCED -> "‹  Advanced"
+                Page.HOME -> page.title
+            }
             textSize = 24f
             setTextColor(Ink.primary(0f))
             UiType.dress(this)
@@ -299,7 +406,7 @@ class CompanionScreen(
             setPadding(0, CompanionUi.dp(activity, 12), 0, CompanionUi.dp(activity, 16))
             if (page != Page.HOME) {
                 contentDescription = "Back"
-                setOnClickListener { open(Page.HOME) }
+                setOnClickListener { goBack() }
             }
         }
         column.addView(title, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))

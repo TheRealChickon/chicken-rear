@@ -30,8 +30,7 @@ class PlaceStore(context: Context) {
         /** The last chime of an arrival (wall ms); one held for a call, 0 for none. */
         val chimedAt: Long = 0L,
         val chimeOwedAt: Long = 0L,
-        /** The last look on waking, and the last day all fences were set again (wall ms). */
-        val lookedAt: Long = 0L,
+        /** The last day all fences were set again (wall ms). */
         val refreshedAt: Long = 0L,
         /** The last GPS try on waking with no data connection (at most one in 15 minutes). */
         val gpsAt: Long = 0L,
@@ -54,8 +53,9 @@ class PlaceStore(context: Context) {
     }
 
     fun update(change: (State) -> State): State = synchronized(LOCK) {
-        val next = change(load())
-        save(next)
+        val before = load()
+        val next = change(before)
+        if (next != before) save(next)
         next
     }
 
