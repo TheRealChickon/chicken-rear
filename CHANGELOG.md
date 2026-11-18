@@ -4,7 +4,9 @@ Versions are the upstream release this fork is based on plus the fork's own coun
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- A short rear-display demo in the README.
 
 ## 1.2.1-cr3
 

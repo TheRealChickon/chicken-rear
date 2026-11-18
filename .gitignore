@@ -29,8 +29,9 @@ credentials.json
 *.aab
 *.idsig
 
-# Video clips and footage: none is published (see the README, "What is not included")
+# Keep face clips and raw captures out of the export.
 *.mp4
+!/.github/rear-promo.mp4
 *.mkv
 *.webm
 *.mov

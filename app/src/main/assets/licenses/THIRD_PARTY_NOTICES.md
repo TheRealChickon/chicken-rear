@@ -118,9 +118,13 @@ Apache License 2.0 and the two fonts' SIL Open Font License texts.
 - Weather by [Open-Meteo](https://open-meteo.com/), CC BY 4.0. Lyrics from [LRCLIB](https://lrclib.net/), in code inherited from upstream that this
   fork's settings do not switch on.
 
+## README preview
+
+- The music cover shown in the README preview is [The Blue Marble](https://commons.wikimedia.org/wiki/File:The_Blue_Marble.jpg), photographed by the NASA Apollo 17 crew and cropped square for the demo. Wikimedia Commons identifies it as public domain in the United States under PD-USGov-NASA. The cover appears in the preview only.
+
 ## Not in this repository
 
 - Nothing of Xiaomi's. Where the back uses Xiaomi's own pictures or models (call, timer and
   music glyphs, the timer's water, the pin animation), they are read at run time from the
   system app already on the phone (`com.xiaomi.subscreencenter`) and never copied.
-- No video clips. The face on the back is a clip you add yourself.
+- No video clips for custom faces. You can add your own face clip.

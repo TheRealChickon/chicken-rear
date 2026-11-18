@@ -1,5 +1,9 @@
 # Chicken Rear
 
+[![Rear display demo showing a message arriving, animated music controls, navigation and the Dust face](.github/rear-promo.gif)](.github/rear-promo.mp4?raw=true)
+
+Music cover in the preview is [The Blue Marble](https://commons.wikimedia.org/wiki/File:The_Blue_Marble.jpg) by the NASA Apollo 17 crew (public domain in the United States).
+
 Chicken Rear is an Android app for the small rear display of the Xiaomi 17 Pro Max. It puts its own
 pages on that display, including faces, music, calls, timers, charging, notifications, pinned notes,
 navigation and Claude or ChatGPT usage. Xiaomi's own rear screen keeps
@@ -178,7 +182,7 @@ until something new happens; it is one swipe right of the face meanwhile.
 
 ## What is not included
 
-- **Video clips.** The face used during development is cut from copyrighted footage, which is not
+- **Video clips for faces.** The face used during development is cut from copyrighted footage, which is not
   in this repository or in the APK. Bring your own (format and folder above).
 - **Anything of Xiaomi's.** No picture, model, shader or animation file from Xiaomi's apps is
   bundled. Where a page uses Xiaomi's own artwork, it is read at run time from the system app that
