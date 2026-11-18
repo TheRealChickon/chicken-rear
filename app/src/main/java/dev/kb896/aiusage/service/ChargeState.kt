@@ -7,11 +7,8 @@ import android.os.BatteryManager
  *  - [Is.FILLING]: the page, its figures running;
  *  - [Is.HOLDING]: on the charger but not charging (a charge limit below 100%, too warm): the page stays, its
  *    figures stand and its fluid rests (ChargePrecise.Detail.holding);
- *  - [Is.FULL]: 100%, or the phone says "full": THE PAGE DOES NOT STAY ON THE BACK, BUT IT HAS ONE SHORT MOMENT: as
- *    the battery reaches full on the charger, and as the charger goes in with the battery already full, the fluid
- *    stands at the top with "100", and then the page goes away as a page does (the shell: RearUserService.fullMoment;
- *    only on a lit back, never kept for later). It comes back to stay when the battery is under 100% again with the
- *    charger in;
+ *  - [Is.FULL]: briefly show the current level when charging reaches full or starts at full on a lit display.
+ *    A level below full can show the persistent charging page again.
  *  - [Is.OUT]: no charger.
  * "Full" is the phone's own word (BatteryManager's status FULL) or a level of 100, whichever comes first.
  */
@@ -56,6 +53,7 @@ object ChargeState {
             Is.FULL -> { underSince = 0L; if (on) { on = false; Does.REST } else Does.NOTHING }
             Is.FILLING, Is.HOLDING -> when {
                 on -> Does.NOTHING
+                percent < 0 -> { underSince = 0L; Does.NOTHING }
                 else -> {
                     if (underSince == 0L) underSince = now
                     if (percent <= SURE_PERCENT || now - underSince >= BACK_AFTER_MS) { on = true; underSince = 0L; Does.SHOW } else Does.NOTHING

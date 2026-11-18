@@ -13,7 +13,10 @@ import kotlin.math.min
  */
 object SelLogic {
     /** A word: its own box (l,t,r,b), the top and bottom of the line it sits on (lt, lb), line and block number. */
-    class W(val text: String, val l: Int, val t: Int, val r: Int, val b: Int, val lt: Int, val lb: Int, val line: Int, val block: Int) {
+    class W(val text: String, val l: Int, val t: Int, val r: Int, val b: Int, val lt: Int, val lb: Int, val line: Int, val block: Int, val joinsPrevious: Boolean = false) {
+        private val rtl get() = text.firstOrNull { it.isLetter() }?.directionality == CharDirectionality.RIGHT_TO_LEFT_ARABIC
+        val startX get() = if (rtl) r else l
+        val endX get() = if (rtl) l else r
         val cx get() = (l + r) / 2f
         val cy get() = (lt + lb) / 2f
         val h get() = lb - lt
@@ -226,7 +229,7 @@ object SelLogic {
             if (i > a) {
                 val p = ws[i - 1]
                 if (p.block != w.block) sb.append('\n')
-                else if (!(sb.isNotEmpty() && cjk(sb.last()) && w.text.isNotEmpty() && cjk(w.text.first()))) sb.append(' ')
+                else if (!(w.joinsPrevious && p.line == w.line) && !(sb.isNotEmpty() && cjk(sb.last()) && w.text.isNotEmpty() && cjk(w.text.first()))) sb.append(' ')
             }
             sb.append(w.text)
         }
@@ -247,7 +250,7 @@ object SelLogic {
                 val broken = p.line != w.line && p.block == w.block && p.text.length > 2 && p.text.endsWith("-") &&
                     p.text[p.text.length - 2].isLetter() && w.text.isNotEmpty() && w.text[0].isLowerCase()
                 if (broken) sb.setLength(sb.length - 1)
-                else if (!(sb.isNotEmpty() && cjk(sb.last()) && w.text.isNotEmpty() && cjk(w.text.first()))) sb.append(' ')
+                else if (!(w.joinsPrevious && p.line == w.line) && !(sb.isNotEmpty() && cjk(sb.last()) && w.text.isNotEmpty() && cjk(w.text.first()))) sb.append(' ')
             }
             sb.append(w.text)
         }

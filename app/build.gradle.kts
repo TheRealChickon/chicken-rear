@@ -110,14 +110,22 @@ android {
     }
 }
 
+// An opt-in native benchmark must not reuse the normal run's skipped JUnit result.
+tasks.withType<Test>().configureEach {
+    val benchmark = providers.environmentVariable("PADDLE_OCR_BENCH")
+    inputs.property("paddleBenchmarkDirectory", benchmark.orElse(""))
+    outputs.upToDateWhen { !benchmark.isPresent }
+    outputs.doNotCacheIf("Measures the local machine") { benchmark.isPresent }
+}
+
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 
 dependencies {
-    implementation("com.google.mlkit:text-recognition:16.0.1")
-    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
-    implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
-    implementation("com.google.mlkit:text-recognition-korean:16.0.1")
-    implementation("com.google.mlkit:text-recognition-devanagari:16.0.1")
+    if (project.hasProperty("withX86")) {
+        implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
+    } else {
+        implementation(files("libs/onnxruntime-paddle-arm64-1.22.0.aar"))
+    }
     implementation("com.google.mlkit:language-id:17.0.6")
     implementation("com.google.mlkit:translate:17.0.3")
     // lifts Android's hidden-API filter for this process only, so the MIUI window flag the

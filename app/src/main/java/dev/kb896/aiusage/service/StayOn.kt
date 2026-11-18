@@ -12,7 +12,7 @@ import android.os.SystemClock
 import android.util.Log
 import dev.kb896.aiusage.BuildConfig
 import dev.kb896.aiusage.data.PanelConfig
-import dev.kb896.aiusage.rear.FaceDown
+import dev.kb896.aiusage.rear.FaceDownWatch
 import dev.kb896.aiusage.rear.LyingOnBack
 import dev.kb896.aiusage.rear.ShizukuBridge
 import java.io.File
@@ -29,8 +29,8 @@ import java.io.File
  *  - in use: the FRONT screen is on (FrontScreen: the front display's own state, never
  *    PowerManager.isInteractive, which stays true while the back alone is lit; the screen broadcasts and
  *    the display's changes the service passes on with [sync]);
- *  - face down, lying on its back: the accelerometer, through the same two readers the table
- *    watch uses (FaceDown, LyingOnBack). Listened to only while something could come of it: the
+ *  - face down: the shell's resting decision, shared with its front dim and the table watch;
+ *  - lying on its back: the accelerometer (LyingOnBack). Posture is read only while something could come of it: the
  *    front on, or the back being held lit (which keeps the phone awake, so readings keep coming);
  *  - a pocket: the rear proximity sensor (RearProximity), asked only when the front is off;
  *  - switched off by hand: the double tap's latch (ShizukuBridge.manualOff).
@@ -107,7 +107,6 @@ class StayOn(
     private val handler = Handler(thread.looper)
     private val probe by lazy { RearProximity.Probe(context) }
     private val ambient = AmbientLight(context, handler) { lux, source -> bridge.setAmbient(lux, source) }
-    private val faceDown = FaceDown()
     private val onBack = LyingOnBack()
     private var listening = false
     private var pocketed = false
@@ -212,6 +211,7 @@ class StayOn(
         handler.post {
             ambient.listen(false)
             listen(false)
+            bridge.restingFaceDown(FaceDownWatch.STAY, false)
             if (motionArmed && motion != null) sensors.cancelTriggerSensor(onMotion, motion)
             runCatching { if (lookLock.isHeld) lookLock.release() }
             if (newsOn) { newsOn = false; runCatching { context.unregisterReceiver(news) } }
@@ -246,8 +246,10 @@ class StayOn(
             if (night && !inUse) lookUntil = 0L
             val looking = SystemClock.uptimeMillis() < lookUntil
             // Readings are wanted while something could come of them.
-            listen(enabled && forced == null && (inUse || wasOn || looking))
-            val down = forced?.let { it == "facedown" } ?: faceDown.down
+            val watch = enabled && forced == null && (inUse || wasOn || looking)
+            listen(watch)
+            val resting = bridge.restingFaceDown(FaceDownWatch.STAY, watch)
+            val down = forced?.let { it == "facedown" } ?: resting
             val back = forced?.let { it == "back" } ?: onBack.down
             val now = SystemClock.uptimeMillis()
             // A pocket is only a question with the front off: in the hand, fingers cover the back.
@@ -352,15 +354,13 @@ class StayOn(
             sensors.registerListener(this, s, SensorManager.SENSOR_DELAY_NORMAL, handler)
         } else {
             sensors.unregisterListener(this)
-            faceDown.reset()
         }
     }
 
     override fun onSensorChanged(e: SensorEvent) {
         val now = SystemClock.uptimeMillis()
-        val a = faceDown.reading(e.values[0], e.values[1], e.values[2], now)
         val b = onBack.reading(e.values[0], e.values[1], e.values[2], now)
-        if (a != null || b != null) sync()
+        if (b != null) sync()
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit

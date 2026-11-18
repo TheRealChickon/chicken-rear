@@ -107,4 +107,7 @@ oneway interface IRearEvents {
     void onCircleGesture(long session, String action, long uptime, boolean onHome) = 114;
     // Real rear display wake edge; location access stays with the app.
     void onRearWoke() = 181;
+    // The charging page is being shown. Read Android's battery now and return it through chargeDetail.
+    void onChargeReading() = 182;
+    void onRestingFaceDownChanged() = 189;
 }

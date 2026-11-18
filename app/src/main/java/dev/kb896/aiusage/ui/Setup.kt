@@ -61,10 +61,10 @@ object Setup {
         XIAOMI_APP,
     }
 
-    /** Shizuku's own app when it is installed; its site, where it is downloaded from, when not. */
+    /** Open the installed manager or the recommended fork’s releases. */
     fun shizukuIntent(context: Context): Intent =
         context.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
-            ?: Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://shizuku.rikka.app/"))
+            ?: Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/thedjchi/Shizuku/releases"))
     internal const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 
     /**
@@ -110,8 +110,7 @@ object Setup {
                 // installing and starting Shizuku is already the decision to lend this app
                 // shell rights, so what they are used for belongs before it, not after.
                 access = Privacy.Access.SHIZUKU,
-                next = "Next: Shizuku's own app, or its site (shizuku.rikka.app) while it " +
-                    "is not installed.",
+                next = "Next: Shizuku’s app or the recommended fork’s releases on GitHub.",
             ),
             Step(
                 title = "Allow this app in Shizuku",

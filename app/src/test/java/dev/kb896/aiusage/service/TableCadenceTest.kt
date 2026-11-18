@@ -1,6 +1,5 @@
 package dev.kb896.aiusage.service
 
-import dev.kb896.aiusage.rear.FaceDown
 import dev.kb896.aiusage.rear.LyingOnBack
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -69,37 +68,13 @@ class TableCadenceTest {
         assertFalse(TableCadence.liftAtOnce(liftWakes = false, screensDark = true))
     }
 
-    /**
-     * What the slow watch's batch holds when he picks the phone up off its back and lays it on its face, both screens
-     * dark: half a minute of readings one second apart, delivered at once and read in order by their own times. The
-     * lift and the new lie are both found in that one batch, so the face-down lie is told within the batch.
-     */
-    @Test fun `in one idle batch a lift off its back and a face-down lie are both heard`() {
-        val face = FaceDown()
+    @Test fun `an idle batch still carries the lift off its back`() {
         val back = LyingOnBack()
-        // Settled on its back first (as LIFT or ACTIVE found it).
-        var t = 0L
-        repeat(5) { back.reading(0.02f, 0.01f, 9.81f, t); face.reading(0.02f, 0.01f, 9.81f, t); t += 1_000 }
+        for (t in 0L..14_000L step 1_000L) back.reading(0.02f, 0.01f, 9.81f, t)
         assertTrue(back.down)
-        val batch = buildList {
-            repeat(10) { add(floatArrayOf(0.03f, 0.0f, 9.80f)) } // still on its back
-            add(floatArrayOf(3.5f, 6.0f, 6.0f))                 // picked up
-            add(floatArrayOf(0.5f, -7.0f, -5.0f))               // turned over
-            repeat(18) { add(floatArrayOf(0.05f, 0.02f, -9.79f)) } // on its face
-        }
-        assertEquals(30, batch.size) // one IDLE batch: 30 readings a second apart
-        var lifted = -1L
-        var faceDown = -1L
-        for (v in batch) {
-            if (back.reading(v[0], v[1], v[2], t) == false) lifted = t
-            if (face.reading(v[0], v[1], v[2], t) == true) faceDown = t
-            t += 1_000
-        }
-        assertTrue("the lift is heard", lifted > 0)
-        assertTrue("the face-down lie is heard after it", faceDown > lifted)
-        assertTrue("within the batch", faceDown - lifted < 30_000)
+        assertEquals(false, back.reading(3.5f, 6f, 6f, 15_000L))
         assertFalse(back.down)
-        assertTrue(face.down)
+        // Face-down rest uses fresh, closely spaced shell samples instead of the idle batch.
     }
 
     @Test fun `an idle batch is half a minute of readings a second apart`() {

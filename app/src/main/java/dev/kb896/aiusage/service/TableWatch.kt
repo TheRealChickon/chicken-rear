@@ -16,16 +16,61 @@ import android.util.Log
 import android.view.Display
 import dev.kb896.aiusage.Panel
 import dev.kb896.aiusage.rear.FaceDown
+import dev.kb896.aiusage.rear.FaceDownWatch
 import dev.kb896.aiusage.rear.LyingOnBack
 import dev.kb896.aiusage.rear.RearActivity
 import dev.kb896.aiusage.rear.ShizukuBridge
 import java.util.concurrent.Executors
 
+/**
+ * THE TABLE'S WATCH, in the poll service, for the back's posture (RearPosture):
+ *
+ * - FACE DOWN ("Dim when face down", PanelConfig.tableMode): laid on its face, the panel is told
+ *   (RearActivity.ACTION_TABLE) and the back woken for it; the panel puts up the dim. Lifted, the
+ *   panel is told that too.
+ * - ON ITS BACK ("Off when lying on its back", PanelConfig.offOnBack): settled and still on its
+ *   back (LyingOnBack), the bridge declines wakes (ShizukuBridge.lyingOnBack) and the panel is
+ *   told ([RearActivity.EXTRA_TABLE_BACK]) and lets the back go. Picked up, the panel is told and
+ *   the back woken — the one way it comes back on by itself, the panel's process perhaps frozen.
+ *
+ * IN THE POLL SERVICE'S PROCESS, for PocketWatch's reason: a dark back stops the panel's
+ * activity and its :rear process can be frozen. This watch sends the shell's resting decision
+ * to the panel both while it is lit and when it is dark and table wake is enabled.
+ *
+ * THE WAKE-UP ACCELEROMETER where the phone has one: with both screens off the processor
+ * suspends, and only a wake-up sensor's events wake it. Lying on its back uses the batched event timestamps.
+ * Face-down orientation starts a short shell probe using fresh samples. Delivery holds a wakelock only
+ * until the listener returns; the guest check, the
+ * panel's word and the shell's wake run after it, under a short one of our own ([WAKE_HOLD_MS]).
+ *
+ * THREE CADENCES (TableCadence). LIFT while it lies settled either way: [LIFT_SAMPLING_US] in
+ * [LIFT_BATCH_US] batches, so picking it up is heard within about half a second — battery is
+ * not the concern there, the back coming on in the hand is. ACTIVE for [ACTIVE_MS] after the
+ * watch starts and after a lift: [SAMPLING_US] in [BATCH_US] batches, a lie seen within a couple
+ * of seconds of settling. Then IDLE: one reading a second in batches of [IDLE_BATCH_US], and only
+ * where the sensor hub can hold that batch (its FIFO); where it cannot, the idle watch reads the
+ * ordinary, non-wake-up accelerometer, which never wakes the processor.
+ *
+* With both screens off and no wake-on-lift action, use the idle sensor cadence. Waking either screen restores the faster cadence.
+ *
+ * Watching while either switch is on — the front on or off: lying on its back is as much a
+ * posture with the front in use. Not in a pocket (pocket mode switched the back off; PocketWatch
+ * says when that changes). Face down, two refusals: "Only while charging" with no charger in, and
+ * a guest app over the panel.
+ */
 class TableWatch(private val context: Context, private val bridge: ShizukuBridge) {
 
     private val sensors = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val handler = Handler(Looper.getMainLooper())
-    private val face = FaceDown()
+    @Volatile private var faceDown = false
+    private var faceDemand = false
+    private var nextFaceRequestAt = 0L
+    private var panelWantsTable = false
+    private val probeLock by lazy {
+        (context.getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AiUsage:resting-probe")
+            .apply { setReferenceCounted(false) }
+    }
     private val back = LyingOnBack()
 
     /** The guest check and the shell's wake are binder calls: off the main thread, in order. */
@@ -82,10 +127,12 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
     private var told = false
 
     /** The switches, from the config: read once per write. */
-    fun setConfig(on: Boolean, chargingOnly: Boolean, backOn: Boolean, liftWakes: Boolean = true) {
+    fun setConfig(on: Boolean, chargingOnly: Boolean, backOn: Boolean, liftWakes: Boolean = true, panelWantsTable: Boolean = false) {
         val liftChanged = liftWakes != this.liftWakes
         this.liftWakes = liftWakes
-        if (on == switchOn && chargingOnly == this.chargingOnly && backOn == this.backOn) {
+        val panelChanged = panelWantsTable != this.panelWantsTable
+        this.panelWantsTable = panelWantsTable
+        if (on == switchOn && chargingOnly == this.chargingOnly && backOn == this.backOn && !panelChanged) {
             // Only whether a lift wakes the back: that is the cadence's question alone.
             if (liftChanged && watching) recadence()
             return
@@ -104,29 +151,34 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
     /** Something that changes what to watch, or what is refused: the front on or off, the charger, the pocket. */
     fun sync() {
         if (stopped) return
-        val want = (switchOn || backOn) && sensor != null && !bridge.isPocketed()
+        dark = screensDark()
+        val want = (wantsFace() || backOn) && sensor != null && !bridge.isPocketed()
         watch(want)
         if (!switchOn && told) {
             // Switched off on the table: the panel's own switch has ended it (RearActivity.render).
             told = false
         }
         // Lying there already, and a refusal gone (the charger in): now.
-        if (watching && face.down && !told) deliver()
+        if (!wantsFace()) requestFace(false)
+        if (watching && faceDown && !told) deliver()
         // The front on or off (the service's display listener and screen broadcasts come here): the lift's cadence.
-        if (watching) { dark = screensDark(); recadence() }
+        if (watching) recadence()
     }
 
     /**
      * What this watch knows of lying on its back, said to the panel again. The panel hears only
      * edges, so it can hold a word nobody will take back: a panel new since the lie (its :rear
      * process placed again; asked on its ACTION_DOZING, which every new panel says), or a "down"
-     * from this process's predecessor, killed before it heard the lift. Only the back's word:
-     * the panel reads EXTRA_TABLE_BACK and nothing else of it.
+     * from this process's predecessor, killed before it heard the lift.
      */
     fun restate() {
         if (stopped) return
         val down = bridge.lyingOnBack
-        worker.execute { tellPanel(down = false, onBack = down) }
+        val face = faceDown
+        worker.execute {
+            tellPanel(down = false, onBack = down)
+            tellPanel(down = face)
+        }
     }
 
     /**
@@ -141,6 +193,7 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
     fun stop() {
         if (stopped) return
         watch(false)
+        if (probeLock.isHeld) probeLock.release()
         stopped = true
         worker.shutdown()
     }
@@ -182,7 +235,7 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
             cadence = null
             slowWhileSettled = false
             // Not a lift: the switch went, or a pocket. Nothing known until it reads again.
-            face.reset()
+            requestFace(false)
             told = false
             // A pocket or the switches: the back is no longer held off for lying on its back.
             back.reset()
@@ -196,7 +249,6 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
         val s = (if (mode == TableCadence.Mode.IDLE) idleSensor else sensor) ?: return
         sensors.unregisterListener(listener)
         // A flat run is not carried across the gap; a settled lie is.
-        if (!face.down) face.reset()
         if (!back.down) back.reset()
         cadence = mode
         when (mode) {
@@ -213,7 +265,7 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
             if (!watching) return@post
             val now = wanted()
             if (now == cadence) return@post
-            val settled = face.down || back.down
+            val settled = faceDown || back.down
             if (now == TableCadence.Mode.IDLE) {
                 Log.i(TAG, if (settled) "table: lying still, both screens dark — the slow watch" else "table: nothing for a while — the slow watch")
             } else if (now == TableCadence.Mode.LIFT && slowWhileSettled) {
@@ -225,10 +277,14 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
     }
 
     /** TableCadence.mode for now; the screens as last read ([dark]), so a sensor batch makes no display call. */
-    private fun wanted(): TableCadence.Mode = TableCadence.mode(
-        android.os.SystemClock.elapsedRealtime(), activeUntil, settled = face.down || back.down,
-        liftWakes = liftWakes, screensDark = dark,
-    )
+    private fun wanted(): TableCadence.Mode {
+        // The lit panel uses the quicker cadence even before a lie has settled.
+        if (panelWantsTable && !dark) return TableCadence.Mode.LIFT
+        return TableCadence.mode(
+            android.os.SystemClock.elapsedRealtime(), activeUntil, settled = faceDown || back.down,
+            liftWakes = liftWakes, screensDark = dark,
+        )
+    }
 
     /** Both screens dark, as last read: when the watch starts, at every display change and at every [sync]. */
     private var dark = false
@@ -254,6 +310,7 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
         override fun onDisplayChanged(displayId: Int) {
             if (!watching || (displayId != Display.DEFAULT_DISPLAY && displayId != Panel.DISPLAY_ID)) return
             dark = screensDark()
+            if (!wantsFace()) requestFace(false)
             recadence()
         }
     }
@@ -262,15 +319,9 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
         override fun onSensorChanged(e: SensorEvent) {
             val x = e.values[0]; val y = e.values[1]; val z = e.values[2]
             val at = e.timestamp / 1_000_000L
-            when (face.reading(x, y, z, at)) {
-                true -> deliver()
-                false -> {
-                    lifted()
-                    // Picked up: it may well be laid down again soon — quick to see it.
-                    activeUntil = android.os.SystemClock.elapsedRealtime() + ACTIVE_MS
-                }
-                null -> Unit
-            }
+            val look = wantsFace() && (faceDown || FaceDown.flat(x, y, z))
+            val now = android.os.SystemClock.uptimeMillis()
+            if (look != faceDemand || (look && now >= nextFaceRequestAt)) requestFace(look)
             if (backOn) when (back.reading(x, y, z, at)) {
                 true -> onBack(true)
                 false -> {
@@ -285,7 +336,34 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
     }
 
-    /** Settled on its face: the panel told, then the back woken for it — unless refused. */
+    private fun wantsFace(): Boolean = switchOn || (panelWantsTable && !dark)
+
+    private fun requestFace(watch: Boolean) {
+        if (!watch && !faceDemand) return
+        if (watch && !faceDemand && dark) probeLock.acquire(5_000L)
+        faceDemand = watch
+        nextFaceRequestAt = android.os.SystemClock.uptimeMillis() + 5_000L
+        updateFace(bridge.restingFaceDown(FaceDownWatch.TABLE, watch))
+    }
+
+    fun restingPostureChanged() {
+        if (!stopped && faceDemand) requestFace(wantsFace())
+    }
+
+    private fun updateFace(down: Boolean) {
+        if (faceDown == down) return
+        faceDown = down
+        worker.execute { tellPanel(down = down) }
+        if (down) {
+            deliver()
+        } else {
+            told = false
+            activeUntil = android.os.SystemClock.elapsedRealtime() + ACTIVE_MS
+        }
+        recadence()
+    }
+
+    /** Wake the back for a confirmed lie if table wake is enabled. */
     private fun deliver() {
         if (stopped || told || !switchOn) return
         if (chargingOnly && !plugged()) return
@@ -302,20 +380,13 @@ class TableWatch(private val context: Context, private val bridge: ShizukuBridge
                     handler.post { told = false }
                     return@execute
                 }
-                Log.i(TAG, "table: face down — telling the panel, waking the back")
-                tellPanel(down = true)
+                if (!faceDown) return@execute
+                Log.i(TAG, "table: face down — waking the back")
                 bridge.wake("the table")
             } finally {
                 wakeLock.release()
             }
         }
-    }
-
-    private fun lifted() {
-        if (!told) return
-        told = false
-        Log.i(TAG, "table: lifted")
-        worker.execute { tellPanel(down = false) }
     }
 
     /** [down]: face down; [onBack]: on its back (null: not about that). */

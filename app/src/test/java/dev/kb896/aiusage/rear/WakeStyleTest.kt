@@ -152,11 +152,11 @@ class WakeStyleTest {
             assertEquals(p, WakeStyle.parsePreview(WakeStyle.encode(p)))
         }
         for (s in ChargeAnimStyle.entries) {
-            val p = WakeStyle.Preview.Charge(s, 73)
+            val p = WakeStyle.Preview.Charge(s)
             assertEquals(p, WakeStyle.parsePreview(WakeStyle.encode(p)))
         }
-        assertEquals("charge:LIQUID:73", WakeStyle.encode(WakeStyle.Preview.Charge(ChargeAnimStyle.LIQUID, 73)))
-        for (bad in listOf(null, "", "edge_glow", "SPARKLE", "charge:LIQUID", "charge:LIQUID:101", "charge:LIQUID:-1", "charge:PLASMA:50", "wake:EDGE_GLOW:1")) {
+        assertEquals("charge:LIQUID", WakeStyle.encode(WakeStyle.Preview.Charge(ChargeAnimStyle.LIQUID)))
+        for (bad in listOf(null, "", "edge_glow", "SPARKLE", "charge:LIQUID:84", "charge:LIQUID:101", "charge:LIQUID:-1", "charge:PLASMA:50", "wake:EDGE_GLOW:1")) {
             assertNull("\"$bad\"", WakeStyle.parsePreview(bad))
         }
     }

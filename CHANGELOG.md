@@ -2,11 +2,26 @@
 
 Versions are the upstream release this fork is based on plus the fork's own count.
 
-## Unreleased
+## 1.2.1-cr4
 
 ### Added
 
-- A short rear-display demo in the README.
+- In-app updates from public GitHub releases. Chicken Rear verifies the download’s SHA-256 and
+  signing certificate, then opens Android’s installer for confirmation.
+- The README includes a rear-display demo with music that follows the beat.
+
+### Changed
+
+- The setup guide recommends the thedjchi Shizuku fork, which can start after boot when Wi-Fi connects.
+- Circle to Search uses on-device PaddleOCR with downloadable script packs. Choose **Only my languages**
+  or **Everything**, or download the larger **Accurate** OCR models separately.
+- In-place translation follows scrolling text and preserves paragraph layout and styling.
+- Face-down mode waits for the phone to rest and ends when the phone is lifted.
+- Android version code is now 4.
+
+### Fixed
+
+- The charging page reads the current battery level each time it is shown and slides right on dismissal.
 
 ## 1.2.1-cr3
 

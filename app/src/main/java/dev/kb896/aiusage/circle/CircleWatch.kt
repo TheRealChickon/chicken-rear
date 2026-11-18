@@ -7,7 +7,6 @@ import android.os.SystemClock
 import dev.kb896.aiusage.IRearEvents
 import dev.kb896.aiusage.rear.LogWatch
 import dev.kb896.aiusage.rear.RearTop
-import java.io.File
 import kotlin.concurrent.thread
 
 /** Lives in the shell process only for the lifetime of an enabled app callback. */
@@ -59,7 +58,7 @@ internal class CircleWatch(private val events: IRearEvents, private val session:
                 val began = SystemClock.uptimeMillis()
                 var process: Process? = null
                 try {
-                    val p = if (touch) LogWatch.startFrontTouch(frontDevice()) else LogWatch.startNavGesture(launcherUid)
+                    val p = if (touch) LogWatch.startFrontTouch(FrontTouchDevice.find() ?: "/dev/input/event7") else LogWatch.startNavGesture(launcherUid)
                     process = p
                     synchronized(this) {
                         if (stopped) return@thread
@@ -96,25 +95,6 @@ internal class CircleWatch(private val events: IRearEvents, private val session:
         }
     }
 
-    private fun frontDevice(): String {
-        val entry = File("/sys/class/input").listFiles()?.firstOrNull {
-            it.name.matches(EVENT) && runCatching { File(it, "device/name").readText().trim() == "Xiaomi_Touch_Input_0" }.getOrDefault(false)
-        }
-        if (entry != null) return "/dev/input/" + entry.name
-        // Some kernels expose the input device name to getevent only.
-        val listing = ProcessBuilder("timeout", "3", "getevent", "-p").start()
-        try {
-            var path: String? = null
-            listing.inputStream.bufferedReader().useLines { lines ->
-                for (line in lines) {
-                    if (line.startsWith("add device ")) path = line.substringAfter(": ").trim()
-                    if (path != null && line.trim().substringAfter("name:", "").trim() == "\"Xiaomi_Touch_Input_0\"") return path
-                }
-            }
-        } finally { listing.destroy() }
-        return "/dev/input/event7"
-    }
-
     override fun binderDied() = close()
 
     @Synchronized fun close() {
@@ -130,6 +110,5 @@ internal class CircleWatch(private val events: IRearEvents, private val session:
     companion object {
         const val LISTENING = "LISTENING"
         const val WAITING = "WAITING"
-        private val EVENT = Regex("event[0-9]+")
     }
 }

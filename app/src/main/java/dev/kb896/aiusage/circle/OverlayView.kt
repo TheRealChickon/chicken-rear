@@ -34,19 +34,26 @@ import kotlin.math.min
 /** A translated block drawn over the place of the original text. */
 /** What to paint over one original text line: a flat colour, or a small bitmap stretched over the box. */
 class Fill(val box: Rect, val color: Int, val bmp: Bitmap?)
-class Patch(val fills: List<Fill>, val layout: StaticLayout, val x: Float, val y: Float) {
+/** [clip]: the part of the screen the block belongs to (the page between the app's bars), fixed while the page moves;
+ *  [room]: the block's own place (its bubble, down to the next block), which moves with it. Nothing is drawn outside both. */
+/** [clip]: the part of the screen the block belongs to (the page between the app's bars), fixed while the page moves;
+ *  [room]: the block's own place (its bubble, down to the next block), which moves with it. Nothing is drawn outside both. */
+class Patch(val fills: List<Fill>, val layout: StaticLayout, val x: Float, val y: Float, val clip: Rect? = null, val room: Rect? = null) {
     /** Rows of the screen this patch covers (what it erases and what it writes). */
     val top: Int = minOf(fills.minOfOrNull { it.box.top } ?: y.toInt(), y.toInt())
     val bottom: Int = maxOf(fills.maxOfOrNull { it.box.bottom } ?: 0, (y + layout.height).toInt())
     val text: String get() = layout.text.toString()
-    fun moved(up: Int) = Patch(fills.map { Fill(Rect(it.box).apply { offset(0, -up) }, it.color, it.bmp) }, layout, x, y - up)
+    fun moved(up: Int) = Patch(fills.map { Fill(Rect(it.box).apply { offset(0, -up) }, it.color, it.bmp) }, layout, x, y - up, clip, room?.let { Rect(it).apply { offset(0, -up) } })
 }
 
 @SuppressLint("ViewConstructor")
-class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc) {
+class OverlayView internal constructor(
+    private val svc: CircleOverlay, val depth: Int, internal val ocrModel: OcrModel,
+) : View(svc) {
     enum class Mode { FROZEN, PASS }
 
     var mode = Mode.FROZEN
+    private val announcedFallbacks = mutableSetOf<String>()
     var shot: Bitmap? = null
     var soft: Bitmap? = null
     var ocr: OcrResult? = null
@@ -106,7 +113,12 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
     private val washA = floatArrayOf(0f, 0.29f, 0.39f, 0.44f, 0.50f, 0.57f, 0.61f, 0.69f, 0.76f, 0.83f, 0.886f, 0.93f, 0.957f, 1f)
 
     /** Starts the opening animation; its clock begins with the first frame drawn from now. */
-    fun start() { if (openAt == 0L) { openAt = -1L; invalidate() } }
+    fun start() {
+        if (openAt != 0L) return
+        openAt = -1L
+        ocr?.let(::showOcrFallback)
+        invalidate()
+    }
 
     private fun key(t: Float, ts: FloatArray, vs: FloatArray): Float {
         if (t <= ts[0]) return vs[0]
@@ -132,6 +144,48 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
     private var capStart = 0f
     private var capVt: android.view.VelocityTracker? = null
     private var toSheet: Sheet? = null        // this gesture began just above the results sheet and moves it
+    private var wholeWords: List<SelLogic.W> = emptyList()
+    private var firstGlyph = 0
+    private var lastGlyph = Int.MAX_VALUE
+
+    private fun resetGlyphs() {
+        firstGlyph = 0
+        lastGlyph = Int.MAX_VALUE
+        ws = wholeWords
+    }
+
+    private fun trimSelection() {
+        val words = ocr?.words ?: return
+        if (selA !in words.indices || selB !in words.indices) return
+        val bounds = wholeWords.toMutableList()
+        bounds[selA] = words[selA].selection(firstGlyph, if (selA == selB) lastGlyph else words[selA].characters.lastIndex)
+        if (selB != selA) bounds[selB] = words[selB].selection(last = lastGlyph)
+        ws = bounds
+    }
+
+    private fun moveHandle(x: Float, y: Float) {
+        val words = ocr?.words ?: return
+        val i = SelLogic.nearestWord(wholeWords,x,y)
+        if (i < 0) return
+        val glyph = words[i].glyphAt(x)
+        if (dragHandle == 1) {
+            if (i < selB || i == selB && glyph <= lastGlyph) { selA = i; firstGlyph = glyph }
+            else {
+                selA = selB; firstGlyph = lastGlyph.coerceAtMost(words[selB].characters.lastIndex.coerceAtLeast(0))
+                selB = i; lastGlyph = glyph; dragHandle = 2
+            }
+        } else {
+            if (i > selA || i == selA && glyph >= firstGlyph) { selB = i; lastGlyph = glyph }
+            else {
+                selB = selA; lastGlyph = firstGlyph
+                selA = i; firstGlyph = glyph; dragHandle = 1
+            }
+        }
+        reread = null
+        trimSelection()
+        invalidate()
+    }
+
     private var ws: List<SelLogic.W> = emptyList()   // the OCR words in the form the selection logic works on
     // zoom: content appears on screen at content * zoom + (zox, zoy)
     private var zoom = 1f
@@ -171,7 +225,6 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
     private var status: String? = null
     private var card: Card? = null
     private var patches = ArrayList<Patch>()
-    private var patchesVisible = true
 
     // ---- translation laid over the frozen screen  ----
     private val tl = TrLook(dark)
@@ -315,136 +368,201 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
 
     fun setOcr(r: OcrResult) {
         ocr = r
+        showOcrFallback(r)
         if (selB >= r.words.size || lpWord >= r.words.size) { selA = -1; selB = -1; lpWord = -1; lpAnchor = -1; textDrag = false; dragHandle = 0; items = emptyList() }
-        ws = r.words.map { SelLogic.W(it.text, it.box.left, it.box.top, it.box.right, it.box.bottom, it.lb.top, it.lb.bottom, it.line, it.block) }
+        wholeWords = r.words.map { it.selection() }
+        resetGlyphs()
         if (wantTranslate) { wantTranslate = false; setStatus(null); startTranslate() }
         if (pendingClassify) { pendingClassify = false; classify() }
         invalidate()
+    }
+
+    internal fun showOcrFallback(result: OcrResult) {
+        if (openAt == 0L || !isShown) return
+        if (announcedFallbacks.addAll(result.fastFallback)) {
+            android.widget.Toast.makeText(context, result.fallbackNotice, android.widget.Toast.LENGTH_SHORT).show()
+        }
     }
 
     fun setStatus(s: String?) { status = s; invalidate() }
 
     // ---------- patches (translation in place) ----------
 
-    fun clearPatches() { patches = ArrayList(); pending = null; invalidate() }
+    fun clearPatches() { patches = ArrayList(); pending = null; lists.clear(); listOf.clear(); invalidate() }
 
     // A newly read screen replaces the translations in one go: they are collected first and swapped in together,
     // so the screen never stands empty for a frame between the old set and the new one.
     private var pending: ArrayList<Patch>? = null
     fun beginPatches() { pending = ArrayList() }
+    /** A new set is still being collected (not yet swapped in). */
+    val collectingPatches: Boolean get() = pending != null
     fun commitPatches() {
         val p = pending ?: return
         pending = null; patches = p
-        if (!patchesVisible) kickGlow()
-        patchesVisible = true; invalidate()
+        kickGlow()
+        invalidate()
     }
 
     /**
      * The page has moved: every translation is asked where its text went. [where] gets the rows a patch covers and
      * answers how far up it moved (0 = it did not move), or null if its text is no longer there. Returns how many stayed.
      */
-    fun shiftPatches(where: (top: Int, bottom: Int) -> Int?): Int {
+    fun shiftPatches(retainWhenNone: Boolean = false, where: (top: Int, bottom: Int) -> Int?): Int {
         val out = ArrayList<Patch>()
         for (p in patches) { val up = where(p.top, p.bottom) ?: continue; out.add(if (up == 0) p else p.moved(up)) }
-        patches = out; invalidate()
+        if (out.isNotEmpty() || !retainWhenNone) { patches = out; invalidate() }
         return out.size
     }
-    fun hidePatches() { if (patchesVisible) { patchesVisible = false; invalidate() } }
-    fun showPatches() { if (!patchesVisible) kickGlow(); patchesVisible = true; invalidate() }
-    fun patchesShown() = patchesVisible
+    fun discardPendingPatches() { pending = null }
+
+    val hasPendingPatches: Boolean get() = pending?.isNotEmpty() == true
 
     fun addPatch(b: Block, translated: String, src: Bitmap) {
+        (pending ?: patches).add(make(b, translated, src))
+        if (pending == null) invalidate()
+    }
+
+    /** One translated paragraph, within the measured footprint of the original. */
+    private fun make(b: Block, translated: String, src: Bitmap): Patch {
         val w = width
         val pad = (3 * d).toInt()
         // Erase each original line with its own reconstructed background.
         val fills = ArrayList<Fill>()
-        var fg = 0; var weight = 400; var family = 0
+        var fg = 0; var weight = 400; var ground = 0
         val ref = b.lines.sortedBy { it.box.height() }[b.lines.size / 2]
         for (l in b.lines) {
-            val s = sampleLine(src, l.box, pad, if (l === ref) l.text else null, ((planned[b] ?: 0f) / 2).toInt().coerceIn(0, 2000))
+            val s = sampleLine(src, l.box, pad, if (l === ref) l.text else null)
             fills.add(s.fill)
-            if (l === ref) { fg = s.fg; weight = s.weight; family = s.family }
+            if (l === ref) { fg = s.fg; weight = s.weight; ground = s.ground }
         }
         val lh = ref.box.height().toFloat()
-        // The system font is what most apps draw with, so the replacement text looks like the original.
-        // Weight and kind (sans, serif, monospace) are the original line's, as far as its pixels tell.
-        val p = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = fg
-            typeface = Typeface.create(when (family) { 1 -> Typeface.SERIF; 2 -> Typeface.MONOSPACE; else -> Typeface.DEFAULT }, weight, false)
+        val base = Typeface.DEFAULT
+        val p = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { color = fg; typeface = Typeface.create(base, weight, false) }
+        val start = planned[b] ?: estimateSize(b, src)
+        var size = start
+        if (android.os.Build.VERSION.SDK_INT >= 35) {
+            val spacing = b.lines.filter { it.text.length >= 5 && it.text.none(::isCjk) }.map { line ->
+                val bounds = Rect()
+                p.textSize = start
+                p.getTextBounds(line.text, 0, line.text.length, bounds)
+                Look.letterSpacing(line.box.width().toFloat(), bounds.width().toFloat(), start, line.text.length - 1)
+            }.sorted()
+            if (spacing.isNotEmpty()) p.letterSpacing = spacing[spacing.size / 2]
         }
-        var size = planned[b] ?: estimateSize(b)
-        // Keep the original line pitch for paragraphs.
-        val pitch = if (b.lines.size > 1) (b.lines.last().box.top - b.lines.first().box.top) / (b.lines.size - 1f) else 0f
-        val start = size
+        // The block's own line pitch (top to top), else the screen's for text of this size, else the font's.
+        // The recognizer's line boxes follow ascenders and descenders ("again." starts at its x-height): the step from
+        // the first line's baseline to the last one's, as the picture shows them, is what the app laid out; the
+        // lines' centres when the picture does not tell.
+        val bg0 = fills.firstOrNull()?.takeIf { it.bmp == null }?.color
+        val bl = if (b.lines.size > 1 && bg0 != null) TrBlocks.baseline(src, w, height, b.lines.first().box, bg0)?.let { a -> TrBlocks.baseline(src, w, height, b.lines.last().box, bg0)?.let { z -> z - a } } else null
+        val tops = if (b.lines.size > 1) listOf((bl?.toFloat()?.takeIf { it > 0f } ?: (b.lines.last().box.exactCenterY() - b.lines.first().box.exactCenterY())) / (b.lines.size - 1)) else emptyList()
+        val pitch0 = if (tops.isNotEmpty()) tops[0] else start * (pitchRatio.takeIf { it > 0f } ?: 1.32f)
         val single = b.lines.size == 1
         val cx = b.box.exactCenterX()
         // Centred when the block sits on the screen's centre line, or when its lines share a centre but not a left edge.
         // Centred lines share a centre and stand in from the block's edges by the same amount on both sides; lines
         // that share a right edge but not a left one are right-aligned.
-        val centered = if (single) abs(cx - w / 2f) < 14 * d && b.box.width() < w * 0.8f
+        // (never a list item: its bullet stands at its left, wherever the line happens to end)
+        val centered = if (b.keepL != Int.MIN_VALUE) false else if (single) abs(cx - w / 2f) < 14 * d && b.box.width() < w * 0.8f
         else b.lines.all { abs(it.box.exactCenterX() - cx) < w * 0.025f } &&
             b.lines.any { it.box.left - b.box.left > w * 0.03f && abs((it.box.left - b.box.left) - (b.box.right - it.box.right)) < w * 0.02f }
-        val rightAligned = !single && !centered && b.lines.all { b.box.right - it.box.right < w * 0.012f } && b.lines.any { it.box.left - b.box.left > w * 0.04f }
-        val room = if (centered) (2 * min(cx, w - cx) - 16 * d).toInt() else (w - b.box.left - 8 * d).toInt()
-        // Up to two extra lines may run into empty space below the block.
-        val grow = min((spare[b] ?: 0) - lh * 0.8f, (if (pitch > 0) pitch else lh * 1.4f) * 2).coerceAtLeast(0f)
-        var layout: StaticLayout
-        var lw: Int
-        while (true) {
-            p.textSize = size
-            lw = if (single) {
-                val need = Layout.getDesiredWidth(translated, p).toInt() + 2
-                // Keep the size while the text fits its own box; shrink a little, then spill into free room, then shrink hard.
-                if (need <= b.box.width() * 1.08f || (size <= start * 0.84f && need <= room) || size <= start * 0.58f)
-                    min(need, max(room, b.box.width())) else -1
-            } else b.box.width() + (4 * d).toInt()
-            if (lw > 0) {
-                layout = StaticLayout.Builder.obtain(translated, 0, translated.length, p, max(lw, 1))
-                    .setIncludePad(false).setMaxLines(if (single) 1 else 99)
-                    .setLineSpacing(0f, if (pitch > 0) (pitch / p.getFontMetrics(null)).coerceIn(1f, 1.6f) else 1f)
-                    .setEllipsize(if (single) TextUtils.TruncateAt.END else null)
-                    .setAlignment(if (centered) Layout.Alignment.ALIGN_CENTER else if (rightAligned) Layout.Alignment.ALIGN_OPPOSITE else Layout.Alignment.ALIGN_NORMAL).build()
-                if (single || layout.height <= b.box.height() + lh * 0.3f + grow) break
-                if (size <= start * 0.6f) {
-                    // Even at the smallest size it does not fit: it is cut with "…" rather than written over what follows.
-                    var keep = layout.lineCount
-                    while (keep > 1 && layout.getLineBottom(keep - 1) > b.box.height() + lh * 0.3f + grow) keep--
-                    if (keep < layout.lineCount) layout = StaticLayout.Builder.obtain(translated, 0, translated.length, p, max(lw, 1))
-                        .setIncludePad(false).setMaxLines(keep).setEllipsize(TextUtils.TruncateAt.END)
-                        .setLineSpacing(0f, if (pitch > 0) (pitch / p.getFontMetrics(null)).coerceIn(1f, 1.6f) else 1f)
-                        .setAlignment(if (centered) Layout.Alignment.ALIGN_CENTER else if (rightAligned) Layout.Alignment.ALIGN_OPPOSITE else Layout.Alignment.ALIGN_NORMAL).build()
-                    break
-                }
-            }
-            size *= 0.94f
+        val inCol = !centered && b in rightCol
+        val rightAligned = inCol || !single && !centered && b.lines.all { b.box.right - it.box.right < w * 0.012f } && b.lines.any { it.box.left - b.box.left > w * 0.04f }
+        // Where the block may draw: its part of the screen (the page between the app's bars), its own plain area (a chat
+        // bubble, a card), never over a bullet or icon beside it, and down only to the next block.
+        val clip = clips[b] ?: Rect(0, 0, w, height)
+        val bg = fills.firstOrNull()?.takeIf { it.bmp == null }?.color
+        val cont = if (bg != null) TrBlocks.container(src, w, height, b, bg, d) else Rect(0, b.box.top, w, height)
+        cont.left = max(cont.left, max(clip.left, if (b.keepL == Int.MIN_VALUE) 0 else b.keepL))
+        cont.right = min(cont.right, min(clip.right, if (b.keepR == Int.MAX_VALUE) w else b.keepR))
+        // Ink beside a line that is not part of it (words the recognizer did not read between two emoji, a settings
+        // row's value) is not erased: the translation may not run over it. A line of its own ends its place there;
+        // the lines of a paragraph are kept short of it one by one (indents in build()), and so is their erasing.
+        val ground0 = bg ?: ground
+        val gapPx = max((lh * 0.2f).toInt(), (3 * d).toInt())
+        val beside = b.lines.map { l -> TrBlocks.inkBeside(src, w, height, l.box.top, l.box.bottom, l.box.right, cont.right, ground0, gapPx) }
+        for ((i, x) in beside.withIndex()) if (x != null) fills.getOrNull(i)?.takeIf { it.bmp == null }?.let { f -> f.box.right = max(b.lines[i].box.right, min(f.box.right, x - 1)) }
+        if (single) beside[0]?.let { cont.right = max(b.box.right, min(cont.right, it - gapPx / 2)) }
+        // A value in a right-aligned column may grow to the left up to its row's label.
+        if (inCol) TrBlocks.inkBeside(src, w, height, b.box.top, b.box.bottom, b.box.left, cont.left, ground0, gapPx)?.let { cont.left = min(b.box.left, max(cont.left, it + gapPx)) }
+        // A list's items start at one left edge (the recognizer's box of one of them can take in part of its bullet).
+        val left0 = listOf[b]?.left?.takeIf { it > cont.left } ?: b.box.left
+        val padX = max(2, (1.5f * d).toInt())
+        val wrapW = when {
+            centered -> (2 * min(cx - cont.left, cont.right - cx)).toInt()
+            rightAligned -> b.box.right - cont.left
+            else -> cont.right - left0
+        }.coerceIn(1, max(1, b.box.width() + padX))
+        val lineLimit = b.lines.size
+        // Bold words and coloured links inside the block keep their look where the translation has them too.
+        // (on a gradient or picture too, against the ground's average colour: a bold label on a chat's shaded ground)
+        val styled = if (!single || b.lines.first().parts.size >= 3) TrBlocks.styleWords(src, w, height, b, bg ?: ground, fg) else null
+        val text: CharSequence = if (styled == null) translated else android.text.SpannableString(translated).also { sp ->
+            if (weight < 600) for (r in TrLayout.boldRanges(styled.map { it.text to it.bold }, translated))
+                sp.setSpan(android.text.style.TypefaceSpan(Typeface.create(base, max(700, weight + 300).coerceAtMost(900), false)), r.first, r.last + 1, 0)
+            for (col in styled.mapNotNull { it.color }.distinct()) for (r in TrLayout.boldRanges(styled.map { it.text to (it.color == col) }, translated))
+                sp.setSpan(android.text.style.ForegroundColorSpan(col), r.first, r.last + 1, 0)
         }
-        val x = if (centered) cx - lw / 2f else if (rightAligned) b.box.right - lw.toFloat() else b.box.left.toFloat()
-        // Paragraphs start where the original started; a single line sits on the original line.
-        val y = if (single) b.box.top + (b.box.height() - layout.height) / 2f
-        else b.lines.first().box.exactCenterY() - (layout.getLineBottom(0) - layout.getLineTop(0)) / 2f
-        (pending ?: patches).add(Patch(fills, layout, x, y))
-        if (pending == null) invalidate()
+        // The first line stands on the original first line: same baseline.
+        val firstText = b.lines.first().text
+        val base0 = bg?.let { TrBlocks.baseline(src, w, height, b.lines.first().box, it) }?.takeIf { it > b.lines.first().box.top + lh * 0.4f }
+            ?: (b.lines.first().box.bottom - if (firstText.any { it in "gjpqyQ,;()[]{}|" }) (start * 0.21f).toInt() else 0)
+        val align = if (centered) Layout.Alignment.ALIGN_CENTER else if (rightAligned) Layout.Alignment.ALIGN_OPPOSITE else Layout.Alignment.ALIGN_NORMAL
+        fun build(lw: Int, lines: Int, cut: Boolean): StaticLayout {
+            // exactly the original pitch at the original size; closer together as the text is made smaller
+            val add = pitch0 * size / start - p.getFontMetrics(null)
+            val bld = StaticLayout.Builder.obtain(text, 0, text.length, p, max(lw, 1))
+                .setIncludePad(false).setMaxLines(lines).setUseLineSpacingFromFallbacks(false)
+                .setLineSpacing(add, 1f)
+                .setEllipsize(if (cut) TextUtils.TruncateAt.END else null)
+                .setAlignment(align)
+            // each line of the translation that stands on an original line with foreign ink right of it ends before it
+            if (!single && align == Layout.Alignment.ALIGN_NORMAL && beside.any { it != null }) {
+                val ind = IntArray(b.lines.size + 1) { i -> beside.getOrNull(i)?.let { x -> val room = x - gapPx / 2 - left0; if (room >= size * 2.5f && room < lw) lw - room else 0 } ?: 0 }
+                if (ind.any { it > 0 }) bld.setIndents(null, ind)
+            }
+            return bld.build()
+        }
+        val sizeScale = Look.fitScale { scale ->
+            size = start * scale
+            p.textSize = size
+            // A trailing word can otherwise wrap even when a one-line label only misses by a rounding pixel.
+            val trial = build(wrapW, lineLimit + 1, false)
+            trial.lineCount <= lineLimit && trial.getLineEnd(trial.lineCount - 1) == text.length &&
+                (0 until trial.lineCount).all { trial.getLineMax(it) <= wrapW + 1f }
+        }
+        size = start * sizeScale
+        p.textSize = size
+        val layout = build(wrapW, lineLimit, true)
+        val x = if (centered) cx - wrapW / 2f else if (rightAligned) b.box.right - wrapW.toFloat() else left0.toFloat()
+        val y = base0 - layout.getLineBaseline(0).toFloat()
+        val inkBottom = y + layout.getLineBaseline(layout.lineCount - 1) + p.descent()
+        val sidePad = max(pad, (3 * d).toInt())
+        val room = Rect(max(cont.left, b.box.left - sidePad), b.box.top - pad,
+            min(cont.right, b.box.right + sidePad), min(cont.bottom, max(b.box.bottom + pad, inkBottom.toInt())))
+
+        return Patch(fills, layout, x, y, clip, room)
     }
 
     private val planned = HashMap<Block, Float>()
-    private val spare = HashMap<Block, Int>()
-    private val sizePaint = Paint().apply { typeface = Typeface.DEFAULT }
 
-    /** OCR boxes hug the glyphs, so the font size follows from how tall each line's own text is at a known size. */
-    private fun estimateSize(b: Block, src: Bitmap? = sizeSrc): Float {
-        val lh = b.lines.map { it.box.height() }.sorted()[b.lines.size / 2].toFloat()
-        sizePaint.textSize = 100f
+    /** Compare the original glyphs against the same text drawn in the system font at a reference size. */
+    private fun estimateSize(b: Block, src: Bitmap?): Float {
+        val sizePaint = Paint().apply { typeface = Typeface.DEFAULT; textSize = 100f }
         val tb = Rect()
-        // The recognizer's line boxes are sometimes taller than the letters (Chinese paragraphs especially); where the
-        // picture is at hand, the height of the ink itself is used.
+        sizePaint.getTextBounds("x", 0, 1, tb)
+        val referenceX = tb.height().toFloat()
         val sizes = b.lines.map { l ->
             sizePaint.getTextBounds(l.text, 0, l.text.length, tb)
-            val ih = if (src != null) inkHeight(src, l.box) else 0
-            (if (ih > l.box.height() * 0.5f) minOf(ih, l.box.height()) else l.box.height()) * 100f / max(tb.height(), 40)
+            val measured = if (src != null) inkHeight(src, l.box) else 0
+            val glyph = (if (measured > l.box.height() * 0.5f) measured else l.box.height()).toFloat()
+            val lower = l.text.count { it in 'a'..'z' }
+            val xHeight = if (src != null && lower >= 4 && lower * 2 >= l.text.count { it.isLetter() })
+                TrBlocks.xHeight(src, width, height, intArrayOf(l.box.left, l.box.top, l.box.right, l.box.bottom)) ?: 0 else 0
+            Look.fontSize(glyph, max(tb.height(), 35).toFloat(), xHeight.toFloat(), referenceX)
         }.sorted()
-        return (sizes[sizes.size / 2] * 0.97f).coerceIn(lh * 0.7f, lh * 1.5f)
+        return sizes[sizes.size / 2].coerceAtLeast(1f)
     }
-    private var sizeSrc: Bitmap? = null
 
     /** Rows of [box] (view coordinates) that hold ink in [src], counted from the first to the last such row; 0 if unclear. */
     private fun inkHeight(src: Bitmap, box: Rect): Int {
@@ -456,12 +574,13 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
         val px = IntArray(bw * bh)
         src.getPixels(px, 0, bw, l, t, bw, bh)
         fun q(c: Int) = (c shr 12 and 0xF00) or (c shr 8 and 0xF0) or (c shr 4 and 0xF)
-        val hist = HashMap<Int, Int>()
+        val hist = IntArray(4096)
         var i = 0
-        while (i < px.size) { val k = q(px[i]); hist[k] = (hist[k] ?: 0) + 1; i += 3 }
-        val top = hist.maxByOrNull { it.value } ?: return 0
-        if (top.value * 3 * 100 < px.size * 45) return 0                 // no plain background: the box is all there is to go by
-        val br = (top.key shr 8) * 17; val bg = (top.key shr 4 and 15) * 17; val bb = (top.key and 15) * 17
+        while (i < px.size) { hist[q(px[i])]++; i += 3 }
+        var key = 0
+        for (k in 1 until 4096) if (hist[k] > hist[key]) key = k
+        if (hist[key] * 3 * 100 < px.size * 45) return 0                 // no plain background: the box is all there is to go by
+        val br = (key shr 8) * 17; val bg = (key shr 4 and 15) * 17; val bb = (key and 15) * 17
         var first = -1; var last = -1
         for (y in 0 until bh) {
             var n = 0
@@ -472,38 +591,81 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
         return if (first < 0) 0 else ((last - first + 1) / ky).toInt()
     }
 
-    /**
-     * Apps use a handful of text sizes, but per-block estimates scatter by 10-15 %. Estimates that lie close
-     * together are snapped to one shared size so neighbouring paragraphs do not come out in different sizes.
-     */
-    fun planSizes(blocks: List<Block>, src: Bitmap? = null) {
-        planned.clear(); spare.clear(); sizeSrc = src
-        // Free space under each block: a longer translation may grow into it instead of shrinking.
-        for (b in blocks) {
-            var free = height - b.box.bottom
-            for (o in blocks) if (o !== b && o.box.top >= b.box.bottom - 4 && o.box.left < b.box.right && o.box.right > b.box.left)
-                free = min(free, o.box.top - b.box.bottom)
-            spare[b] = max(0, free)
+    /** What [sizePlan] works out for one screen of blocks; [applySizes] puts it in force (main thread). */
+    class SizePlan(val planned: Map<Block, Float>, val clips: Map<Block, Rect>,
+                   val pitchRatio: Float, val lists: List<List<Block>>, val rightCol: Set<Block> = emptySet())
+
+    /** Measurements are per block, so intentional size differences survive the translation. */
+    fun sizePlan(blocks: List<Block>, src: Bitmap? = null, clipsFor: Map<Block, Rect> = emptyMap()): SizePlan {
+        val planned = blocks.associateWith { estimateSize(it, src) }
+        // line pitch per size on this screen, for blocks of one line that wrap when translated
+        val ratios = blocks.filter { it.lines.size > 1 }.mapNotNull { b ->
+            planned[b]?.let { (b.lines.last().box.exactCenterY() - b.lines.first().box.exactCenterY()) / (b.lines.size - 1) / it }
+        }.sorted()
+        // The items of one list (a bullet left of each, one left edge, lines of one height, one under the other) are
+        // Use a shared size to absorb measurement variation across list items.
+        val lists = ArrayList<List<Block>>()
+        var run = ArrayList<Block>()
+        fun lineH(b: Block) = b.lines.map { it.box.height() }.sorted()[b.lines.size / 2]
+        for (b in blocks.filter { it.keepL != Int.MIN_VALUE }.sortedBy { it.box.top }) {
+            val last = run.lastOrNull()
+            // (heights compared loosely: one item's box takes in descenders, another's has none; 38 against 51 px)
+            val same = last != null && abs(b.box.left - last.box.left) <= 8 * d && b.box.top - last.box.bottom in -4..(lineH(last) * 1.3f).toInt() &&
+                lineH(b).toFloat() / lineH(last) in 0.7f..1.43f
+            if (!same) { if (run.size > 1) lists.add(run); run = ArrayList() }
+            run.add(b)
         }
-        val est = blocks.map { it to estimateSize(it) }.sortedBy { it.second }
-        var i = 0
-        while (i < est.size) {
-            var j = i
-            while (j + 1 < est.size && est[j + 1].second <= est[i].second * 1.2f) j++
-            val shared = est[(i + j) / 2].second
-            for (k in i..j) planned[est[k].first] = shared
-            i = j + 1
+        if (run.size > 1) lists.add(run)
+        // Values in one right-aligned column (a settings page: the label at the left, the value at the right): lines of
+        // their own whose right edges meet within a few px, away from the page's left side, with left edges that differ.
+        // Each is set from its right edge (make): placed at their old left edges they ended all over the place.
+        val vw = width
+        val rightCol = HashSet<Block>()
+        val cands = blocks.filter { b ->
+            b.keepL == Int.MIN_VALUE && b.box.right > vw * 0.6f &&
+                (b.lines.size == 1 && b.box.left > vw * 0.25f ||
+                    b.lines.size > 1 && b.lines.all { b.box.right - it.box.right < vw * 0.012f } &&
+                    b.lines.any { it.box.left - b.box.left > vw * 0.04f })
+        }.sortedBy { it.box.right }
+        var c0 = 0
+        while (c0 < cands.size) {
+            var c1 = c0
+            while (c1 + 1 < cands.size && cands[c1 + 1].box.right - cands[c1].box.right <= vw * 0.012f) c1++
+            val col = cands.subList(c0, c1 + 1)
+            if (col.size >= 2 && col.maxOf { it.box.left } - col.minOf { it.box.left } > vw * 0.04f) rightCol.addAll(col)
+            c0 = c1 + 1
         }
+        return SizePlan(planned, HashMap(clipsFor), if (ratios.isEmpty()) 0f else ratios[ratios.size / 2], lists, rightCol)
     }
 
-    class LineSample(val fill: Fill, val fg: Int, val bold: Boolean, val weight: Int = 400, val family: Int = 0)
+    fun applySizes(p: SizePlan) {
+        planned.clear(); planned.putAll(p.planned)
+        clips.clear(); clips.putAll(p.clips)
+        pitchRatio = p.pitchRatio
+        lists.clear(); listOf.clear()
+        for (m in p.lists) { val l = ListSet(m); lists.add(l); for (b in m) listOf[b] = l }
+        rightCol.clear(); rightCol.addAll(p.rightCol)
+    }
+    private val clips = HashMap<Block, Rect>()
+    private val rightCol = HashSet<Block>()
+    private var pitchRatio = 0f
+
+    /** One list's items: held until all of them are translated (or the model is done), then all set in the size the longest needs. */
+    private class ListSet(val members: List<Block>) {
+        val left = members.map { it.box.left }.sorted()[members.size / 2]
+    }
+    private val lists = ArrayList<ListSet>()
+    private val listOf = HashMap<Block, ListSet>()
+
+    /** [ground]: the background's colour (its average where it is not plain). */
+    class LineSample(val fill: Fill, val fg: Int, val bold: Boolean, val weight: Int = 400, val family: Int = 0, val ground: Int = 0)
     /**
      * Looks at the screenshot pixels of one text line (plus [pad] around it) and returns what to paint over it.
      * A plain background becomes a flat colour. Anything else (gradient, photo, wallpaper) is rebuilt by
      * stretching the pixels just left and right of the line across it, row by row, so no box shows.
      * With [text] given it also estimates the text colour and whether the text is bold.
      */
-    private fun sampleLine(src: Bitmap, vb: Rect, pad: Int, text: String?, style: Int = -1): LineSample {
+    private fun sampleLine(src: Bitmap, vb: Rect, pad: Int, text: String?): LineSample {
         val kx = src.width / width.toFloat(); val ky = src.height / height.toFloat()
         // Sample (and, on non-plain backgrounds, repaint) half a line height beyond both ends: OCR boxes often stop a glyph short.
         val hp = pad + max((4 * d).toInt(), vb.height() / 2)
@@ -524,23 +686,8 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
             val rr = (top shr 8) + dr; val gg = (top shr 4 and 15) + dg; val bb = (top and 15) + db
             if (rr in 0..15 && gg in 0..15 && bb in 0..15) share += hist[(rr shl 8) or (gg shl 4) or bb]
         }
-        // Plain background = one dominant colour AND the pixels at both ends of the line match it.
-        // (A soft gradient or a starry widget passes the first test but not the second.)
-        var flat = share * 100 >= n * 58
-        if (flat) {
-            val tr = ((top shr 8) * 17); val tg = ((top shr 4 and 15) * 17); val tbl = ((top and 15) * 17)
-            val e = min(4, bw / 4).coerceAtLeast(1)
-            var off = 0; var cnt = 0
-            var yy = 0
-            while (yy < bh) {
-                for (xx in 0 until e) for (c in intArrayOf(px[yy * bw + xx], px[yy * bw + bw - 1 - xx])) {
-                    if (abs(Color.red(c) - tr) + abs(Color.green(c) - tg) + abs(Color.blue(c) - tbl) > 40) off++
-                    cnt++
-                }
-                yy += 2
-            }
-            if (off * 5 > cnt) flat = false
-        }
+        // A dominant colour can still be part of a gradient. The surrounding pixels must agree as well.
+        val flat = share * 100 >= n * 58 && Look.evenBackground(px, bw, bh)
         var br: Int; var bgc: Int; var bb: Int
         val fill: Fill
         val out = Rect(vb).apply { inset(-pad - (4 * d).toInt(), -pad) }
@@ -590,13 +737,39 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
             val cols = (bw / max(bh, 1) * 2).coerceIn(4, 14); val rows = max(2, bh / 3)
             val grid = Array(3) { IntArray(rows * cols) }
             val sm = IntArray(64); val sg2 = IntArray(64); val sb2 = IntArray(64)
+            // The ground just above and just below the line (the pad around the recognizer's box holds no letters), per
+            // column of cells: inside the line a pixel counts as ground only when it is close to what these say there.
+            // A plain median let bold or dense letters (more than half of a cell's pixels) pass for ground, and the
+            // erased original came back as light smears between the translated words.
+            val edge = max(2, (pad * ky).toInt()).coerceAtMost(max(1, bh / 3))
+            val above = IntArray(cols); val under = IntArray(cols)
+            fun med(cx: Int, ya: Int, yb: Int): Int {
+                val x0 = cx * bw / cols; val x1 = max(x0 + 1, (cx + 1) * bw / cols)
+                val step = max(1, (x1 - x0) / 20)
+                var c = 0
+                for (yy in ya until yb) { var xx = x0; while (xx < x1 && c < 64) { val v = px[yy * bw + xx]; sm[c] = Color.red(v); sg2[c] = Color.green(v); sb2[c] = Color.blue(v); c++; xx += step } }
+                if (c == 0) return 0
+                java.util.Arrays.sort(sm, 0, c); java.util.Arrays.sort(sg2, 0, c); java.util.Arrays.sort(sb2, 0, c)
+                return Color.rgb(sm[c / 2], sg2[c / 2], sb2[c / 2])
+            }
+            for (cx in 0 until cols) { above[cx] = med(cx, 0, edge); under[cx] = med(cx, bh - edge, bh) }
             for (ry in 0 until rows) {
                 val y0 = (ry * bh / rows).coerceAtMost(bh - 1); val y1 = min(bh, y0 + 3)
+                val f = ((y0 + y1) / 2f / bh).coerceIn(0f, 1f)
                 for (cx in 0 until cols) {
+                    val a0 = above[cx]; val u0 = under[cx]
+                    val er = (Color.red(a0) + (Color.red(u0) - Color.red(a0)) * f).toInt()
+                    val eg = (Color.green(a0) + (Color.green(u0) - Color.green(a0)) * f).toInt()
+                    val eb = (Color.blue(a0) + (Color.blue(u0) - Color.blue(a0)) * f).toInt()
+                    val tol = 36 + abs(Color.red(a0) - Color.red(u0)) + abs(Color.green(a0) - Color.green(u0)) + abs(Color.blue(a0) - Color.blue(u0))
                     val x0 = cx * bw / cols; val x1 = max(x0 + 1, (cx + 1) * bw / cols)
                     val step = max(1, (x1 - x0) / 20)
-                    var c = 0
-                    for (yy in y0 until y1) { var xx = x0; while (xx < x1 && c < 64) { val v = px[yy * bw + xx]; sm[c] = Color.red(v); sg2[c] = Color.green(v); sb2[c] = Color.blue(v); c++; xx += step } }
+                    var c = 0; var seen = 0
+                    for (yy in y0 until y1) { var xx = x0; while (xx < x1 && seen < 64) {
+                        val v = px[yy * bw + xx]; seen++
+                        if (abs(Color.red(v) - er) + abs(Color.green(v) - eg) + abs(Color.blue(v) - eb) <= tol) { sm[c] = Color.red(v); sg2[c] = Color.green(v); sb2[c] = Color.blue(v); c++ }
+                        xx += step } }
+                    if (c * 4 < seen || c == 0) { grid[0][ry * cols + cx] = er; grid[1][ry * cols + cx] = eg; grid[2][ry * cols + cx] = eb; continue }
                     java.util.Arrays.sort(sm, 0, c); java.util.Arrays.sort(sg2, 0, c); java.util.Arrays.sort(sb2, 0, c)
                     grid[0][ry * cols + cx] = sm[c / 2]; grid[1][ry * cols + cx] = sg2[c / 2]; grid[2][ry * cols + cx] = sb2[c / 2]
                 }
@@ -619,52 +792,34 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
             out.left = vb.left - hp; out.right = vb.right + hp
             fill = Fill(out, 0, Bitmap.createBitmap(bm, cols, rows, Bitmap.Config.ARGB_8888))
         }
-        if (text == null) return LineSample(fill, 0, false)
+        if (text == null) return LineSample(fill, 0, false, ground = Color.rgb(br, bgc, bb))
 
-        // Text colour: average of the pixels that differ most from the background.
-        var maxD = 0
-        val dist = IntArray(px.size)
-        i = 0
-        while (i < px.size) {
-            val c = px[i]
-            val dd = abs(Color.red(c) - br) + abs(Color.green(c) - bgc) + abs(Color.blue(c) - bb)
-            dist[i] = dd; if (dd > maxD) maxD = dd
-            i++
+        // Restrict colour and stroke measurement to the glyph box. Estimate the ground locally over gradients.
+        val x0 = ((vb.left * kx).toInt() - l).coerceIn(0, bw - 1)
+        val x1 = ((vb.right * kx).toInt() - l).coerceIn(x0 + 1, bw)
+        val y0 = ((vb.top * ky).toInt() - t).coerceIn(0, bh - 1)
+        val y1 = ((vb.bottom * ky).toInt() - t).coerceIn(y0 + 1, bh)
+        val lw = x1 - x0
+        val lh2 = y1 - y0
+        val groundColor = Color.rgb(br, bgc, bb)
+        val glyphPixels = IntArray(lw * lh2)
+        val dist = IntArray(glyphPixels.size)
+        var k = 0
+        for (yy in y0 until y1) for (xx in x0 until x1) {
+            val c = px[yy * bw + xx]
+            val local = fill.bmp?.let { it.getPixel(xx * it.width / bw, yy * it.height / bh) } ?: groundColor
+            glyphPixels[k] = c
+            dist[k++] = Look.colorDistance(c, local)
         }
-        var sr = 0L; var sg = 0L; var sb = 0L; var cnt = 0; var ink = 0
-        i = 0
-        while (i < px.size) {
-            if (dist[i] * 2 >= maxD) ink++
-            if (dist[i] * 10 >= maxD * 7) { val c = px[i]; sr += Color.red(c); sg += Color.green(c); sb += Color.blue(c); cnt++ }
-            i++
-        }
-        val fg = if (cnt == 0 || maxD < 60) (if (br + bgc + bb > 380) Color.BLACK else Color.WHITE)
-        else Color.rgb((sr / cnt).toInt(), (sg / cnt).toInt(), (sb / cnt).toInt())
-
-        // Weight and kind of typeface, from the line's own pixels. The same words are drawn in the candidates at the
-        // line's size and compared with what is on the screen: the weight by the width of the strokes (the 30th
-        // percentile of the horizontal runs of ink, which is the upright strokes), the kind (sans, serif,
-        // monospace) by how the ink is spread along the line.
-        var bold = false; var weight = 400; var family = 0
-        val th = (vb.height() * ky).toInt()
-        // Reading weight and kind means drawing the line a dozen times . Text of one size,
-        // colour and density of ink in one app is one style, so each style is read once and remembered.
-        val key = if (style < 0) -1 else {
-            val dens = (ink * 20L / (px.size).coerceAtLeast(1)).toInt()
-            (style shl 20) or ((Color.red(fg) shr 5) shl 16) or ((Color.green(fg) shr 5) shl 12) or ((Color.blue(fg) shr 5) shl 8) or (dens and 0xFF)
-        }
-        val known = if (key < 0) null else lookCache[key]
-        if (known != null) { weight = known / 10; family = known % 10; bold = weight >= 600 }
-        else if (flat && maxD >= 60 && th in 12..220 && text.length >= 3) {
-            // the line itself inside the sampled strip
-            val x0 = ((vb.left) * kx).toInt() - l; val x1 = ((vb.right) * kx).toInt() - l
-            val y0 = ((vb.top) * ky).toInt() - t; val y1 = ((vb.bottom) * ky).toInt() - t
-            val lw = (x1 - x0).coerceAtLeast(1); val lh2 = (y1 - y0).coerceAtLeast(1)
+        val fg = Look.inkColor(glyphPixels, dist) ?: if (br + bgc + bb > 380) Color.BLACK else Color.WHITE
+        val maxD = Look.colorDistance(fg, groundColor)
+        val ink = dist.count { it >= maxOf(18, maxD / 2) }
+        var bold = false
+        var weight = 400
+        val th = lh2
+        if (maxD >= 24 && th in 8..220 && text.length >= 3) {
             val mask = BooleanArray(lw * lh2)
-            for (yy in 0 until lh2) for (xx in 0 until lw) {
-                val sx = x0 + xx; val sy = y0 + yy
-                if (sx in 0 until bw && sy in 0 until bh) mask[yy * lw + xx] = dist[sy * bw + sx] * 2 >= maxD
-            }
+            for (j in mask.indices) mask[j] = dist[j] >= maxOf(18, maxD / 2)
             val seen = Look.measure(mask, lw, lh2)
             val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
             fun drawn(tf: Typeface): Look.Ink? {
@@ -683,29 +838,21 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
                 return Look.measure(m, w0, h0)
             }
             if (seen != null) {
-                val base = arrayOf(Typeface.DEFAULT, Typeface.SERIF, Typeface.MONOSPACE)
                 val sans = Look.WEIGHTS.map { drawn(Typeface.create(Typeface.DEFAULT, it, false)) }
                 weight = Look.weight(seen.rel, sans.map { it?.rel ?: 0f })
-                if (text.none { isCjk(it) }) {
-                    val cands = base.map { drawn(Typeface.create(it, weight, false)) }
-                    family = Look.family(seen, cands)
-                    // strokes are drawn differently in each kind: the weight is read again in the kind that was found
-                    if (family != 0) weight = Look.weight(seen.rel, Look.WEIGHTS.map { drawn(Typeface.create(base[family], it, false))?.rel ?: 0f })
-                }
                 bold = weight >= 600
+
             }
         }
-        if (key >= 0 && known == null) lookCache[key] = weight * 10 + family
-        return LineSample(fill, fg, bold, weight, family)
+        return LineSample(fill, fg, bold, weight, ground = groundColor)
     }
-    private val lookCache = HashMap<Int, Int>()
 
     // ---------- drawing ----------
 
     override fun onDraw(c: Canvas) {
         if (mode == Mode.FROZEN) drawFrozen(c)
         else {
-            if (patchesVisible) drawPatches(c)
+            drawPatches(c)
             drawEdgeGlow(c)   // on top, so translated text near the edge does not cut notches into it
             afterDraw?.let { cb -> afterDraw = null; runCatching { viewTreeObserver.registerFrameCommitCallback { cb() } }.onFailure { cb() } }
         }
@@ -714,15 +861,61 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
     /** Called once, when the next frame drawn in scroll mode is on the screen. */
     var afterDraw: (() -> Unit)? = null
     /** The translation alone, for the window that stands in while this view changes windows. */
-    fun drawTranslation(c: Canvas) { if (patchesVisible) drawPatches(c) }
+    fun drawTranslation(c: Canvas) { drawPatches(c) }
+
+    /** Translations follow the page while it moves (set in scroll mode, see ScrollFollow). */
+    var follow: ScrollFollow.Out? = null
+    /** The current set, as the follower knows it (compared by identity), and where its original text is. */
+    val patchSet: Any get() = patches
+    fun patchBoxes(): List<Rect> = patches.map { p ->
+        val r = Rect(); for (f in p.fills) r.union(f.box)
+        if (r.isEmpty) r.set(p.x.toInt(), p.top, (p.x + p.layout.width).toInt(), p.bottom)
+        r
+    }
 
     private fun drawPatches(c: Canvas) {
+        val fo = follow
+        if (fo != null && fo.live && fo.list === patches && fo.groups.size <= patches.size && fo.moved()) { drawFollowed(c, fo); return }
         // All erasing first, then all text, so one block's fill never covers its neighbour's words.
-        for (p in patches) for (f in p.fills) {
-            if (f.bmp != null) c.drawBitmap(f.bmp, null, f.box, bmpPaint)
-            else { fill.color = f.color; c.drawRect(f.box, fill) }
+        for (p in patches) {
+            c.save(); p.clip?.let { c.clipRect(it) }; p.room?.let { c.clipRect(it) }
+            for (f in p.fills) {
+                if (f.bmp != null) c.drawBitmap(f.bmp, null, f.box, bmpPaint)
+                else { fill.color = f.color; c.drawRect(f.box, fill) }
+            }
+            c.restore()
         }
-        for (p in patches) { c.save(); c.translate(p.x, p.y); p.layout.draw(c); c.restore() }
+        for (p in patches) { c.save(); p.clip?.let { c.clipRect(it) }; p.room?.let { c.clipRect(it) }; c.translate(p.x, p.y); p.layout.draw(c); c.restore() }
+    }
+
+    /**
+     * The page is moving and the follower knows by how much: each translation is drawn moved with its scrolling
+     * part and cut to it. Unmatched patches keep their last position until a fresh frame replaces them.
+     */
+    private fun drawFollowed(c: Canvas, fo: ScrollFollow.Out) {
+        for (pass in 0..1) {
+            for (i in 0 until patches.size) {
+                // A translation that came after anchoring keeps its position until the next reading.
+                val g = fo.groups.getOrElse(i) { -1 }
+                val p = patches[i]
+                c.save()
+                // The page between the app's bars stays put; the block's own room moves with the content.
+                p.clip?.let { c.clipRect(it) }
+                if (g >= 0 && fo.dy[g] != 0f) {
+                    c.clipRect(fo.clip[g])
+                    c.translate(0f, -fo.dy[g])
+                }
+                p.room?.let { c.clipRect(it) }
+                if (pass == 0) {
+                    for (j in 0 until p.fills.size) {
+                        val f = p.fills[j]
+                        if (f.bmp != null) c.drawBitmap(f.bmp, null, f.box, bmpPaint)
+                        else { fill.color = f.color; c.drawRect(f.box, fill) }
+                    }
+                } else { c.translate(p.x, p.y); p.layout.draw(c) }
+                c.restore()
+            }
+        }
     }
 
     private val tmp = RectF()
@@ -831,7 +1024,7 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
         shot?.let { tmp.set(0f, 0f, w, h); c.drawBitmap(it, null, tmp, bmpPaint) }
         statusStrip?.let { if (statusH > 0) { tmp.set(0f, 0f, w, statusH.toFloat()); c.drawBitmap(it, null, tmp, bmpPaint) } }
         // Translate on the frozen screen: the translation is part of the picture (it zooms and pans with it).
-        if (trOn && patchesVisible) drawPatches(c)
+        if (trOn) drawPatches(c)
         c.restore()
         // "Scroll and translate" pressed: everything that belongs to the overlay leaves in LEAVE_MS.
         val leave = if (leaveT0 == 0L) 0f else ((android.os.SystemClock.uptimeMillis() - leaveT0) / TrLook.LEAVE_MS).coerceIn(0f, 1f)
@@ -1179,7 +1372,9 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
             val first = ws[i]
             var j = i
             while (j + 1 <= selB && ws[j + 1].line == first.line) j++
-            c.drawRoundRect(first.l - 2 * d * k, first.lt.toFloat(), ws[j].r + 2 * d * k, first.lb.toFloat(), 4 * d * k, 4 * d * k, fill)
+            val left = (i..j).minOf { ws[it].l }
+            val right = (i..j).maxOf { ws[it].r }
+            c.drawRoundRect(left - 2 * d * k, first.lt.toFloat(), right + 2 * d * k, first.lb.toFloat(), 4 * d * k, 4 * d * k, fill)
             i = j + 1
         }
     }
@@ -1189,9 +1384,9 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
         if (selA < 0 || selB >= ws.size) return
         fill.color = 0xFF4285F4.toInt()
         val a = ws[selA]; val b = ws[selB]
-        val ax = pX(a.l.toFloat()); val ay = pY(a.lb.toFloat())
+        val ax = pX(a.startX.toFloat()); val ay = pY(a.lb.toFloat())
         c.drawCircle(ax - hr, ay + hr, hr, fill); c.drawRect(ax - hr, ay, ax, ay + hr, fill)
-        val bx = pX(b.r.toFloat()); val by = pY(b.lb.toFloat())
+        val bx = pX(b.endX.toFloat()); val by = pY(b.lb.toFloat())
         c.drawCircle(bx + hr, by + hr, hr, fill); c.drawRect(bx, by, bx + hr, by + hr, fill)
     }
 
@@ -1217,11 +1412,12 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
     // The geometry and the text rules are in SelLogic (unit tested); this part only applies them.
 
     /** A selection as it was when a search was made, so that going back to that search shows it again. */
-    class Snap(val a: Int, val b: Int, val region: RectF?)
-    fun snapshot() = Snap(selA, selB, region?.let { RectF(it) })
+    class Snap(val a: Int, val b: Int, val region: RectF?, val first: Int, val last: Int)
+    fun snapshot() = Snap(selA, selB, region?.let { RectF(it) }, firstGlyph, lastGlyph)
     fun restore(sn: Snap) {
         if (sn.b >= ws.size) return
         selA = sn.a; selB = sn.b; region = sn.region?.let { RectF(it) }; card = null; reread = null
+        firstGlyph = sn.first; lastGlyph = sn.last; trimSelection()
         layoutItems(); setCalm(true); updatePan(); invalidate()
     }
     val hasCard: Boolean get() = card != null
@@ -1250,6 +1446,7 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
         val a = selA; val b = selB
         if (a < 0 || b >= ws.size) return
         svc.searchText(this, SelLogic.query(ws, a, b))
+        if (firstGlyph > 0 || lastGlyph < (ocr?.words?.getOrNull(b)?.characters?.lastIndex ?: 0)) return
         val bmp = soft ?: return
         val ky = bmp.height / height.toFloat(); val kx = bmp.width / width.toFloat()
         val sel = ws.subList(a, b + 1)
@@ -1258,7 +1455,7 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
         val h = hs[hs.size / 2]
         val box = Rect(((sel.minOf { it.l } * kx) - h * 2).toInt(), ((sel.minOf { it.lt } * ky) - h).toInt(), ((sel.maxOf { it.r } * kx) + h * 2).toInt(), ((sel.maxOf { it.lb } * ky) + h).toInt())
         val t0 = android.os.SystemClock.uptimeMillis()
-        Ocr.reread(bmp, box, 1f / kx, 1f / ky, 3f) { words ->
+        svc.ocr.reread(bmp, box, 1f / kx, 1f / ky, 3f, ocrModel) { words ->
             if (selA != a || selB != b || b >= ws.size) return@reread
             val again = words.map { SelLogic.W(it.text, it.box.left, it.box.top, it.box.right, it.box.bottom, it.lb.top, it.lb.bottom, it.line, 0) }
             val better = SelLogic.reread(ws.subList(a, b + 1), again)
@@ -1271,6 +1468,7 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
     /** Selects words a..b. With [image] set, the stroke could also mean "search this picture": keep the region and offer both. */
     private fun setSelection(a: Int, b: Int, image: RectF? = null) {
         if (ws.isEmpty()) return
+        resetGlyphs()
         if (card != null) svc.setSheetVisible(this, true)
         selA = min(a, b).coerceIn(0, ws.size - 1); selB = max(a, b).coerceIn(0, ws.size - 1)
         region = image; card = null
@@ -1299,7 +1497,7 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
         val sel = RectF()
         if (selA >= 0 && selB < ws.size) {
             defs.add("Copy" to { svc.copy(selectedText()); flash("Copied") })
-            if (selA > 0 || selB < ws.size - 1) defs.add("Select all" to { setSelection(0, ws.size - 1) })
+            if (selA > 0 || selB < ws.size - 1 || firstGlyph > 0 || lastGlyph < (ocr?.words?.getOrNull(selB)?.characters?.lastIndex ?: 0)) defs.add("Select all" to { setSelection(0, ws.size - 1) })
             defs.add("Translate" to { translateSelection() })
             defs.add("Pin to back" to {
                 val to = svc.pinToBack(this, selectedText())
@@ -1315,11 +1513,11 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
             val a = ws[selA]; val b = ws[selB]
             val q = (30 * d).toInt()
             systemGestureExclusionRects = listOf(
-                Rect((pX(a.l.toFloat()) - hr).toInt() - q, (pY(a.lb.toFloat()) - panY).toInt() - q / 2, (pX(a.l.toFloat())).toInt() + q, (pY(a.lb.toFloat()) - panY + 2 * hr).toInt() + q),
-                Rect((pX(b.r.toFloat())).toInt() - q, (pY(b.lb.toFloat()) - panY).toInt() - q / 2, (pX(b.r.toFloat()) + hr).toInt() + q, (pY(b.lb.toFloat()) - panY + 2 * hr).toInt() + q))
+                Rect((pX(a.startX.toFloat()) - hr).toInt() - q, (pY(a.lb.toFloat()) - panY).toInt() - q / 2, (pX(a.startX.toFloat())).toInt() + q, (pY(a.lb.toFloat()) - panY + 2 * hr).toInt() + q),
+                Rect((pX(b.endX.toFloat())).toInt() - q, (pY(b.lb.toFloat()) - panY).toInt() - q / 2, (pX(b.endX.toFloat()) + hr).toInt() + q, (pY(b.lb.toFloat()) - panY + 2 * hr).toInt() + q))
         } else if (img != null) {
             // A picture region with readable text in it: the text can be selected instead ("Select text").
-            val inside = SelLogic.wordsIn(ws, SelLogic.Box(img.left, img.top, img.right, img.bottom))
+            val inside = SelLogic.wordsIn(wholeWords, SelLogic.Box(img.left, img.top, img.right, img.bottom))
             if (inside != null) defs.add("Select text" to { setSelection(inside.first, inside.second, RectF(img)) })
             sel.set(pX(img.left), pY(img.top), pX(img.right), pY(img.bottom))
             systemGestureExclusionRects = emptyList()
@@ -1356,7 +1554,7 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
         val arr = FloatArray(pts.size * 2) { k -> if (k % 2 == 0) pts[k / 2].x else pts[k / 2].y }
         stroke.reset(); pts.clear(); ptT.clear()
         strokeFrames = 0; glowFrames = 0; strokeWanted = 0
-        when (val p = SelLogic.classify(ws, arr, 24 * d / zoom)) {
+        when (val p = SelLogic.classify(wholeWords, arr, 24 * d / zoom)) {
             is SelLogic.Pick.None -> { if (selA < 0 && region == null) clearSelection(); invalidate() }
             is SelLogic.Pick.Image -> searchRegion(RectF(p.box.l, p.box.t, p.box.r, p.box.b))
             is SelLogic.Pick.Text -> setSelection(p.a, p.b, p.around?.let { bx ->
@@ -1381,18 +1579,19 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
     }
 
     private fun translateSelection() {
-        val t = selectedText()
-        if (t.isBlank()) return
+        val source = ocr ?: return
+        val selected = selectedText()
+        if (selected.isBlank() || selA !in ws.indices || selB !in ws.indices) return
         items = emptyList()
-        // A few words are often too short to identify; fall back to the language of the whole screen.
-        val whole = ocr?.blocks?.joinToString("\n") { it.text }?.take(1500) ?: t
-        val viaScreen = { Tr.detect(whole) { showCard(t, if (it == "und") "en" else it) } }
-        if (Tr.script(t) == null && t.length < 24) viaScreen()
-        else Tr.detect(t) { first -> if (first != "und") showCard(t, first) else viaScreen() }
+        val ids = ws.subList(minOf(selA, selB), maxOf(selA, selB) + 1).map { it.block }.distinct()
+        val text = ids.mapNotNull { source.blocks.getOrNull(it)?.text }.joinToString("\n\n")
+        if (text.isBlank()) return
+        Tr.detect(text) { code ->
+            if (selected == selectedText()) showCard(text, if (code == "und") "en" else code)
+        }
     }
 
     private fun showCard(t: String, src: String) {
-        if (t != selectedText()) return      // the selection changed while the language was being detected
         android.util.Log.i(CircleOverlay.TAG, "selection language $src (${t.length} chars), target pref ${svc.target()}")
         run {
             val pref = svc.target()
@@ -1439,6 +1638,7 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
         if (drawing && lpWord >= 0 && lpWord < ws.size && !strokeMoved) {
             drawing = false; stroke.reset(); pts.clear(); ptT.clear()
             strokeFrames = 0; glowFrames = 0; strokeWanted = 0
+            resetGlyphs()
             textDrag = true; lpAnchor = lpWord
             selA = lpWord; selB = lpWord; region = null; card = null; items = emptyList()
             setCalm(true)
@@ -1564,8 +1764,8 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
                 // selection handles first: the nearer of the two, so one short word can be grown either way
                 if (cd == null && selA >= 0 && selB < ws.size) {
                     val a = ws[selA]; val b = ws[selB]
-                    val da = hypot(x - (pX(a.l.toFloat()) - hr), py - (pY(a.lb.toFloat()) + hr))
-                    val db = hypot(x - (pX(b.r.toFloat()) + hr), py - (pY(b.lb.toFloat()) + hr))
+                    val da = hypot(x - (pX(a.startX.toFloat()) - hr), py - (pY(a.lb.toFloat()) + hr))
+                    val db = hypot(x - (pX(b.endX.toFloat()) + hr), py - (pY(b.lb.toFloat()) + hr))
                     val reach = 28 * d
                     if (min(da, db) < reach) { dragHandle = if (da < db) 1 else 2; items = emptyList(); invalidate(); return true }
                 }
@@ -1613,7 +1813,7 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
                 }
                 drawing = true
                 pts.clear(); ptT.clear(); stroke.reset(); stroke.moveTo(cx, cy); pts.add(PointF(cx, cy)); ptT.add(android.os.SystemClock.uptimeMillis())
-                lpWord = SelLogic.wordAt(ws, cx, cy, 6 * d / zoom)
+                lpWord = SelLogic.wordAt(wholeWords, cx, cy, 6 * d / zoom)
                 if (lpWord >= 0) postDelayed(longPress, 340)
                 invalidate()                                   // the glowing dot under the finger, at once
             }
@@ -1632,12 +1832,7 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
                     }
                 } else if (dragHandle != 0) {
                     // the handle hangs below its line, so the finger points at the line above it
-                    val i = SelLogic.nearestWord(ws, cx, cY(ry - 22 * d))
-                    if (i >= 0) {
-                        if (dragHandle == 1) { if (i <= selB) selA = i else { selA = selB; selB = i; dragHandle = 2 } }
-                        else { if (i >= selA) selB = i else { selB = selA; selA = i; dragHandle = 1 } }
-                        invalidate()
-                    }
+                    moveHandle(cx, cY(ry - 22 * d))
                 } else if (textDrag) {
                     val i = SelLogic.nearestWord(ws, cx, cy)
                     if (i >= 0 && lpAnchor >= 0) { selA = min(lpAnchor, i); selB = max(lpAnchor, i); invalidate() }
@@ -1709,7 +1904,7 @@ class OverlayView(private val svc: CircleOverlay, val depth: Int = 0) : View(svc
     }
 
     private fun tap(cx: Float, cy: Float) {
-        val i = SelLogic.wordAt(ws, cx, cy, 6 * d / zoom)
+        val i = SelLogic.wordAt(wholeWords, cx, cy, 6 * d / zoom)
         if (i >= 0) { setSelection(i, i); return }
         if (selA >= 0 || card != null || region != null) { clearSelection(); return }
         if (ocr == null) return

@@ -32,27 +32,20 @@ class ChargePreciseTest {
         assertTrue(p.level(75, 62_000L).fraction < 0f)
     }
 
-    @Test fun `a level that wavers at a whole percent - 93, 92, 93, 92 within a minute, as seen on the phone - stands AT that percent, never runs backwards, and keeps its pace`() {
+    @Test fun `a level that wavers at a whole percent - 93, 92, 93, 92 within a minute, as seen on the phone - shows the reported whole percent and keeps its measured pace`() {
         val p = ChargePrecise()
         p.level(91, 0L); p.level(92, 500_000L)
         val up = p.level(93, 1_176_000L)                       // the percent took 676 s: 0.148 hundredths a second
         assertEquals(0f, up.fraction, 0f); assertEquals(1000f / 676_000f, up.ratePerSec, 1e-7f)
         val back = p.level(92, 1_238_000L)                     // 62 s later it says 92 again
-        assertEquals("shown at the line it had crossed, not under it: no figure runs backwards", 93, back.level)
-        assertEquals(0f, back.fraction, 0f); assertEquals("standing", 0f, back.ratePerSec, 0f)
-        assertEquals(93, p.detail(1_250_000L).level)
+        assertEquals("shows the actual lower percent immediately", 92, back.level)
+        assertTrue(back.fraction < 0f); assertEquals("standing", 0f, back.ratePerSec, 0f)
+        assertEquals(92, p.detail(1_250_000L).level)
         val again = p.level(93, 1_258_000L)                    // and 93 again 20 s after that
         assertEquals(93, again.level); assertEquals(0f, again.fraction, 0f)
         assertEquals("its pace is the last true percent's, not 'a percent in twenty seconds'", 1000f / 676_000f, again.ratePerSec, 1e-7f)
         p.level(92, 1_279_000L); p.level(93, 1_300_000L)
         assertEquals(1000f / 676_000f, p.detail(1_300_000L).ratePerSec, 1e-7f)
-        // What is shown never goes down through all of that.
-        val q = ChargePrecise(); var last = -1f
-        q.level(91, 0L); q.level(92, 500_000L)
-        for ((lvl, at) in listOf(93 to 1_176_000L, 92 to 1_238_000L, 93 to 1_258_000L, 92 to 1_279_000L, 93 to 1_300_000L)) {
-            val d = q.level(lvl, at); val shown = d.level + maxOf(d.fraction, 0f)
-            assertTrue("$lvl at $at: $shown after $last", shown >= last); last = shown
-        }
         // On from there as ever: the next true step measures from the last time it reached 93.
         val next = p.level(94, 1_900_000L)
         assertEquals(1000f / 600_000f, next.ratePerSec, 1e-7f)
@@ -63,7 +56,7 @@ class ChargePreciseTest {
         p.level(71, 0L)
         assertTrue("a drop with no step before it", p.level(70, 10_000L).fraction < 0f)
         p.level(71, 20_000L); p.level(72, 80_000L)
-        assertEquals("under the line once: shown at it", 72, p.level(71, 90_000L).level)
+        assertEquals("under the line once: the actual percent", 71, p.level(71, 90_000L).level)
         assertTrue("and under it once more: really falling, as the battery says", p.level(70, 100_000L).let { it.level == 70 && it.fraction < 0f })
     }
 
@@ -124,6 +117,18 @@ class ChargePreciseTest {
         assertEquals(0.35f, d.fraction, 1e-6f); assertEquals(10_000L, d.at)
         assertEquals("twenty hundredths in ten seconds", 0.02f, d.ratePerSec, 1e-6f)
         assertEquals("the next whole percent starts from nought", 0f, p.level(72, 40_000L).fraction, 0f)
+    }
+
+    @Test fun `Xiaomi hundredths cannot keep a whole percent through an unknown or another session`() {
+        val p = ChargePrecise()
+        p.level(84, 1_000L)
+        assertEquals(84, p.xiaomi(60, 20, 2_000L).level)
+        assertEquals(ChargePrecise.UNKNOWN, p.level(-1, 3_000L).level)
+        assertEquals(ChargePrecise.UNKNOWN, p.xiaomi(60, 20, 4_000L).level)
+        val fresh = p.level(50, 5_000L)
+        assertEquals(50, fresh.level)
+        assertTrue(fresh.fraction < 0f)
+        assertEquals(50, p.xiaomi(70, 20, 6_000L).level)
     }
 
     @Test fun `the charger in words`() {

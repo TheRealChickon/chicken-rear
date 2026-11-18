@@ -13,7 +13,8 @@ package dev.kb896.aiusage.service
  *   and the time the last whole percent took, which is how fast they run.
  * So: no hundredths until one of the two is known (the page then shows the whole percent alone);
  * from a step on, .00 rising at the last percent's own pace, held under the next whole percent
- * until the battery says it; from Xiaomi's figure, that figure at its own rate.
+ * until the battery says it; from Xiaomi's figure, that figure at its own rate. The whole percent
+ * always comes from Android, including when it steps down.
  *
  * Pure: times are passed in (uptime, ms).
  */
@@ -34,7 +35,7 @@ class ChargePrecise {
     private var decimalAt = 0L
     private var decimalRate = 0f
     // The level back under the whole percent it had just reached (seen charging at 92 / 93: 93, 92, 93,
-    // 92 within a minute): it stands just under that percent, and the next step up is not "a percent in twenty seconds".
+    // 92 within a minute): the next step back up is not "a percent in twenty seconds".
     private var under = false
     private var wavered = false
     // NOT REALLY CHARGING: the phone says so (its battery status is not
@@ -68,7 +69,7 @@ class ChargePrecise {
             under = false; wavered = false
             decimal = -1f                // Xiaomi's figure was for the percent before
         } else if (level >= 0 && percent == level - 1 && steppedAt != 0L && !under) {
-            // BACK UNDER THE LINE IT HAD JUST CROSSED: it is just under it (.99, standing), and what was known of its pace is kept.
+            // Back under the line it just crossed: keep the measured pace for the next real step.
             under = true; wavered = true
             decimal = -1f
         } else if (percent != level) {
@@ -80,7 +81,7 @@ class ChargePrecise {
 
     /** Xiaomi's own hundredths ([hundredths] 0..99) and their rate ([rate], hundredths in ten seconds), at [now]. */
     fun xiaomi(hundredths: Int, rate: Int, now: Long): Detail {
-        if (hundredths in 0..99) { decimal = hundredths / 100f; decimalAt = now; decimalRate = rate.coerceAtLeast(0) / 100f / 10f }
+        if (level in 0..99 && filling && hundredths in 0..99) { decimal = hundredths / 100f; decimalAt = now; decimalRate = rate.coerceAtLeast(0) / 100f / 10f }
         return detail(now)
     }
 
@@ -90,15 +91,14 @@ class ChargePrecise {
         // Holding: the whole percent alone, standing (no hundredths to pretend with), and said so for the fluid.
         !filling || stalled(now) -> Detail(level, -1f, now, 0f, holding = true)
         decimal >= 0f -> Detail(level, decimal, decimalAt, decimalRate, xiaomi = true)
-        // Back under the line it had just crossed: SHOWN AT THE LINE, standing. Never a figure that runs backwards
-        // (93.00, then 92.99, would be one): the percent it had reached, .00, until it truly steps.
-        under -> Detail(level + 1, 0f, now, 0f)
+        // The battery stepped back. Keep its measured pace for later, but show its current whole percent.
+        under -> Detail(level, -1f, now, 0f)
         steppedAt != 0L -> Detail(level, 0f, steppedAt, if (percentMs > 0L) 1000f / percentMs else 0f)
         else -> Detail(level, -1f, now, 0f)
     }
 
     companion object {
-        /** A [Detail.level] that is not known: the page keeps the level it has. */
+        /** A [Detail.level] that is not known: the page leaves the figure empty. */
         const val UNKNOWN = -1
         const val STALL_GRACE_MS = 60_000L
         const val ACTION_SOC_DECIMAL = "miui.intent.action.ACTION_SOC_DECIMAL"

@@ -4225,10 +4225,9 @@ class RearUserService : IRearService.Stub {
     @Volatile private var musicStarts = 0L
     /** When playing last went to not playing (uptime); 0 before any. */
     @Volatile private var musicStoppedAt = 0L
-    /** The charger is in and its page was asked for ([showCharge]); until it comes out. Its level and kind for the page. */
+    /** The charger is in and its page was asked for ([showCharge]); until it comes out or fills. */
     @Volatile private var chargeWanted = false
     @Volatile private var chargePlugs = 0L
-    @Volatile private var chargeWantedLevel = 0
     @Volatile private var chargeWantedFast = false
     private var chargeTriedAt = 0L
 
@@ -4274,6 +4273,8 @@ class RearUserService : IRearService.Stub {
         // The picker taken away by something else than its own end (dark, an app, something live, a note): dropped at
         // once, the old face whole under whatever comes. Its own end (PICKER_OUT) plays its exit itself.
         if (was.picker && !step.state.picker && step.anim != RearNav.Anim.PICKER_OUT) picker.drop(reason)
+        // A layer kept under another page (or through darkness) also needs a new sample when exposed.
+        if (chargeMade && charge.isUp && !chargeIsSeen(was) && chargeIsSeen(nav)) refreshChargeReading()
         // The live page first: when usage or the notes go, it is under them before they move.
         applyLive(step.anim)
         // And what is under the pages as the new state has it: the scene moving again and the live page drawn the moment
@@ -4479,11 +4480,6 @@ class RearUserService : IRearService.Stub {
         else -> null
     }
 
-    /** The edge a page under a finger going [way] is taken to. */
-    private fun edgeOf(way: PageDrag.Way) = when (way) {
-        PageDrag.Way.RIGHT -> PageSlide.Edge.RIGHT; PageDrag.Way.LEFT -> PageSlide.Edge.LEFT; PageDrag.Way.UP -> PageSlide.Edge.TOP; PageDrag.Way.DOWN -> PageSlide.Edge.BOTTOM
-    }
-
     /** Whether a finger going [way] from its landing turns a page that can follow it; if so, which, kept for its moves. */
     private fun dragTracks(way: PageDrag.Way, downX: Float, downY: Float, downAt: Long, e: RearTouches.Event, from: EdgeGestures): Boolean {
         dragged = null
@@ -4514,9 +4510,10 @@ class RearUserService : IRearService.Stub {
             RearNav.Anim.ARRIVAL_END_NEWER -> Dragged(step.anim, true, w, { arrivalTurn.peek(s.arrival, -1, -1, it) }, { arrivalTurn.back() })
             RearNav.Anim.LIVE_IN -> liveCard(step.state.live)?.let { c -> Dragged(step.anim, true, w, { c.peek(it) }, { c.unpeek() }) }
             RearNav.Anim.LIVE_OUT -> liveCard(s.live)?.let { c -> Dragged(step.anim, false, w, { c.peek(it) }, { c.unpeek() }) }
-                // The charging page (its own layer) follows the finger out too, the way the finger goes: to the right, up or down.
-                ?: if (s.live == RearNav.Live.CHARGE && chargeOnTop()) edgeOf(way).let { edge ->
-                    Dragged(step.anim, false, if (way == PageDrag.Way.UP || way == PageDrag.Way.DOWN) h else w, { charge.peek(it, edge) }, { charge.unpeek() })
+                // The charging page lives to the right of the moon, even when a vertical drag dismisses it.
+                ?: if (s.live == RearNav.Live.CHARGE && chargeOnTop()) {
+                    val distance = if (way == PageDrag.Way.UP || way == PageDrag.Way.DOWN) h else w
+                    Dragged(step.anim, false, distance, { charge.peek(it) }, { charge.unpeek() })
                 } else null
             else -> null
         }
@@ -5282,7 +5279,12 @@ class RearUserService : IRearService.Stub {
         val target = if (adaptive) RearLight.gain(RearLight.light(lux, RearLight.Doing(stay, bright, dimmedByHand && !bright), lightBias, panel))
         else {
             // Not by the light: the fixed levels, as before.
-            val g = if (bright) 1f else STAY_GAIN[stay]
+            val gainLevel = stay
+            val g = when {
+                bright -> 1f
+                gainLevel == FrontDim.FACE_DOWN_LEVEL && !restingPosture.down -> STAY_GAIN[dev.kb896.aiusage.service.StayOn.Level.ON.ordinal]
+                else -> STAY_GAIN[gainLevel]
+            }
             if (dimmedByHand && !bright) minOf(g, DIM_GAIN) else g
         }
         if (target != gainEase.target) {
@@ -7412,6 +7414,7 @@ class RearUserService : IRearService.Stub {
         this.events = events
         // Changes made while nobody listened go now.
         if (events != null) {
+            if (chargeMade && charge.isUp) refreshChargeReading()
             scheduleDpiFlush()
             scheduleWidthFlush()
             syncBackLock(force = true)
@@ -8392,18 +8395,36 @@ class RearUserService : IRearService.Stub {
      * things (RearNav.Live.CHARGE). Whether its page comes up is the navigation's to say ([applyLive] raises it):
      * over the moon it does; under a call, a timer or what is playing it has none until they end.
      */
-    override fun showCharge(level: Int, fast: Boolean) {
+    override fun showCharge(full: Boolean, fast: Boolean) = startCharge(full, fast)
+
+    override fun restoreCharge(plugged: Boolean, active: Boolean, fast: Boolean) {
+        when {
+            chargeDemo -> Unit
+            !plugged -> {
+                chargeRests = false
+                if (chargeWanted) chargeOver()
+            }
+            !active && chargeWanted && !chargeFullMoment -> {
+                chargeRests = true
+                chargeOver()
+            }
+            active && !chargeWanted && !chargeRests && !guestOnTop() -> startCharge(full = false, fast = fast)
+        }
+    }
+
+    private fun startCharge(full: Boolean, fast: Boolean) {
         if (!companion || !chargeOn) return
+        if (chargeWanted && (!full || chargeFullMoment)) return
         // FULL AS THE CHARGER GOES IN: one short moment ([fullMoment]), only on a lit back that shows the moon. On a dark
         // back, under another page or with something higher live it is skipped, and nothing is kept for later.
-        if (level >= 100 && !guestOnTop()) {
+        if (full && !guestOnTop()) {
             val s = nav
             if (!(s.lit && s.ours && RearNav.seen(s) == RearNav.Seen.MOON && rearLit(rearDisplay()) == true)) {
                 Log.i(TAG, "charge: full, and the back is dark or shows something else — no moment")
                 return
             }
         }
-        chargeWantedLevel = level; chargeWantedFast = fast
+        chargeWantedFast = fast
         chargeRests = false
         if (guestOnTop()) {
             // Over an app on the back: the small picture, once, as it was; not a page of the row.
@@ -8416,7 +8437,7 @@ class RearUserService : IRearService.Stub {
         chargeWanted = true
         chargeTriedAt = 0L
         syncMediaCard()
-        if (level >= 100) fullMoment(cameNow = true)
+        if (full) fullMoment(cameNow = true)
         // Looked at again a moment later: a charger pulled straight out again must not leave the page standing.
         runCatching { holdHandler.postDelayed({ if (chargeWanted && !chargeDemo && !exec("dumpsys battery").contains("powered: true")) { Log.i(TAG, "charge: no charger after all — the page goes"); chargeOver() } }, 2_500L) }
     }
@@ -8432,14 +8453,14 @@ class RearUserService : IRearService.Stub {
         if (chargeLoose && charge.isUp) charge.drain()
     }
 
-    /** The charging page's layer up, at the level the app last gave, if nothing with a better claim to the back is showing. */
+    /** The charging page's layer up, with its first figure coming from a fresh app reading. */
     private fun raiseCharge(slideIn: Boolean = false) {
         val display = rearDisplay()
         if (cameraUp() || cameraHasRear(display)) {
             Log.i(TAG, "charge: Xiaomi's rear camera has the back — not shown")
             return
         }
-        val level = chargeWantedLevel; val fast = chargeWantedFast
+        val fast = chargeWantedFast
         val compact = guestOnTop()
         val t = ChargeStyle.timing(compact)
         val now = android.os.SystemClock.uptimeMillis()
@@ -8447,21 +8468,36 @@ class RearUserService : IRearService.Stub {
             is RearShow.Decision.Drop -> { Log.i(TAG, "charge: a ${d.over.name.lowercase()} is up — not shown"); return }
             is RearShow.Decision.Start -> if (d.cut == RearShow.Kind.WAKE) wakeShow.cut(d.fadeMs, "the charger")
         }
-        Log.i(TAG, "charge: $level%${if (fast) ", fast" else ""}${if (compact) ", compact over the guest" else ""}, ${chargeLook.name.lowercase()}")
-        charge.show(level, fast, compact, chargeLook, chargePercent, slideIn)
-        if (chargeDemo) charge.detail(100, -1f, android.os.SystemClock.uptimeMillis(), 0f, "Demo", holds = true)
+        Log.i(TAG, "charge: ${chargeLook.name.lowercase()}${if (fast) ", fast" else ""}${if (compact) ", compact over the guest" else ""}")
+        charge.show(fast, compact, chargeLook, chargePercent, slideIn, asDemo = chargeDemo)
+        requestChargeReading()
         syncTouchWatch()
     }
 
+    private fun chargeIsSeen(s: RearNav.State) = s.live == RearNav.Live.CHARGE && RearNav.seen(s) == RearNav.Seen.LIVE
+
+    private fun requestChargeReading() { runCatching { events?.onChargeReading() } }
+
+    private fun refreshChargeReading() {
+        charge.refreshReading()
+        requestChargeReading()
+    }
 
     override fun chargeDetail(b: android.os.Bundle?) {
-        b ?: return
-        charge.detail(b.getInt("level"), b.getFloat("fraction", -1f), b.getLong("at"), b.getFloat("rate"), b.getString("kind").orEmpty(), b.getBoolean("holding"))
+        if (b == null || !chargeMade) return
+        val detail = dev.kb896.aiusage.service.ChargePrecise.Detail(
+            b.getInt("level", -1), b.getFloat("fraction", -1f), b.getLong("at"), b.getFloat("rate"),
+            holding = b.getBoolean("holding"),
+        )
+        charge.detail(b.getLong("sampledAt"), detail, b.getString("kind").orEmpty())
     }
 
     override fun chargeTilt(x: Float, y: Float) = charge.tilt(x, y)
 
-    override fun endCharge() = chargeOver()
+    override fun endCharge() {
+        chargeRests = false
+        chargeOver()
+    }
 
     // -- the health check's shell half (rear/ShellHealth): scanned once, some seconds after the start, and when asked
     // to look again; an ordinary ask answers with what is known (ShellHealth.Gate) --
@@ -8505,7 +8541,7 @@ class RearUserService : IRearService.Stub {
         // The page is what shows on a lit back: its moment, then it goes. Sent away, under another page or dark: it
         // just ends (the moment is skipped, not kept).
         if (chargeOnTop() && nav.lit && rearLit(rearDisplay()) == true) {
-            Log.i(TAG, "charge: the battery is full — \"100\" stands a moment, then the page goes")
+            Log.i(TAG, "charge: the battery is full — the current level stands a moment, then the page goes")
             fullMoment(cameNow = false)
         } else {
             Log.i(TAG, "charge: the battery is full — the page is not what shows: it ends without its moment")
@@ -8515,7 +8551,8 @@ class RearUserService : IRearService.Stub {
     }
 
     /**
-     * FULL: THE CHARGING PAGE'S ONE SHORT MOMENT. Come just now (the charger went in at full) it
+     * Full: the charging page's one short moment, with its current figure and a slide out.
+     * Come just now (the charger went in at full) it
      * has the page's own rise, [ChargeOverlay.FILL_MS], and [FULL_STANDS_MS] more; already up as the battery reaches
      * full, [FULL_REACHED_MS]. Then charging is not live any more and the page slides out (RearNav's LiveEnds).
      */
@@ -8533,7 +8570,7 @@ class RearUserService : IRearService.Stub {
         chargeOver()
     }
     @Volatile private var chargeFullMoment = false
-    /** A debug build's made-up full moment ("fullmoment" in pop-demo): marked "Demo" on the page, and no charger is looked for. */
+    /** A debug build's full-moment timing demo: the page reads the actual battery and says "Demo". */
     @Volatile private var chargeDemo = false
     /** The page is leaving because the battery is full, not because the charger came out: by its slide, not by draining. */
     @Volatile private var chargeRests = false
@@ -8625,21 +8662,43 @@ class RearUserService : IRearService.Stub {
     @Volatile private var staySaidAt = 0L
     @Volatile private var touchToldAt = 0L
 
-    /** The front's dim while the phone lies on its front (FrontDim): on or off as its rule says now. */
-    private val frontDim by lazy { FrontDim(holdHandler) { context?.getSystemService(android.hardware.SensorManager::class.java) } }
+    private val frontDim by lazy { FrontDim(holdHandler) }
+    private val restingPosture: FaceDownWatch by lazy {
+        FaceDownWatch(
+            holdHandler,
+            sensors = { context?.getSystemService(android.hardware.SensorManager::class.java) },
+            frontState = { displayStates.recent(android.view.Display.DEFAULT_DISPLAY, 250L) },
+            changed = {
+                syncFrontDim("resting posture changed")
+                if (stay == FrontDim.FACE_DOWN_LEVEL) applySceneLook()
+                runCatching { events?.onRestingFaceDownChanged() }
+            },
+        )
+    }
+
+    override fun restingFaceDown(client: Int, watch: Boolean): Boolean {
+        restingPosture.request(client, watch)
+        return watch && restingPosture.down
+    }
+
     private fun syncFrontDim(why: String) {
-        val want = companion && FrontDim.wanted(stay, android.os.SystemClock.uptimeMillis() - staySaidAt, call != null, frontDim.lifted)
-        if (want != frontDim.isOn) frontDim.set(want, if (want) "lying face down" else why)
+        val update = Runnable {
+            val resting = restingPosture.down
+            val want = companion && FrontDim.wanted(stay, android.os.SystemClock.uptimeMillis() - staySaidAt, call != null, resting)
+            frontDim.set(want, if (want) "lying face down" else why)
+        }
+        if (android.os.Looper.myLooper() == holdHandler.looper) update.run() else holdHandler.post(update)
     }
 
     override fun setStay(level: Int, why: String?) {
         val next = level.coerceIn(0, STAY_GAIN.size - 1)
         staySaidAt = android.os.SystemClock.uptimeMillis()
         // Said again, nothing new: the app confirming it (StayOn.CONFIRM_MS).
-        if (next == stay) return
+        if (next == stay) {
+            if (next == FrontDim.FACE_DOWN_LEVEL) syncFrontDim("the stay rule")
+            return
+        }
         Log.i(TAG, "stay: ${STAY_NAME[next]} — ${why.orEmpty()}")
-        // Face down afresh: the tilt's last word (he had lifted it) is forgotten.
-        if (next == FrontDim.FACE_DOWN_LEVEL && stay != next) frontDim.fresh()
         // Lit by the rule again: the panel's level read afresh, not one kept from before.
         if (stay == 0 && next > 0) panelKept.forget()
         stay = next
@@ -8836,7 +8895,7 @@ class RearUserService : IRearService.Stub {
             if (chargeWanted) { Log.i(TAG, "charge: the full moment's demo is not shown — his own charger is in"); return }
             Log.i(TAG, "charge: the full moment, a demo")
             chargeDemo = true
-            showCharge(100, false)
+            startCharge(full = true, fast = false)
             if (!chargeWanted) chargeDemo = false
             return
         }
@@ -8849,7 +8908,7 @@ class RearUserService : IRearService.Stub {
             // And only while it really charges: a page asked for after the charger had come out stood on the back for nothing.
             val powered = battery.lineSequence().any { it.contains("powered: true") }
             Log.i(TAG, "charge: the page asked for by the debug file, at the battery's $level${if (powered) "" else " — not charging, not shown"}")
-            if (level != null && powered) showCharge(level, false)
+            if (powered) startCharge(full = level == 100, fast = false)
             return
         }
         if (parts[0] == "timer") {
@@ -9020,17 +9079,7 @@ class RearUserService : IRearService.Stub {
     override fun setBattery(level: Int, charging: Boolean) {
         sceneLook = sceneLook.copy(level = level, charging = charging)
         scene.look(sceneLook)
-        // The charging page is for a battery that is charging, whatever brought it up and whatever word of the
-        // charger coming out was missed: not charging, it drains away.
-        val was = batteryCharging
-        batteryCharging = charging
-        if (!charging && (charge.isUp || chargeWanted)) { Log.i(TAG, "charge: the battery is not charging — the page goes"); chargeOver() }
-        // Charging, and nobody has said the charger went in (this process started with it in): it is live all the same.
-        if (charging && was != true && !chargeWanted && companion && chargeOn) { Log.i(TAG, "charge: charging as found — its page is the live page"); showCharge(level, false) }
     }
-
-    /** Whether the battery is charging, as the app last said; null before it has said anything. */
-    @Volatile private var batteryCharging: Boolean? = null
 
     /** The rear as it is now, a JPEG at half size: small enough for the binder, enough for a preview. */
     override fun rearShot(): ByteArray? = runCatching {
@@ -9190,6 +9239,7 @@ class RearUserService : IRearService.Stub {
         val was = rearLight
         rearLight = now
         if (WakeStyle.isWakeEdge(was, now)) {
+            if (chargeLoose && chargeMade && charge.isUp) refreshChargeReading()
             expirePlaceNotes()
             runCatching { events?.onRearWoke() }
             onWakeEdge(seenAt)
@@ -9293,8 +9343,8 @@ class RearUserService : IRearService.Stub {
 
     /**
      * "Play on the back" from the settings: a wake style now if the back is lit, or on the wake the
-     * app asks for next (ShizukuBridge.playWake); a charge style through [showCharge]'s path at the
-     * level given. Never over Xiaomi's rear camera.
+     * app asks for next (ShizukuBridge.playWake); a charge style with a fresh battery reading.
+     * Never over Xiaomi's rear camera.
      */
     override fun playWake(style: String?) {
         if (!companion) return
@@ -9323,9 +9373,10 @@ class RearUserService : IRearService.Stub {
                     is RearShow.Decision.Drop -> return
                     is RearShow.Decision.Start -> if (d.cut == RearShow.Kind.WAKE) wakeShow.cut(d.fadeMs, "a charge preview")
                 }
-                Log.i(TAG, "charge preview: ${p.style.name.lowercase()} at ${p.level}%")
+                Log.i(TAG, "charge preview: ${p.style.name.lowercase()}")
                 chargeLoose = true
-                charge.show(p.level, false, compact, p.style, chargePercent)
+                charge.show(false, compact, p.style, chargePercent)
+                requestChargeReading()
                 syncTouchWatch()
             }
         }

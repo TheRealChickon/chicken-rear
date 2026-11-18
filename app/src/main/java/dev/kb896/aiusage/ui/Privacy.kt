@@ -32,7 +32,7 @@ object Privacy {
      * that leaves this alone does not. Stored as the last version seen, not a "seen" flag,
      * so the first notice and every later one are the same mechanism.
      */
-    const val NOTICE_VERSION = 4
+    const val NOTICE_VERSION = 5
 
     /**
      * Short on purpose: what leaves the phone, what stays, and what is not there at all.
@@ -52,9 +52,12 @@ object Privacy {
             "middle rounded to a tenth of a degree, to Photon (photon.komoot.io). Arrivals at a " +
             "note's place are watched by Google Play services on the phone.\n" +
             "• Only with Circle to Search on: text and image searches go to Google. A selected " +
-            "image crop is kept in the app cache. Text recognition and translation run on the " +
-            "phone with Google ML Kit. Translation can download language models, and Google " +
-            "may collect SDK diagnostics.\n\n" +
+            "image crop is kept in the app cache.\n" +
+            "• When you download language packs: text recognition models come from PaddlePaddle " +
+            "and translation models come from Google. Both run on your phone. Google may collect " +
+            "ML Kit diagnostics.\n" +
+            "• Release builds check the public Chicken Rear releases on GitHub and fetch the APK " +
+            "and checksum there if you choose to update.\n\n" +
             "What stays on it: your sign-in tokens, encrypted; your pinned notes, and the place of " +
             "a note you tie to one (for that the app asks for the precise position, all the time); " +
             "the last rough position, to a tenth of a degree, for the weather; the home Wi-Fi's " +

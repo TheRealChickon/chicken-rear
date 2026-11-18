@@ -1,6 +1,12 @@
 package dev.kb896.aiusage.circle
 
+import android.content.Context
 import android.util.LruCache
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.google.mlkit.nl.languageid.LanguageIdentificationOptions
@@ -42,7 +48,14 @@ object Tr {
         if (kana * 8 >= letters) return "ja"
         if (hangul * 3 >= letters) return "ko"
         if (han * 3 >= letters) return "zh"
-        return null
+        return when (OcrCatalog.scriptIn(text)) {
+            "el" -> "el"
+            "th" -> "th"
+            "ta" -> "ta"
+            "te" -> "te"
+            "kannada" -> "kn"
+            else -> null
+        }
     }
 
     fun detect(text: String, cb: (String) -> Unit) {
@@ -58,7 +71,7 @@ object Tr {
         translators[key]?.let { return it }
         if (translators.size >= 8) {
             val old = translators.entries.first()
-            old.value.close(); ready.remove(old.key); translators.remove(old.key)
+            old.value.close(); translators.remove(old.key)
         }
         return Translation.getClient(TranslatorOptions.Builder().setSourceLanguage(src).setTargetLanguage(tgt).build())
             .also { translators[key] = it }
@@ -80,31 +93,74 @@ object Tr {
     /** Drops queued work that has not started (the screen it was for is gone). */
     fun cancelPending() { queue.clear() }
 
-    fun translate(text: String, src: String, tgt: String, cb: (String?) -> Unit) {
-        if (TranslateLanguage.fromLanguageTag(src) == null || src == tgt) { cb(null); return }
+    fun translate(text: String, src: String, tgt: String, cb: (String?) -> Unit) =
+        translateIfActive(text, src, tgt, { true }, cb)
+
+    private fun supports(src: String, tgt: String) = src != tgt &&
+        TranslateLanguage.fromLanguageTag(src) != null && TranslateLanguage.fromLanguageTag(tgt) != null
+
+    private fun translateIfActive(text: String, src: String, tgt: String, active: () -> Boolean, cb: (String?) -> Unit) {
+        if (!active()) return
+        if (!supports(src, tgt)) { cb(null); return }
         val key = "$src>$tgt"
         val ck = "$key|$text"
         cache.get(ck)?.let { cb(it); return }
+        if (key !in ready) {
+            fetch(src, tgt, key) { ok ->
+                if (ok) translateIfActive(text, src, tgt, active, cb) else if (active()) cb(null)
+            }
+            return
+        }
         enqueue { done ->
+            if (!active()) { done(); return@enqueue }
             val hit = cache.get(ck)
             if (hit != null) { done(); cb(hit); return@enqueue }
-            val t = translator(src, tgt)
-            val go = {
-                t.translate(text)
-                    .addOnSuccessListener { cache.put(ck, it); done(); cb(it) }
-                    .addOnFailureListener { Dbg.log("translate $key failed: $it"); done(); cb(null) }
-            }
-            if (key in ready) go()
-            else {
-                onStatus?.invoke("Preparing ${name(src)} → ${name(tgt)}…")
-                t.downloadModelIfNeeded(DownloadConditions.Builder().build())
-                    .addOnSuccessListener { ready.add(key); onStatus?.invoke(null); go() }
-                    .addOnFailureListener { Dbg.log("language pack $key failed: $it"); onStatus?.invoke("Language pack download failed"); done(); cb(null) }
+            translator(src, tgt).translate(text)
+                .addOnSuccessListener { cache.put(ck, it); done(); cb(it) }
+                .addOnFailureListener { Dbg.log("translate $key failed: $it"); done(); cb(null) }
+        }
+    }
+
+    private val downloads = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var app: Context? = null
+    private val fetching = HashMap<String, MutableList<(Boolean) -> Unit>>()
+
+    /** A missing pack can take minutes. Keep downloads outside the serial native inference queue. */
+    private fun fetch(src: String, tgt: String, key: String, cb: (Boolean) -> Unit) {
+        fetching[key]?.let { it.add(cb); return }
+        fetching[key] = mutableListOf(cb)
+        val client = Translation.getClient(TranslatorOptions.Builder().setSourceLanguage(src).setTargetLanguage(tgt).build())
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val status = Runnable { onStatus?.invoke("Preparing ${name(src)} → ${name(tgt)}…") }
+        handler.postDelayed(status, 400)
+        val context = checkNotNull(app)
+        downloads.launch {
+            var success = false
+            try {
+                val conditions = DownloadConditions.Builder().build()
+                for (attempt in 0..2) {
+                    try {
+                        TranslationTransfer.await(context, setOf(src, tgt), client.downloadModelIfNeeded(conditions))
+                        success = true
+                        break
+                    } catch (_: Exception) {
+                        if (attempt < 2) delay(if (attempt == 0) 1_000 else 3_000)
+                    }
+                }
+                if (success) ready.add(key)
+            } finally {
+                client.close()
+                handler.removeCallbacks(status)
+                onStatus?.invoke(if (success) null else "Language pack download paused. Try again.")
+                fetching.remove(key)?.forEach { it(success) }
             }
         }
     }
 
-    fun warm() { langId }
+    fun warm(context: Context) {
+        app = context.applicationContext
+        langId
+    }
 
     /**
      * Translates every block of a screen. Each block gets its own language: decided by script where that
@@ -116,49 +172,81 @@ object Tr {
     fun screen(
         blocks: List<Block>, target: String, explicit: Boolean,
         start: (String, String) -> Unit, each: (Block, String) -> Unit, ready: () -> Unit = {},
+        failed: () -> Unit = {}, done: () -> Unit = {}, active: () -> Boolean = { true },
+        translateParagraph: ((String, String, String, (String?) -> Unit) -> Unit)? = null,
     ) {
         val useful = blocks.filter { b -> b.text.count { it.isLetter() } >= 2 }
-        if (useful.isEmpty()) { start("und", target); ready(); return }
+        if (!active()) return
+        if (useful.isEmpty()) { start("und", target); ready(); done(); return }
         val lang = arrayOfNulls<String>(useful.size)   // null = too short to tell
         var waiting = 0
         var scanned = false
-        val finish = {
-            // Majority by amount of text, separately for Latin-script and other text.
+        val finish = finish@{
+            if (!active()) return@finish
+            // An ambiguous short label may borrow a language only from the same writing system.
             val weight = HashMap<String, Int>()
-            for ((i, b) in useful.withIndex()) lang[i]?.takeIf { it != "und" }?.let { weight[it] = (weight[it] ?: 0) + b.text.length }
+            val byScript = mutableMapOf<Character.UnicodeScript, MutableMap<String, Int>>()
+            fun dominant(text: String) = text.filter(Char::isLetter).groupingBy { Character.UnicodeScript.of(it.code) }
+                .eachCount().maxByOrNull { it.value }?.key
+            for ((i, b) in useful.withIndex()) {
+                val code = lang[i]?.takeIf { it != "und" } ?: continue
+                weight[code] = (weight[code] ?: 0) + b.text.length
+                val script = dominant(b.text) ?: continue
+                val same = byScript.getOrPut(script) { mutableMapOf() }
+                same[code] = (same[code] ?: 0) + b.text.length
+            }
             val majority = weight.maxByOrNull { it.value }?.key ?: "und"
-            // what the screen is mostly written in, apart from the language it is being translated into
             val foreign = weight.filter { it.key != target }.maxByOrNull { it.value }?.key
-            fun nonLatin(l: String) = l == "zh" || l == "ja" || l == "ko"
-            val latinMajority = weight.filter { !nonLatin(it.key) }.maxByOrNull { it.value }?.key
             val total = weight.values.sum().coerceAtLeast(1)
             val eff = if (!explicit && (weight[target] ?: 0) * 10 >= total * 7) other(target) else target
             Dbg.log("languages on screen: " + weight.entries.sortedByDescending { it.value }.joinToString { "${it.key}=${it.value}" } + " -> target $eff")
             start(if (majority == eff && foreign != null) foreign else majority, eff)
+            val jobs = mutableListOf<Pair<Block, String>>()
             var skipped = 0
             for ((i, b) in useful.withIndex()) {
                 // Longer text that is in no language the identifier knows is not text (a line cut off by the edge
                 // of a list, a logo, a serial number): translating it only produces nonsense, so it stays.
                 if (lang[i] == "und") { skipped++; continue }
-                val l = lang[i] ?: latinMajority ?: continue
-                if (l == eff) continue
-                translate(b.text, l, eff) { r ->
-                    // Skip results that only differ in spacing or case (numbers, names, units).
-                    if (r != null && r.isNotBlank() && !r.filterNot { it.isWhitespace() }.equals(b.text.filterNot { it.isWhitespace() }, true)) each(b, r)
-                }
+                val l = lang[i] ?: byScript[dominant(b.text)]?.maxByOrNull { it.value }?.key ?: continue
+                if (!supports(l, eff)) continue
+                jobs.add(b to l)
             }
             if (skipped > 0) Dbg.log("$skipped block(s) in no recognisable language left as they are")
-            // Everything that was already known (cache) has been delivered by now; the rest follows one by one.
+            val order = SelLogic.readingOrder(jobs.map { (b, _) ->
+                intArrayOf(b.box.left, b.box.top, b.box.right, b.box.bottom)
+            })
+            var pending = jobs.size
+            var submitted = false
+            for (i in order) {
+                if (!active()) break
+                val (b, language) = jobs[i]
+                val receive: (String?) -> Unit = { result ->
+                    if (active()) {
+                        if (result.isNullOrBlank()) failed()
+                        else if (!result.filterNot { it.isWhitespace() }.equals(b.text.filterNot { it.isWhitespace() }, true))
+                            each(b, result)
+                    }
+                    if (--pending == 0 && submitted) done()
+                }
+                if (translateParagraph == null) translateIfActive(b.text, language, eff, active, receive)
+                else translateParagraph(b.text, language, eff, receive)
+            }
             ready()
+            submitted = true
+            if (pending == 0) done()
         }
         for ((i, b) in useful.withIndex()) {
             val s = script(b.text)
             when {
                 s != null -> lang[i] = s
-                b.text.length >= 20 -> {
+                else -> {
                     waiting++
                     langId.identifyLanguage(b.text)
-                        .addOnSuccessListener { tag -> lang[i] = if (tag == "und") "und" else TranslateLanguage.fromLanguageTag(tag.substringBefore('-')); if (--waiting == 0 && scanned) finish() }
+                        .addOnSuccessListener { tag ->
+                            lang[i] = if (tag == "und" && b.text.length >= 20) "und"
+                                else TranslateLanguage.fromLanguageTag(tag.substringBefore('-'))
+                            if (--waiting == 0 && scanned) finish()
+                        }
                         .addOnFailureListener { if (--waiting == 0 && scanned) finish() }
                 }
             }

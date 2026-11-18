@@ -23,3 +23,6 @@
 -keep class dev.kb896.aiusage.rear.RearGuardService { *; }
 -keep interface dev.kb896.aiusage.IRearGuard { *; }
 -keep class dev.kb896.aiusage.IRearGuard$Stub { *; }
+
+# ONNX Runtime uses JNI to construct and inspect Java tensors.
+-keep class ai.onnxruntime.** { *; }

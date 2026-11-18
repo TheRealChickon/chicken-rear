@@ -13,6 +13,7 @@ import android.util.Log
 import android.view.Surface
 import android.view.SurfaceControl
 import dev.kb896.aiusage.data.ChargeAnimStyle
+import dev.kb896.aiusage.service.ChargePrecise
 
 /**
  * The charging animation over the rear, drawn by the shell on a layer of its own, as the
@@ -59,7 +60,8 @@ class ShellCharge(
     private val onPlace: (Boolean) -> Unit = {},
 ) {
     private val state = Any()
-    private var level = 0f
+    private val reading = ChargeReading()
+    private var demo = false
     private var fast = false
     private var compact = false
     private var style = ChargeAnimStyle.LIQUID
@@ -132,23 +134,25 @@ class ShellCharge(
     }
 
     /**
-     * Show it, filling to [levelPercent], [fastCharger] or not, [compactOverGuest] down the edge.
+     * Show it with a fresh battery reading, [fastCharger] or not, [compactOverGuest] down the edge.
      * A show already up starts again from here: one charger, one answer.
      */
-    fun show(levelPercent: Int, fastCharger: Boolean, compactOverGuest: Boolean, look: ChargeAnimStyle, showPercent: Boolean, slideIn: Boolean = false) {
+    fun show(fastCharger: Boolean, compactOverGuest: Boolean, look: ChargeAnimStyle, showPercent: Boolean,
+        slideIn: Boolean = false, asDemo: Boolean = false,
+    ) {
         synchronized(state) {
             // As a page of the row it comes in from the right edge, as the timer's and the call's do ([slideIn]); else
             // in its place, by its own arrival (the fluid rising).
             leaving = false
             slidIn = slideIn && !compactOverGuest
             if (slidIn) slide.comeFrom(PageSlide.Edge.RIGHT) else slide.inPlace()
-            level = (levelPercent.coerceIn(0, 100)) / 100f
+            reading.refresh(SystemClock.elapsedRealtimeNanos())
+            demo = asDemo
             fast = fastCharger
             compact = compactOverGuest
             style = look
             percent = showPercent
             held = !compactOverGuest
-            fraction = -1f; label = ""
             askedAt = SystemClock.uptimeMillis()
             startAt = 0L
             drainAt = 0L
@@ -188,25 +192,17 @@ class ShellCharge(
     /** How bright, as the scene would be now (the always-on rules' dimming on a table): 1 full. Any thread. */
     @Volatile var dim = 1f
 
-    // The level between two whole percents, from a real source (the app's ChargePrecise): [fraction] of a percent
-    // at [fractionAt] (uptime), rising by [ratePerSec]; under 0 while it is not known, and then no decimals show.
-    @Volatile private var fraction = -1f
-    @Volatile private var fractionAt = 0L
-    @Volatile private var ratePerSec = 0f
-    /** What kind of charger, in words ("Fast charging"), or "" for an ordinary one. */
-    @Volatile private var label = ""
-    /** On the charger but not filling (a limit, full): the fluid comes to rest and stays so (ChargePrecise.Detail.holding). */
-    @Volatile private var holding = false
     // The fluid's own clock: it runs with the time while the battery fills and slows to a stop while it holds.
     private var fluidClock = 0L
     private var fluidSpeed = 1f
     private var fluidAt = 0L
 
-    /** The battery as it is now, while the page is up: the level (no restart of the show) and what is known past it. Any thread. */
-    fun detail(levelPercent: Int, fractionNow: Float, atUptime: Long, rate: Float, kind: String, holds: Boolean = false) {
-        // A level that is not known (under 0) changes nothing on the page: never a made-up figure on the back.
-        synchronized(state) { if (isUp && levelPercent >= 0) level = levelPercent.coerceIn(0, 100) / 100f }
-        fraction = fractionNow; fractionAt = atUptime; ratePerSec = rate; label = kind; holding = holds
+    /** Covered or dark, and now being revealed again: forget the previous frame's level before asking the app. */
+    fun refreshReading() = synchronized(state) { reading.refresh(SystemClock.elapsedRealtimeNanos()) }
+
+    /** A single app sample for the figure, the fluid and the hundredths. Any thread. */
+    internal fun detail(sampledAt: Long, detail: ChargePrecise.Detail, kind: String) = synchronized(state) {
+        if (isUp) reading.update(sampledAt, ChargeReading.Sample(detail, kind))
     }
 
     // THE PAGE'S PLACE ON THE BACK (PageSlide): it slides as every page does, and is under the finger while one moves it.
@@ -216,8 +212,7 @@ class ShellCharge(
 
     /**
      * Sent away (by hand, or the navigation has another page there): IT SLIDES OUT, to the right edge as the other
-     * live pages do, or on to the edge a finger was taking it to; gone until it is shown again. (It used to fade
-     * where it stood.) The small one over an app keeps its short fade.
+     * live pages do; gone until it is shown again. The small one over an app keeps its short fade.
      */
     fun swipedAway() = synchronized(state) {
         if (!isUp || cutAt != 0L || leaving) return@synchronized
@@ -233,8 +228,8 @@ class ShellCharge(
         Log.i(TAG, "charge: swiped away")
     }
 
-    /** UNDER A FINGER (PageDrag): [inPart] of its way in, 1 in place and 0 off [towards]. Only the page that is up. */
-    fun peek(inPart: Float, towards: PageSlide.Edge) { if (isUp && !compact && !leaving) slide.peek(inPart, towards) }
+    /** UNDER A FINGER (PageDrag): [inPart] of its way in, 1 in place and 0 off the right edge. */
+    fun peek(inPart: Float) { if (isUp && !compact && !leaving) slide.peek(inPart, PageSlide.Edge.RIGHT) }
 
     /** Let go without turning: back into its place, by its slide. */
     fun unpeek() = slide.unpeek()
@@ -264,6 +259,7 @@ class ShellCharge(
         val level: Float, val fast: Boolean, val compact: Boolean, val style: ChargeAnimStyle, val percent: Boolean,
         val askedAt: Long, val startAt: Long, val drainAt: Long, val cutAt: Long, val cutMs: Long,
         val fillAtDrain: Float, val alphaAtDrain: Float,
+        val detail: ChargePrecise.Detail? = null, val kind: String = "",
     )
 
     private fun run() {
@@ -284,7 +280,11 @@ class ShellCharge(
                     else {
                         // The clock starts on the first lit frame (see the class comment).
                         if (startAt == 0L && lit()) startAt = now
-                        Frame(level, fast, compact, style, percent, askedAt, startAt, drainAt, cutAt, cutMs, fillAtDrain, alphaAtDrain)
+                        val sample = reading.sample
+                        val level = sample?.detail?.level
+                        Frame(level?.div(100f) ?: -1f, fast, compact, style, percent, askedAt, startAt,
+                            drainAt, cutAt, cutMs, fillAtDrain, alphaAtDrain, sample?.detail,
+                            if (demo) "Demo" else sample?.kind.orEmpty())
                     }
                 } ?: break
                 if (f.startAt == 0L) {
@@ -294,7 +294,7 @@ class ShellCharge(
                 }
                 val t = ChargeStyle.timing(f.compact)
                 val elapsed = (now - f.startAt).toFloat()
-                var fill = ChargeStyle.fill(elapsed, f.level, t)
+                var fill = ChargeStyle.fill(elapsed, f.level.coerceAtLeast(0f), t)
                 var alpha = ChargeStyle.alpha(elapsed, t)
                 // The page that stays: in as ever, then there, with no end of its own.
                 val stays = held && !f.compact
@@ -326,15 +326,18 @@ class ShellCharge(
                 val c = runCatching { surface.lockHardwareCanvas() }.getOrNull() ?: surface.lockCanvas(null)
                 try {
                     c.drawColor(0, PorterDuff.Mode.CLEAR)
-                    val shownFraction = if (fraction >= 0f) (fraction + ratePerSec * (now - fractionAt) / 1000f).coerceIn(0f, 0.99f) else -1f
+                    val detail = f.detail
+                    val shownFraction = if (detail != null && detail.fraction >= 0f && !detail.holding) {
+                        (detail.fraction + detail.ratePerSec * (now - detail.at) / 1000f).coerceIn(0f, 0.99f)
+                    } else -1f
                     // Its drift eases to a stop over a second and a half as the battery holds, and up again as it fills.
                     val step = if (fluidAt == 0L) 0L else (now - fluidAt).coerceIn(0L, 100L)
                     fluidAt = now
-                    val want = if (holding) 0f else 1f
+                    val want = if (detail?.holding != false) 0f else 1f
                     fluidSpeed += (want - fluidSpeed) * (step / REST_MS).coerceIn(0f, 1f)
                     if (fluidClock == 0L) fluidClock = SystemClock.elapsedRealtime()
                     fluidClock += (step * fluidSpeed).toLong()
-                    painter.draw(c, f, elapsed, fill, gravityX, gravityY, shownFraction, label, dim, fluidClock)
+                    painter.draw(c, f, elapsed, fill, gravityX, gravityY, shownFraction, f.kind, dim, fluidClock)
                 } finally { surface.unlockCanvasAndPost(c) }
                 // Where it is on the back: in its place, sliding, or where a finger has it.
                 val moving = slide.step(now)
@@ -379,18 +382,19 @@ class ShellCharge(
     }
 
     /**
-     * The same drawing for the settings' preview on the front: a full show at [level] (0..1),
+     * The same drawing for the settings' preview on the front: a full show at the current level,
      * [elapsedMs] in. Draws onto a canvas the rear's size; returns the show's strength then
      * (what the layer's alpha would be), or null once it is over.
      */
     class PreviewPainter(rear: RearGeometry) {
         private val painter = Painter(rear)
 
-        fun draw(c: Canvas, style: ChargeAnimStyle, level: Float, percent: Boolean, elapsedMs: Float): Float? {
+        fun draw(c: Canvas, style: ChargeAnimStyle, levelPercent: Int, percent: Boolean, elapsedMs: Float): Float? {
             val t = ChargeStyle.timing(false)
             if (ChargeStyle.done(elapsedMs, t)) return null
+            val level = levelPercent.takeIf { it in 0..100 }?.div(100f) ?: -1f
             val f = Frame(level, false, false, style, percent, 0L, 0L, 0L, 0L, 0L, 0f, 0f)
-            painter.draw(c, f, elapsedMs, ChargeStyle.fill(elapsedMs, level, t), 0f, 9.81f)
+            painter.draw(c, f, elapsedMs, ChargeStyle.fill(elapsedMs, level.coerceAtLeast(0f), t), 0f, 9.81f)
             return ChargeStyle.alpha(elapsedMs, t)
         }
     }
@@ -430,6 +434,10 @@ class ShellCharge(
             val t = ChargeStyle.timing(f.compact)
             // The figure grows in and out with the show, as ChargeOverlay's is carried in.
             // (The page that stays keeps its figure once it is in: the old show's fading out is not its.)
+            if (f.level < 0f) {
+                if (!f.compact) c.drawColor(Color.BLACK)
+                return
+            }
             val grow = if (f.percent && !f.compact) (if (elapsed >= t.inMs) 1f else ChargeStyle.alpha(elapsed, t)) else 0f
             val figureText = Math.round(f.level * 100f).toString() + "%"
             if (!f.compact) {

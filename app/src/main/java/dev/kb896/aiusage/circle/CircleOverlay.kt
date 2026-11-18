@@ -1,6 +1,7 @@
 package dev.kb896.aiusage.circle
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -30,13 +31,14 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
         const val TAG = "CircleSearch"
     }
 
+    internal val ocr = PaddleOcr(service.applicationContext)
     private lateinit var wm: WindowManager
     private val main = Handler(Looper.getMainLooper())
     private val bg = Executors.newSingleThreadExecutor()
     private val prefs by lazy { getSharedPreferences("cs", Context.MODE_PRIVATE) }
 
     /** One search level: a frozen screen and, once something was searched on it, its results sheet. */
-    private class Level(val view: OverlayView) { var sheet: Sheet? = null }
+    private class Level(val view: OverlayView, val shot: Shot) { var sheet: Sheet? = null }
     private var host: Host? = null
     private val levels = ArrayList<Level>()
     /** The overlay view of the top level (the only one in scroll-translate mode). */
@@ -46,6 +48,7 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
 
     /** A screenshot with what is derived from it off the main thread (ready well before a hold completes). */
     class Shot(val hw: Bitmap) {
+        @Volatile var page: TrLayout.Area? = null
         @Volatile var soft: Bitmap? = null
         /** Two pixel rows that, stretched over the status bar, repaint it without its icons (see [cleanStatusBar]). */
         @Volatile var strip: Bitmap? = null
@@ -54,6 +57,8 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
         fun recycle() { hw.recycle(); soft?.recycle(); strip?.recycle() }
     }
     private val prep = Executors.newSingleThreadExecutor()
+    private val layoutExec = Executors.newSingleThreadExecutor()
+    private var follower: ScrollFollow? = null
     private var prepared: Shot? = null
     private var preparedAt = 0L
     private var captureGeneration = 0
@@ -83,18 +88,17 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
     // hold is over it only has to be switched to alpha 1, which shows on the next frame.
     private var staged = false
     private var armAt = 0L
+    private var armedOcrModel = OcrModel.FAST
     private var revealedAt = 0L
     private val fire = Runnable { armedFire() }
 
     // scroll-translate state
     private var frame = 0   // id of the screen content the current patches belong to
-    private var moves = 0   // bumped on every touch / scroll / window change
     private var lastTouch = 0L
     private var lastSig: IntArray? = null
     private var shownSig: IntArray? = null
     private var explicitTarget = false
     private var sessionTarget: String? = null
-    private var firstPatch = false
     private var lastSrc = "und"
     private var lastTgt = "en"
 
@@ -121,8 +125,7 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
             addAction(Intent.ACTION_CLOSE_SYSTEM_DIALOGS); addAction(Intent.ACTION_SCREEN_OFF)
         }, Context.RECEIVER_NOT_EXPORTED)
         Tr.onStatus = { s -> view?.setStatus(s); pill?.setStatus(s) }
-        Ocr.warm()
-        Tr.warm()
+        Tr.warm(this)
     }
 
     fun close() {
@@ -138,12 +141,20 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
         Tr.cancelPending()
         Tr.onStatus = null
         discardPrepared()
+        ocr.close()
         prep.shutdown()
         bg.shutdown()
+        layoutExec.shutdown()
+        follower?.close()
+        follower = null
     }
 
-    private fun setEvents(types: Int) {
-        service.serviceInfo = service.serviceInfo?.apply { eventTypes = types } ?: return
+    private fun setEvents(types: Int, listWindows: Boolean = types != 0) {
+        service.serviceInfo = service.serviceInfo?.apply {
+            eventTypes = types
+            val retrieve = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            flags = if (listWindows) flags or retrieve else flags and retrieve.inv()
+        } ?: return
     }
 
     fun target(): String = prefs.getString("target", "en") ?: "en"
@@ -166,6 +177,7 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
 
     /** Finger went down on the nav bar: take the screenshot now so it is ready if this becomes a long-press. */
     fun prepare() {
+        if (view?.mode == OverlayView.Mode.PASS) return
         captureGeneration++
         shooting = false
         pendingShow = false
@@ -183,41 +195,45 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
         finishClosing()
         if (shooting) return
         if (view?.mode == OverlayView.Mode.FROZEN && !canNest()) return
-        var delay = 0L
-        if (view?.mode == OverlayView.Mode.PASS) { // scroll-translate is on: get our own drawing off the screen first
-            view?.hidePatches(); pill?.alpha = 0f; delay = 50
-            main.postDelayed({ if (view?.mode == OverlayView.Mode.PASS) { pill?.alpha = 1f; shownSig = null; soon(50) } }, 1200)
-        }
+        val passView = view?.takeIf { it.mode == OverlayView.Mode.PASS }
+        if (passView != null && !pendingShow) return
         shooting = true
         val generation = captureGeneration
         val t0 = SystemClock.uptimeMillis()
-        // Which system bars the app is showing right now; the overlay keeps it that way.
         val ins = keepAlive?.rootWindowInsets
         val statusShown = ins?.isVisible(android.view.WindowInsets.Type.statusBars()) ?: true
-        main.postDelayed({
-            if (generation != captureGeneration || closed) return@postDelayed
-            shoot { b ->
-                if (generation != captureGeneration || closed) {
-                    b?.recycle()
-                    return@shoot
-                }
-                shooting = false
-                if (b != null) {
-                    val s = Shot(b); s.statusShown = statusShown
-                    prepared = s; preparedAt = SystemClock.uptimeMillis()
-                    Log.i(TAG, "screenshot ready ${preparedAt - t0} ms after PREPARE")
-                    prep.execute {
-                        s.soft = runCatching { b.copy(Bitmap.Config.ARGB_8888, false) }.getOrNull()
-                        if (statusShown) cleanStatusBar(s)
-                    }
-                    if (pendingShow) { pendingShow = false; open(s) }
-                    // Most nav-bar touches are not long-presses: drop the unused screenshot again.
-                    else main.postDelayed({ if (prepared === s) { prepared = null; prep.execute { s.recycle() } } }, 3000)
-                } else if (pendingShow) {
-                    if (attempt < 4) main.postDelayed({ if (generation == captureGeneration && pendingShow) capture(attempt + 1) }, 120) else pendingShow = false
-                }
+        val receive: (Bitmap?) -> Unit = receive@{ b ->
+            if (generation != captureGeneration || closed) {
+                b?.recycle()
+                return@receive
             }
-        }, delay)
+            shooting = false
+            if (b != null && (passView == null || view === passView && pendingShow)) {
+                val shot = Shot(b).apply { this.statusShown = statusShown }
+                prepared = shot
+                preparedAt = SystemClock.uptimeMillis()
+                Log.i(TAG, "screenshot ready ${preparedAt - t0} ms after capture")
+                prep.execute {
+                    shot.soft = runCatching { b.copy(Bitmap.Config.ARGB_8888, false) }.getOrNull()
+                    if (statusShown) cleanStatusBar(shot)
+                }
+                if (pendingShow) { pendingShow = false; open(shot) }
+                else main.postDelayed({
+                    if (prepared === shot) {
+                        discardPrepared()
+                    }
+                }, 3000)
+            } else {
+                b?.recycle()
+                if (pendingShow && attempt < 4) main.postDelayed({
+                    if (generation == captureGeneration && pendingShow) capture(attempt + 1)
+                }, 380)
+                else pendingShow = false
+            }
+        }
+        if (passView == null) shoot(receive)
+        else if (android.os.Build.VERSION.SDK_INT >= 34) captureWindow { receive(it.getOrNull()) }
+        else receive(null)
     }
 
     /**
@@ -240,7 +256,7 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
         s.strip = Bitmap.createBitmap(rows, w, 2, Bitmap.Config.ARGB_8888)
     }
 
-    fun show() {
+    private fun show() {
         finishClosing()
         if (view?.mode == OverlayView.Mode.FROZEN && !canNest() && !staged) return
         showAskedAt = SystemClock.uptimeMillis()
@@ -260,11 +276,12 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
         }
     }
 
-    fun arm(at: Long, onHome: Boolean) {
+    internal fun arm(at: Long, onHome: Boolean, model: OcrModel) {
         finishClosing()
         if (view?.mode == OverlayView.Mode.FROZEN && !canNest()) return
         main.removeCallbacks(fire)
         armAt = at
+        armedOcrModel = model
         holdOnHome = onHome
         val p = prepared
         if (host == null && view == null && p != null && SystemClock.uptimeMillis() - preparedAt < 2500) open(p, stage = true)
@@ -367,14 +384,14 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
     private fun addLevel(s: Shot) {
         val h = host ?: return
         val b = s.hw
-        val v = OverlayView(this, levels.size)
+        val v = OverlayView(this, levels.size, armedOcrModel)
         v.shot = b
         // The status bar is only repainted where it stays live above the overlay.
         if (hostIsApp) v.statusStrip = s.strip
         v.statusH = sbHeight
         levels.lastOrNull()?.let { below -> main.postDelayed({ if (levels.lastOrNull()?.view !== below.view) { below.view.visibility = android.view.View.GONE; below.sheet?.visibility = android.view.View.GONE } }, 120) }
         h.addView(v, android.widget.FrameLayout.LayoutParams(-1, -1))
-        levels.add(Level(v))
+        levels.add(Level(v, s))
         Dbg.log("level ${levels.size - 1} opened")
         view = v
         v.requestFocus()
@@ -389,9 +406,16 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
                 val bounds = wm.currentWindowMetrics.bounds
                 val vw = if (v.width > 0) v.width else bounds.width(); val vh = if (v.height > 0) v.height else bounds.height()
                 val t0 = SystemClock.uptimeMillis()
-                Ocr.run(soft, vw / soft.width.toFloat(), vh / soft.height.toFloat()) { r ->
+                ocr.run(soft, vw / soft.width.toFloat(), vh / soft.height.toFloat(), v.ocrModel) { r ->
                     Dbg.log("ocr ready: ${r.words.size} words in ${SystemClock.uptimeMillis() - t0} ms")
-                    if (levels.any { it.view === v }) v.setOcr(r)
+                    if (levels.any { it.view === v }) {
+                        v.setOcr(r)
+                        if (view === v) OcrPrompt.suggest(service, r.suggestedPacks) {
+                            if (view === v && !soft.isRecycled) ocr.run(soft, vw / soft.width.toFloat(), vh / soft.height.toFloat(), v.ocrModel) { fresh ->
+                                if (view === v) { v.setOcr(fresh); if (v.trOn) translateFrame(v, fresh, soft) }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -490,6 +514,8 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
         AnchorActivity.current?.leave()
         host = null; view = null; pill = null; lp = null; hostWm = null; staged = false
         watching = false; frame++
+        follower?.drop()
+        shownRows = null
         main.removeCallbacks(watch)
     }
 
@@ -649,22 +675,32 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
 
     private var watching = false
     private var lastScrollAt = 0L
-    private var movedAt = 0L          // last time the content was seen or reported moving
     private var unstableSince = 0L
     private var translating = false
+    private var looking: OverlayView? = null
+    private var adoptNext = false
+    private var shownFromWindow = false
+    private var windowMode = false
+    private var windowFails = 0
+    private var windowRetryAt = 0L
 
     /** Translate pressed on the frozen screen: the translation is laid over the screenshot, nothing else changes. */
     fun translateInPlace(v: OverlayView) {
         val o = v.ocr ?: return
         val s = v.soft ?: return
         if (v.mode != OverlayView.Mode.FROZEN || staged) return
+        setEvents(0, listWindows = true)
         Dbg.log("translate on (frozen screen, ${o.blocks.size} blocks)")
-        movedAt = SystemClock.uptimeMillis()
         translateFrame(v, o, s)
     }
 
     /** Translate switched off on the frozen screen: whatever is still on its way is dropped. */
-    fun stopInPlace(v: OverlayView) { frame++; Tr.cancelPending() }
+    fun stopInPlace(v: OverlayView) {
+        if (view !== v) return
+        frame++
+        Tr.cancelPending()
+        setEvents(0)
+    }
 
     /**
      * "Scroll and translate": the frozen overlay becomes a touch-through layer that only draws translations, and
@@ -721,64 +757,114 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
         pv.rise()
 
         setEvents(AccessibilityEvent.TYPE_VIEW_SCROLLED or AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
-        lastSig = null; unstableSince = 0L; lastScrollAt = 0L; translating = false
-        shownSig = signature(s)
-        Dbg.log("scroll and translate on (display ${s.width}x${s.height}, ${v.patchCount} translations kept)")
-        if (v.trOn && v.patchCount > 0) { v.showPatches(); pv.setLangs(lastSrc, lastTgt) } else translateFrame(v, o, s)
+        windowMode = android.os.Build.VERSION.SDK_INT >= 34
+        windowFails = 0; windowRetryAt = 0L
+        lastSig = null; unstableSince = 0L; lastScrollAt = 0L; lastTouch = 0L; translating = false
+        shownSig = if (v.patchCount > 0) signature(s) else null
+        adoptNext = true
         watching = true
-        main.removeCallbacks(watch)
-        main.postDelayed(watch, 500)
+        if (windowMode) {
+            val tracking = follower ?: ScrollFollow(service, prefs).also { follower = it }
+            tracking.onChange = { view?.invalidate() }
+            tracking.onMotion = { Dbg.log(it) }
+            v.follow = tracking.out
+        }
+        Dbg.log("scroll and translate on (window capture: $windowMode, ${v.patchCount} translations kept)")
+        if (v.patchCount > 0) {
+            pv.setLangs(lastSrc, lastTgt)
+            anchorSet(v)
+        } else if (!v.collectingPatches && !windowMode) translateFrame(v, o, s)
+        soon(50)
     }
 
-    private fun translateFrame(v: OverlayView, o: OcrResult, s: Bitmap) {
+    private fun translateFrame(v: OverlayView, o: OcrResult, s: Bitmap, readAt: Long? = null) {
         val g = ++frame
-        firstPatch = true
         Tr.cancelPending()
-        // The translations on the screen stay until the new set is ready, then both change places in one frame.
         v.beginPatches()
-        shownRows = rowsOf(s)
-        val blocks = ArrayList<Block>()
-        // The status bar (clock, signal, battery icons) is never worth translating.
-        val sbId = resources.getIdentifier("status_bar_height", "dimen", "android")
-        val sb = if (sbId != 0) resources.getDimensionPixelSize(sbId) else 0
-        for (b in mergeParagraphs(o.blocks)) if (b.box.centerY() >= sb) uncut(b)?.let { blocks.add(it) }
-        v.planSizes(blocks, s)
+        val vw = v.width
+        val vh = v.height
+        val xy = IntArray(2).also { v.getLocationOnScreen(it) }
+        val shot = levels.firstOrNull { it.view === v }?.shot
+        val statusBar = if (shot?.statusShown != false) sbHeight else 0
+        val frozen = v.mode == OverlayView.Mode.FROZEN
+        layoutExec.execute {
+            val blocks = TrBlocks.split(o.blocks, s, vw, vh)
+            val page = if (frozen) shot?.page ?: TrBlocks.screenArea(service, statusBar)?.also { shot?.page = it } else null
+            val clips = TrBlocks.clips(service, xy, vw, vh, blocks, statusBar, page)
+            val visible = blocks.filter { it in clips }
+            val plan = v.sizePlan(visible, s, clips)
+            val rows = rowsOf(s)
+            main.post {
+                if (g != frame || view !== v) {
+                    if (readAt != null) s.recycle()
+                    return@post
+                }
+                v.applySizes(plan)
+                translateBlocks(v, s, g, visible, rows, readAt)
+            }
+        }
+    }
+
+    private fun translateBlocks(v: OverlayView, source: Bitmap, generation: Int, blocks: List<Block>,
+                                rows: ShiftLogic.Rows?, readAt: Long?) {
         pill?.setBusy(true)
-        val t0 = SystemClock.uptimeMillis()
-        // The target chosen for the first screen stays for the whole session, so it cannot flip while scrolling
-        // through mixed-language content. Tapping the target in the capsule changes it.
+        val startTime = SystemClock.uptimeMillis()
+        val replaceLive = v.mode == OverlayView.Mode.PASS && v.patchCount > 0
+        var unavailable = false
+        var first = true
+        fun current() = generation == frame && view === v
+        fun stale() = v.mode == OverlayView.Mode.PASS && lastScrollAt > (readAt ?: startTime)
+        fun publish() {
+            if (v.collectingPatches) {
+                v.commitPatches()
+                shownRows = rows
+            }
+            if (v.mode == OverlayView.Mode.PASS) anchorSet(v)
+        }
+        val publishAvailable = Runnable {
+            if (current() && !stale() && v.hasPendingPatches) publish()
+        }
+        if (replaceLive) main.postDelayed(publishAvailable, 900)
         Tr.screen(blocks, sessionTarget ?: target(), explicitTarget || sessionTarget != null,
+            active = ::current,
             start = { dom, eff ->
-                if (sessionTarget == null) sessionTarget = eff
-                if (g == frame) { lastSrc = if (dom == eff) "und" else dom; lastTgt = eff; pill?.setLangs(lastSrc, lastTgt); v.setLangs(lastSrc, lastTgt) }
-                main.postDelayed({ if (g == frame) pill?.setBusy(false) }, 1200)
-            },
-            each = { b, t ->
-                if (g == frame && view === v) {
-                    if (firstPatch) { firstPatch = false; Dbg.log("first translated text ${SystemClock.uptimeMillis() - t0} ms after OCR, ${SystemClock.uptimeMillis() - movedAt} ms after content stopped moving") }
-                    v.addPatch(b, t, s)
+                if (current()) {
+                    if (sessionTarget == null) sessionTarget = eff
+                    lastSrc = if (dom == eff) "und" else dom
+                    lastTgt = eff
+                    pill?.setLangs(lastSrc, lastTgt)
+                    v.setLangs(lastSrc, lastTgt)
                 }
             },
-            ready = { if (g == frame && view === v) v.commitPatches() })
+            each = { block, translated ->
+                if (current() && !stale()) {
+                    if (first) {
+                        first = false
+                        Dbg.log("first translated text ${SystemClock.uptimeMillis() - startTime} ms after layout")
+                    }
+                    v.addPatch(block, translated, source)
+                }
+            },
+            ready = { if (current() && !replaceLive && !stale()) publish() },
+            failed = { unavailable = true },
+            done = {
+                main.removeCallbacks(publishAvailable)
+                if (readAt != null) source.recycle()
+                if (current()) {
+                    val stale = stale()
+                    if (stale || replaceLive && unavailable && v.collectingPatches && !v.hasPendingPatches) {
+                        v.discardPendingPatches()
+                        shownSig = null
+                        if (stale) soon(190) else {
+                            Dbg.log("translation unavailable; previous patches retained")
+                            soon(1800)
+                        }
+                    } else publish()
+                    pill?.setBusy(false)
+                    Dbg.log("translation completed (${v.patchCount} patches)")
+                }
+            })
     }
-
-    /**
-     * A line that the edge of a scrolling list cuts through is read as nonsense. Such a line is lower than the
-     * other lines of its paragraph; it is taken out (first or last line only), and the rest is translated.
-     */
-    private fun uncut(b: Block): Block? {
-        if (b.lines.size < 2) return b
-        val hs = b.lines.map { it.box.height() }.sorted()
-        val med = hs[hs.size / 2]
-        var lines = b.lines
-        if (lines.first().box.height() < med * 0.72f) lines = lines.drop(1)
-        if (lines.size > 1 && lines.last().box.height() < med * 0.72f) lines = lines.dropLast(1)
-        if (lines.size == b.lines.size) return b
-        if (lines.isEmpty()) return null
-        val box = Rect(lines.first().box); for (l in lines) box.union(l.box)
-        return Block(lines.fold("") { a, l -> glue(a, l.text) }, box, lines)
-    }
-
 
     // ---- translations follow the page when it has moved ----
     private var shownRows: ShiftLogic.Rows? = null     // the picture the translations on screen were made from
@@ -805,19 +891,24 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
     private fun follow(v: OverlayView, bmp: Bitmap): Int {
         val old = shownRows
         val had = v.patchCount
+        val live = follower?.out?.takeIf { it.list === v.patchSet }?.dy?.maxByOrNull { abs(it) } ?: 0f
         if (old == null || had == 0) return 0
         val t0 = SystemClock.uptimeMillis()
         val new = rowsOf(bmp)
-        if (new == null || new.h != old.h) { v.clearPatches(); shownRows = new; return 0 }
+        if (new == null || new.h != old.h) return 0
         val dy = ShiftLogic.shift(old, new)
+        if (dy == null || dy == 0) return 0
         // The part of the screen that moved. A translation that would reach out of it (under a fixed bar, past the
         // bottom of a list) is dropped: it comes back with the next reading, cut the way its text is cut now.
-        val moved = if (dy != null && dy != 0) ShiftLogic.region(old, new, dy) else null
+        val moved = ShiftLogic.region(old, new, dy)
         val ky = bmp.height / v.height.toFloat()
+        // A capture taken near the start of a fling can arrive after the tracked nodes have moved farther.
+        // Keep the live anchor until the image catches up, so the patches do not jump back to older positions.
+        if (abs(live * ky) > abs(dy) + 8 * resources.displayMetrics.density * ky) return 0
         val slack = (5 * resources.displayMetrics.density * ky).toInt()      // a translation's box is a little taller than its text
-        val kept = v.shiftPatches { top, bottom ->
+        val kept = v.shiftPatches(retainWhenNone = true) { top, bottom ->
             var up: Int? = null
-            for (cand in listOfNotNull(dy, 0).distinct()) {
+            for (cand in listOf(dy, 0)) {
                 val nt = (top * ky).toInt() - cand; val nb = (bottom * ky).toInt() - cand
                 if (nt < 0 || nb > new.h) continue                      // has left the screen (or would only be half on it)
                 if (cand != 0 && (moved == null || nt < moved.first - slack || nb > moved.last + slack)) continue
@@ -825,16 +916,27 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
             }
             up
         }
+        if (kept == 0) return 0
+        follower?.drop()  // The verified offsets and the new patch positions take effect together.
         shownRows = new
-        Dbg.log("page moved ${dy ?: "?"} px: $kept of $had translations moved with it (${SystemClock.uptimeMillis() - t0} ms)")
-        if (kept > 0) v.showPatches()
+        shownSig = null
+        Dbg.log("page moved $dy px: $kept of $had translations moved with it (${SystemClock.uptimeMillis() - t0} ms)${if (live != 0f) ", followed live to ${live.toInt()} px" else ""}")
+        if (kept > 0 && view === v) anchorSet(v)
         return kept
+    }
+
+    private fun anchorSet(v: OverlayView) {
+        val tracker = follower ?: return
+        if (v.mode != OverlayView.Mode.PASS || view !== v || v.patchCount == 0) tracker.drop()
+        else tracker.anchor(v.patchSet, v.patchBoxes()) { Dbg.log("follow: $it") }
     }
 
     fun toggleTarget() {
         val t = Tr.other(sessionTarget ?: pill?.target ?: target())
         setTarget(t); explicitTarget = true; sessionTarget = t
         shownSig = null
+        frame++
+        Tr.cancelPending()
         Dbg.log("target switched to $t")
         val v = view
         if (v != null && v.mode == OverlayView.Mode.FROZEN && v.trOn) translateInPlace(v) else soon(60)
@@ -842,38 +944,93 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
 
     private fun soon(ms: Long) { if (watching) { main.removeCallbacks(watch); main.postDelayed(watch, ms) } }
 
-    /** A touch landed somewhere on the screen (reported by the capsule window). */
+    /** A touch is a reason to look sooner, never evidence that the displayed pixels changed. */
     fun userTouch() {
-        val v = view ?: return
-        if (v.mode != OverlayView.Mode.PASS) return
+        if (view?.mode != OverlayView.Mode.PASS) return
         lastTouch = SystemClock.uptimeMillis()
-        v.hidePatches(); movedAt = lastTouch; unstableSince = lastTouch; lastSig = null
-        soon(280)
+        if (windowMode) follower?.wake(700)
+        soon(160)
     }
 
-    /** Kept for callers that only know "something changed": look again soon. */
     fun kick(scroll: Boolean) {
-        val v = view ?: return
-        if (v.mode != OverlayView.Mode.PASS) return
-        val now = SystemClock.uptimeMillis()
+        if (view?.mode != OverlayView.Mode.PASS) return
         if (scroll) {
-            if (v.patchesShown()) Dbg.log("page is moving (event ${now - lastTouch} ms after the touch): translations hidden")
-            lastScrollAt = now; movedAt = now; v.hidePatches(); soon(190)
+            lastScrollAt = SystemClock.uptimeMillis()
+            if (windowMode) follower?.scrolled()
         }
-        else { v.hidePatches(); movedAt = now; lastSig = null; soon(200) }
+        // Keep the periodic look during noisy event streams. Its pixel comparison decides what changed.
+        if (watching && !main.hasCallbacks(watch) && looking == null && !translating) soon(190)
     }
 
-    /** Capture the display after the translated text has been hidden. */
-    private fun look(cb: (Bitmap?) -> Unit) {
+    /** Capture the front application's surface. Both Circle Search windows stay on screen. */
+    @androidx.annotation.RequiresApi(34)
+    private fun captureWindow(cb: (Result<Bitmap>) -> Unit) {
+        val win = runCatching {
+            val apps = service.windowsOnAllDisplays[Display.DEFAULT_DISPLAY].orEmpty()
+                .filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+            apps.firstOrNull { it.isFocused } ?: apps.firstOrNull { it.isActive } ?: apps.firstOrNull()
+        }.getOrNull()
+        if (win == null) { cb(Result.failure(IllegalStateException("no front application window"))); return }
+        val bounds = Rect()
+        win.getBoundsInScreen(bounds)
+        val dm = wm.currentWindowMetrics.bounds
+        runCatching {
+            service.takeScreenshotOfWindow(win.id, mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(r: AccessibilityService.ScreenshotResult) {
+                    val hb = Bitmap.wrapHardwareBuffer(r.hardwareBuffer, r.colorSpace)
+                    r.hardwareBuffer.close()
+                    lastShotAt = SystemClock.uptimeMillis()
+                    if (closed) { hb?.recycle(); return }
+                    if (hb == null) { cb(Result.failure(IllegalStateException("empty window capture"))); return }
+                    bg.execute {
+                        val result = runCatching {
+                            val copy = try { hb.copy(Bitmap.Config.ARGB_8888, false) } finally { hb.recycle() }
+                            if (copy.width == dm.width() && copy.height == dm.height() && bounds.left == 0 && bounds.top == 0) copy
+                            else Bitmap.createBitmap(dm.width(), dm.height(), Bitmap.Config.ARGB_8888).also {
+                                android.graphics.Canvas(it).drawBitmap(copy, null, bounds, null)
+                                copy.recycle()
+                            }
+                        }
+                        main.post { cb(result) }
+                    }
+                }
+                override fun onFailure(code: Int) {
+                    cb(Result.failure(IllegalStateException(if (code == AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) "interval" else "window capture error $code")))
+                }
+            })
+        }.onFailure { cb(Result.failure(it)) }
+    }
+
+    private fun look(v: OverlayView, cb: (Bitmap?) -> Unit) {
+        if (windowMode && android.os.Build.VERSION.SDK_INT >= 34) {
+            captureWindow { result ->
+                if (view === v && watching) {
+                    if (result.isSuccess) windowFails = 0
+                    else if (result.exceptionOrNull()?.message != "interval" && ++windowFails >= 3) {
+                        // Whole-display captures would include the translations. Keep retrying the clean source
+                        // while they are visible and use the display fallback only on a screen with no patches.
+                        windowRetryAt = SystemClock.uptimeMillis() + 4000
+                        windowMode = false
+                        Dbg.log("window capture unavailable (${result.exceptionOrNull()?.message}); translations retained")
+                    }
+                }
+                cb(result.getOrNull())
+            }
+            return
+        }
+        val pillBox = pill?.let { pv ->
+            val xy = IntArray(2)
+            pv.getLocationOnScreen(xy)
+            Rect(xy[0], xy[1], xy[0] + pv.width, xy[1] + pv.height)
+        }
         shoot { b ->
             if (b == null) { cb(null); return@shoot }
             bg.execute {
-                val soft = b.copy(Bitmap.Config.ARGB_8888, true); b.recycle()
-                pill?.let { pv -> // paint over our own capsule so OCR does not read it
-                    val xy = IntArray(2); pv.getLocationOnScreen(xy)
-                    val x0 = xy[0].coerceIn(0, soft.width - 1); val y0 = xy[1].coerceIn(0, soft.height - 1)
-                    val c = soft.getPixel(x0, (y0 - 4).coerceAtLeast(0))
-                    android.graphics.Canvas(soft).drawRect(x0.toFloat(), y0.toFloat(), (xy[0] + pv.width).toFloat(), (xy[1] + pv.height).toFloat(), android.graphics.Paint().apply { color = c })
+                val soft = b.copy(Bitmap.Config.ARGB_8888, true)
+                b.recycle()
+                if (pillBox != null && pillBox.intersect(0, 0, soft.width, soft.height)) {
+                    val c = soft.getPixel(pillBox.left, (pillBox.top - 4).coerceAtLeast(0))
+                    android.graphics.Canvas(soft).drawRect(pillBox, android.graphics.Paint().apply { color = c })
                 }
                 main.post { cb(soft) }
             }
@@ -882,65 +1039,76 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
 
     private val watch = object : Runnable {
         override fun run() {
-            val v = view
-            if (!watching || v == null || v.mode != OverlayView.Mode.PASS) { watching = false; return }
+            val v = view ?: return
+            if (!watching || v.mode != OverlayView.Mode.PASS) return
             val now = SystemClock.uptimeMillis()
-            // Whole-screen mode can only look while our text is hidden; otherwise wait for a touch or scroll event.
-            if (v.patchesShown()) { main.postDelayed(this, 400); return }
-            // Still scrolling according to the app: do not waste a look.
-            if (now - lastScrollAt < 260) { main.postDelayed(this, 265 - (now - lastScrollAt)); return }
-            if (now - lastShotAt < 340) { main.postDelayed(this, 345 - (now - lastShotAt)); return }
-            if (translating) { main.postDelayed(this, 150); return }
-            look { bmp ->
+            if (windowRetryAt != 0L && now >= windowRetryAt) {
+                windowMode = true; windowRetryAt = 0L; windowFails = 0; lastSig = null
+            }
+            if (looking != null || translating || shooting || (!windowMode && (v.patchCount > 0 || v.trOn && v.collectingPatches))) {
+                soon(200); return
+            }
+            val delay = 345 - (now - lastShotAt)
+            if (delay > 0) { soon(delay); return }
+
+            looking = v
+            val clean = windowMode
+            val sampleStarted = now
+            look(v) { bmp ->
+                looking = null
                 if (view !== v || !watching) { bmp?.recycle(); return@look }
-                if (bmp == null) { main.postDelayed(this, 250); return@look }
+                if (bmp == null) { soon(380); return@look }
+                if (!clean && v.patchCount > 0) { bmp.recycle(); soon(380); return@look }
+
                 val t = SystemClock.uptimeMillis()
                 val sig = signature(bmp)
-                val moving = lastSig?.let { !same(it, sig) } ?: false
-                val rested = lastSig?.let { same(it, sig) } ?: false
-                val asShown = shownSig?.let { same(it, sig) } ?: false
+                val previous = lastSig
+                val rested = previous != null && same(previous, sig)
+                val unchanged = (adoptNext || clean == shownFromWindow) && shownSig?.let { same(it, sig) } == true
                 lastSig = sig
-                if (moving) { movedAt = t; if (unstableSince == 0L) unstableSince = t }
-                // Scroll events that have just stopped are as good as a second equal look.
-                val scrollStopped = t - lastScrollAt in 260..1500
-                // Content that never rests (video, animation) still gets translated every few seconds.
-                val restless = unstableSince != 0L && t - unstableSince > 2500
-                if (asShown) {
+                if (unchanged) {
+                    if (adoptNext) Dbg.log("live page matches frozen translation")
+                    adoptNext = false
+                    shownFromWindow = clean
+                    shownSig = sig
                     unstableSince = 0L
-                    if (!v.patchesShown()) { Dbg.log("content unchanged, showing translations again"); v.showPatches() }
-                    bmp.recycle()
-                    main.postDelayed(this, 380)
-                } else {
-                    if (v.patchesShown()) { Dbg.log("content changed, hiding translations"); v.hidePatches(); if (unstableSince == 0L) unstableSince = t }
-                    if (rested || scrollStopped || restless) {
-                        unstableSince = 0L
+                    bmp.recycle(); soon(380); return@look
+                }
+                // Reposition verified matches as soon as a capture shows a scroll. Keep the current set
+                // when there is no reliable offset, then replace it after the next OCR and translation.
+                val tracking = follower?.out?.let { it.live && it.list === v.patchSet && it.moved() } == true
+                if (lastScrollAt > sampleStarted) { bmp.recycle(); soon(190); return@look }
+                if (!tracking || t - lastScrollAt >= 260) follow(v, bmp)
+                if (unstableSince == 0L) unstableSince = t
+                val scrollStopped = t - lastScrollAt in 260..1500
+                if (!adoptNext && !rested && !scrollStopped && t - unstableSince <= 2500) {
+                    bmp.recycle(); soon(345); return@look
+                }
+
+                adoptNext = false; unstableSince = 0L
+                translating = true
+                val gen = ++frame
+                val readAt = t
+                Dbg.log("reading changed content (${if (clean) "window" else "screen"} capture)")
+                ocr.run(bmp, v.width / bmp.width.toFloat(), v.height / bmp.height.toFloat(), v.ocrModel) { r ->
+                    if (view !== v || !watching) { bmp.recycle(); return@run }
+                    translating = false
+                    if (r.valid && lastScrollAt <= readAt && frame == gen) {
                         shownSig = sig
-                        translating = true
-                        val t0 = SystemClock.uptimeMillis()
-                        Dbg.log("content at rest ${t0 - movedAt} ms after last movement (screen capture, ${if (scrollStopped) "events" else if (rested) "two equal looks" else "timeout"})")
-                        val kept = follow(v, bmp)
-                        if (kept > 0) Dbg.log("translations back on screen ${SystemClock.uptimeMillis() - movedAt} ms after content stopped moving (moved with the page)")
-                        val gen = frame
-                        Ocr.run(bmp, v.width / bmp.width.toFloat(), v.height / bmp.height.toFloat(), probe = false,
-                            late = { r ->
-                                // A script that was not on the screen before (the page scrolled into Japanese, Korean...):
-                                // the fuller reading replaces the first one, unless the page has moved on.
-                                if (view === v && watching && lastScrollAt <= t0 && frame == gen + 1) { Dbg.log("ocr: more scripts found, ${r.blocks.size} blocks"); translateFrame(v, r, bmp) }
-                            }) { r ->
-                            translating = false
-                            Dbg.log("ocr ${SystemClock.uptimeMillis() - t0} ms, ${r.blocks.size} blocks")
-                            // Scrolled on while reading: this picture is already stale, look again instead of showing it.
-                            if (lastScrollAt > t0) { Dbg.log("scrolled again during OCR, discarding"); shownSig = null }
-                            else if (view === v && watching) translateFrame(v, r, bmp)
-                        }
+                        shownFromWindow = clean
+                        v.showOcrFallback(r)
+                        translateFrame(v, r, bmp, readAt)
+                        OcrPrompt.suggest(service, r.suggestedPacks) { shownSig = null }
                     } else bmp.recycle()
-                    main.postDelayed(this, 345)
+                    soon(345)
                 }
             }
         }
     }
 
-    private val sigW = 72; private val sigH = 156
+    private val sigW = 144
+    private val sigH = 312
+
     private fun signature(b: Bitmap): IntArray {
         val s = Bitmap.createScaledBitmap(b, sigW, sigH, true)
         val px = IntArray(sigW * sigH)
@@ -949,29 +1117,15 @@ class CircleOverlay(private val service: AccessibilityService) : android.content
         return px
     }
 
-    /** Two looks show the same content if fewer than 0.3 % of the coarse pixels differ noticeably. */
-    private fun same(a: IntArray, b: IntArray): Boolean {
-        var diff = 0
-        // Skipped: status bar rows (clock), the bottom rows (navigation handle, absent from window captures)
-        // and the right edge (fading scrollbar).
-        for (i in sigW * 8 until a.size - sigW * 5) {
-            if (i % sigW >= sigW - 3) continue
-            val x = a[i]; val y = b[i]
-            if (abs((x shr 16 and 255) - (y shr 16 and 255)) + abs((x shr 8 and 255) - (y shr 8 and 255)) + abs((x and 255) - (y and 255)) > 26) diff++
-        }
-        return diff < a.size / 330
-    }
+    private fun same(a: IntArray, b: IntArray): Boolean =
+        Look.sameFrame(a, b, sigW, sigH, top = 16, bottom = 10, right = 5)
 
     fun onAccessibilityEvent(e: AccessibilityEvent) {
         if (view?.mode != OverlayView.Mode.PASS) return
         when (e.eventType) {
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> if (e.packageName != packageName) kick(true)
-            // Many apps (web pages, Compose, Flutter) send no scroll events, but their content reports changes while
-            // it moves. Right after a touch that means "the finger is moving the page": the translations go at once
-            // instead of when the next picture shows it, and the end of the changes is the page coming to rest.
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ->
-                // (Only for 2.5 s after the touch: content that keeps changing by itself, a video, must not keep the translations away.)
-                if (e.packageName != packageName && SystemClock.uptimeMillis() - lastTouch < 2500) kick(true)
+                if (e.packageName != packageName && SystemClock.uptimeMillis() - lastTouch < 2500) kick(false)
             // Our own overlay windows come and go; only other apps' window changes matter.
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> if (e.packageName != packageName) kick(false)
         }

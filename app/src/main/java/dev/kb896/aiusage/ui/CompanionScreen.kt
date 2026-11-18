@@ -18,7 +18,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
+import dev.kb896.aiusage.BuildConfig
 import dev.kb896.aiusage.R
 import dev.kb896.aiusage.data.ConfigStore
 import dev.kb896.aiusage.data.PanelConfig
@@ -35,6 +40,9 @@ import dev.kb896.aiusage.ui.glass.Backdrop
 import dev.kb896.aiusage.ui.glass.Ink
 import dev.kb896.aiusage.ui.glass.UiTheme
 import dev.kb896.aiusage.ui.glass.Unclip
+import dev.kb896.aiusage.update.UpdateApk
+import dev.kb896.aiusage.update.UpdateModel
+import dev.kb896.aiusage.ui.companion.UpdateRows
 import rikka.shizuku.Shizuku
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -64,6 +72,8 @@ class CompanionScreen(
         SETUP("Setup"),
     }
 
+    private val updates = if (UpdateModel.enabled(BuildConfig.DEBUG, activity.packageName))
+        ViewModelProvider(activity)[UpdateModel::class.java] else null
     private val store = ConfigStore(activity)
     val root = FrameLayout(activity)
     private val scroll = ScrollView(activity).apply { isFillViewport = true; clipToPadding = false }
@@ -166,6 +176,21 @@ class CompanionScreen(
         back.isEnabled = page != Page.HOME
         activity.onBackPressedDispatcher.addCallback(activity, back)
         rebuild()
+        updates?.let { model ->
+            activity.lifecycle.addObserver(object : DefaultLifecycleObserver {
+                override fun onResume(lifecycleOwner: LifecycleOwner) {
+                    if (page == Page.ADVANCED) offerInstaller(model)
+                }
+            })
+            activity.lifecycleScope.launch {
+                model.state.collect {
+                    if (page == Page.ADVANCED) {
+                        rebuild()
+                        offerInstaller(model)
+                    }
+                }
+            }
+        }
     }
 
     private fun refreshSetupAccess() {
@@ -191,6 +216,7 @@ class CompanionScreen(
         if (Setup.notificationAccess(activity)) listenerSettingsOpened = false
         model.refresh()
         rebuild()
+        updates?.check()
     }
 
     fun open(next: Page) {
@@ -327,7 +353,7 @@ class CompanionScreen(
         when (action) {
             Onboarding.Action.MANAGER -> fix(CompanionRows.Fix.OPEN_SHIZUKU)
             Onboarding.Action.GUIDE -> start(Intent(Intent.ACTION_VIEW,
-                Uri.parse("https://rear.896.ro/en/guides/shizuku/")), "Could not open the guide")
+                Uri.parse("https://github.com/thedjchi/Shizuku/wiki/Setup")), "Could not open the guide")
             Onboarding.Action.AUTHORIZE -> fix(CompanionRows.Fix.ALLOW_SHIZUKU)
             Onboarding.Action.LISTENER -> if (Setup.notificationAccess(activity)) openListenerSettings() else allowNotifications()
             Onboarding.Action.LOCATION -> askSetupLocation()
@@ -375,10 +401,20 @@ class CompanionScreen(
         header()
         when (page) {
             Page.HOME -> Unit
-            Page.ADVANCED -> AdvancedPage.build(column, this) {
-                fromAdvanced = true
-                setupStep = Onboarding.Step.SHIZUKU
-                open(Page.SETUP)
+            Page.ADVANCED -> {
+                AdvancedPage.build(column, this) {
+                    fromAdvanced = true
+                    setupStep = Onboarding.Step.SHIZUKU
+                    open(Page.SETUP)
+                }
+                updates?.let { model ->
+                    UpdateRows.build(column, model.state.value, { model.check(manual = true) }) {
+                        if (model.apk?.isFile == true) {
+                            model.takePendingInstaller()
+                            openInstaller(model)
+                        } else model.download()
+                    }
+                }
             }
             Page.SETUP -> {
                 val status = graph.bridge.status()
@@ -389,6 +425,26 @@ class CompanionScreen(
             }
         }
         Unclip.tree(column)
+    }
+
+    private fun offerInstaller(model: UpdateModel) {
+        if (activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) && model.takePendingInstaller()) {
+            openInstaller(model)
+        }
+    }
+
+    private fun openInstaller(model: UpdateModel) {
+        val apk = model.apk?.takeIf { it.isFile } ?: return
+        try {
+            if (activity.packageManager.canRequestPackageInstalls()) {
+                activity.startActivity(UpdateApk.installer(activity, apk))
+            } else {
+                activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                    .setData(Uri.fromParts("package", activity.packageName, null)))
+            }
+        } catch (_: Exception) {
+            toast("Could not open Android’s installer")
+        }
     }
 
     /** The page's name over the wallpaper; a sub-page's is also the way back. */

@@ -6,6 +6,106 @@ package dev.kb896.aiusage.circle
  * measures those drawings with the same functions and takes the candidate that comes closest.
  */
 object Look {
+    fun colorDistance(a: Int, b: Int): Int =
+        kotlin.math.abs((a shr 16 and 255) - (b shr 16 and 255)) +
+            kotlin.math.abs((a shr 8 and 255) - (b shr 8 and 255)) +
+            kotlin.math.abs((a and 255) - (b and 255))
+
+    /**
+     * A small changed label should still count on an otherwise static screen. Measure changed texels
+     * per tile, including shifted tiles so a short word can straddle a tile boundary.
+     */
+    fun sameFrame(a: IntArray, b: IntArray, w: Int, h: Int, top: Int, bottom: Int, right: Int): Boolean {
+        val tile = 8
+        val row = (w + tile - 1) / tile + 1
+        val count = IntArray(row * ((h + tile - 1) / tile + 1) * 2)
+        val offset = count.size / 2
+        for (y in top until h - bottom) for (x in 0 until w - right) {
+            val i = y * w + x
+            if (colorDistance(a[i], b[i]) <= 32) continue
+            if (++count[y / tile * row + x / tile] >= 5 ||
+                ++count[offset + (y + tile / 2) / tile * row + (x + tile / 2) / tile] >= 5) return false
+        }
+        return true
+    }
+
+    /** Compare short runs of pixels around the text so a gentle gradient still keeps its colour variation. */
+    fun evenBackground(pixels: IntArray, w: Int, h: Int): Boolean {
+        val maxChannelSpread = 7
+        val low = IntArray(3) { 255 }
+        val high = IntArray(3)
+        val edge = IntArray(9)
+        fun sample(x: Int, y: Int, dx: Int, dy: Int) {
+            for (c in 0..2) {
+                for (i in edge.indices) {
+                    val px = (x + (i - 4) * dx).coerceIn(0, w - 1)
+                    val py = (y + (i - 4) * dy).coerceIn(0, h - 1)
+                    edge[i] = pixels[py * w + px] shr (c * 8) and 255
+                }
+                edge.sort()
+                low[c] = minOf(low[c], edge[4])
+                high[c] = maxOf(high[c], edge[4])
+            }
+        }
+        for (i in 0..4) {
+            val x = i * (w - 1) / 4
+            val y = i * (h - 1) / 4
+            sample(x, 0, 1, 0)
+            sample(x, h - 1, 1, 0)
+            sample(0, y, 0, 1)
+            sample(w - 1, y, 0, 1)
+        }
+        return low.indices.all { high[it] - low[it] <= maxChannelSpread }
+    }
+
+    /** Use the most frequent high-contrast glyph cores, ignoring isolated highlights and antialiasing. */
+    fun inkColor(pixels: IntArray, distances: IntArray): Int? {
+        val contrast = IntArray(766)
+        var inkCount = 0
+        for (d in distances) if (d >= 18) { contrast[d]++; inkCount++ }
+        if (inkCount < 4) return null
+        var count = 0
+        var peak = 765
+        while (peak > 18 && count + contrast[peak] < maxOf(4, inkCount / 8)) count += contrast[peak--]
+        val threshold = maxOf(18, (peak * 0.78f).toInt())
+        val bins = IntArray(4096)
+        fun bin(c: Int) = (c shr 12 and 0xf00) or (c shr 8 and 0xf0) or (c shr 4 and 0xf)
+        for (i in pixels.indices) if (distances[i] >= threshold) bins[bin(pixels[i])]++
+        val best = bins.indices.maxByOrNull { bins[it] } ?: return null
+        var r = 0L; var g = 0L; var b = 0L; var n = 0
+        for (i in pixels.indices) {
+            val c = pixels[i]
+            if (distances[i] < threshold || bin(c) != best) continue
+            r += c shr 16 and 255; g += c shr 8 and 255; b += c and 255; n++
+        }
+        if (n == 0) return null
+        return (0xff shl 24) or ((r / n).toInt() shl 16) or ((g / n).toInt() shl 8) or (b / n).toInt()
+    }
+
+    /** Blend measured glyph height with a reliable lowercase x-height estimate. */
+    fun fontSize(glyph: Float, referenceGlyph: Float, xHeight: Float, referenceX: Float): Float {
+        val size = glyph * 100f / referenceGlyph.coerceAtLeast(1f)
+        if (xHeight <= 0f || referenceX <= 0f) return size
+        val fromX = xHeight * 100f / referenceX
+        return if (fromX in size * 0.85f..size * 1.15f) (size + fromX) / 2f else size
+    }
+
+    /** The largest size that fits, retaining the original size whenever possible. */
+    fun fitScale(fits: (Float) -> Boolean): Float {
+        if (fits(1f)) return 1f
+        var lo = 0.60f
+        var hi = 1f
+        if (!fits(lo)) return lo
+        repeat(8) {
+            val mid = (lo + hi) / 2f
+            if (fits(mid)) lo = mid else hi = mid
+        }
+        return lo
+    }
+
+    fun letterSpacing(inkWidth: Float, expectedWidth: Float, size: Float, gaps: Int): Float =
+        if (gaps < 4 || size <= 0f) 0f else ((inkWidth - expectedWidth) / (size * gaps)).coerceIn(-0.035f, 0.06f)
+
     /** Font weights tried, lightest first. */
     val WEIGHTS = listOf(300, 400, 500, 600, 700, 800)
     const val BINS = 96

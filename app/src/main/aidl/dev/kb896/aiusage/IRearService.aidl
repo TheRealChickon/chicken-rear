@@ -191,17 +191,15 @@ interface IRearService {
     // is 1), and switching it. Named for that one key, nothing general; written only on a tap.
     boolean xiaomiNoticeText() = 40;
     boolean setXiaomiNoticeText(boolean on) = 41;
-    // The charging animation over the rear (ShellCharge), as the charger goes in at [level]
-    // percent ([fast]: a fast charger). Through RearShow: not over a banner, not over Xiaomi's
-    // rear camera; compact over a guest of ours. Waits for the rear to light (the app wakes it).
-    void showCharge(int level, boolean fast) = 42;
+    // The charger went in. Full determines the page's brief lifetime; its figure is requested separately.
+    oneway void showCharge(boolean full, boolean fast) = 42;
     // Which way is down for its liquid: the app's gravity sensor, x and y, about 30 a second
     // for the animation's five seconds. oneway, nothing waits on it.
     oneway void chargeTilt(float x, float y) = 43;
     // The charger came out: the animation, if it is up, drains and fades over 400 ms.
     oneway void endCharge() = 44;
     // "Play on the back" from the settings (ShellWake / ShellCharge): [style] is a WakeAnimStyle
-    // name ("EDGE_GLOW") or a charge style at a battery level ("charge:LIQUID:73"), as
+    // name ("EDGE_GLOW") or a charge style ("charge:LIQUID"), as
     // WakeStyle.encode writes it. A wake style plays now on a lit back, else on the next wake
     // within 1.5 s (the app wakes it right after). Never over Xiaomi's rear camera.
     void playWake(String style) = 45;
@@ -233,7 +231,7 @@ interface IRearService {
      */
     oneway void setLive(in Bundle live) = 51;
 
-    // The battery while the charging page is up (ShellCharge.detail): "level" (int), and, where a real source
+    // A fresh app battery sample while the charging page is up: "sampledAt" (elapsedRealtimeNanos), "level" (int), and, where a real source
     // gives it, "fraction" of a percent (float, under 0 for unknown) at "at" (uptime) rising by "rate" a second;
     // "kind": what charger, in words.
     oneway void chargeDetail(in Bundle b) = 52;
@@ -284,4 +282,8 @@ interface IRearService {
     // media store to look at it), 2 nothing to do (binned on the back). A high number of its own.
     int claimShot(String name) = 311;
     oneway void setCircleSession(long session, int launcherUid) = 312;
+    // Reconcile charger presence on connection, without playing a fresh plug-in moment or passing a figure.
+    oneway void restoreCharge(boolean plugged, boolean active, boolean fast) = 313;
+    // Renew this client's posture watch and read the shell's current resting decision.
+    boolean restingFaceDown(int client, boolean watch) = 319;
 }

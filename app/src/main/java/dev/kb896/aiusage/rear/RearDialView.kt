@@ -24,6 +24,7 @@ import dev.kb896.aiusage.data.PanelConfig
 import dev.kb896.aiusage.data.Health
 import dev.kb896.aiusage.data.UsageWindow
 import dev.kb896.aiusage.data.WindowKind
+import dev.kb896.aiusage.service.ChargeBattery
 
 /**
  * Draws only — no parsing, no networking, no placement logic. Task 14 adds bars, the
@@ -1687,6 +1688,10 @@ class RearDialView(context: Context) : View(context) {
                 android.content.Intent.ACTION_BATTERY_CHANGED -> {
                     val level = i.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
                     val scale = i.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1)
+                    if (chargeAt != 0L) {
+                        chargeLevel = ChargeBattery.read(this@RearDialView.context).level / 100f
+                        invalidate()
+                    }
                     powerSeen(
                         plugged = i.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) != 0,
                         level = if (level < 0 || scale <= 0) -1 else level * 100 / scale,
@@ -3627,9 +3632,8 @@ class RearDialView(context: Context) : View(context) {
     /** The charging cell's liquid: its moving parts (see LiquidCellPainter.Cell). */
     private val chargeCell = LiquidCellPainter.Cell()
 
-    /** The level the liquid is filling to, and the figure drawn over it. */
-    private var chargeLevel = 0f
-    private var chargePercent = 0
+    /** The level the liquid is filling to, negative until Android provides it. */
+    private var chargeLevel = -1f
 
 
     /**
@@ -3640,11 +3644,9 @@ class RearDialView(context: Context) : View(context) {
      * while one is up restarts it rather than queueing: there is one charger and one
      * answer, and two cells in a row would be the same fact twice.
      */
-    fun showCharging(percent: Int = batteryPercent()) {
-        if (percent < 0) return
+    fun showCharging() {
         keepAwakeFor()
-        chargePercent = percent
-        chargeLevel = percent / 100f
+        chargeLevel = ChargeBattery.read(context).level / 100f
         chargeAt = SystemClock.elapsedRealtime()
         chargeCell.reset()
         invalidate()
@@ -3668,6 +3670,7 @@ class RearDialView(context: Context) : View(context) {
         }
         animating = true
 
+        if (chargeLevel < 0f) return
         val w = ChargeOverlay.width(Panel.WIDTH.toFloat())
         val off = ChargeOverlay.offset(elapsed, w)
         val left = Panel.WIDTH - w + off + ChargeOverlay.MARGIN - ChargeOverlay.RIGHT_INSET
@@ -12069,7 +12072,7 @@ class RearDialView(context: Context) : View(context) {
         pager.settleTo(step.page, frameNowMs)
         // Fired on ENTERING the segment only, or the cell would restart every frame and
         // never fill.
-        if (step.charge) showCharging(DEMO_CHARGE)
+        if (step.charge) showCharging()
         // THE TRACK, pushed through the same door a real one comes in by — so the record
         // crosses and the name rolls over on its wheel exactly as they do for anybody
         // else. A demo that set the fields directly would show the new title already in
@@ -13027,10 +13030,6 @@ class RearDialView(context: Context) : View(context) {
         private const val DEMO_TRACK_MS = 104_000L
         /** Just before its first line, so the lyrics start as the media page comes up. */
         private const val DEMO_TRACK_FROM_MS = 7_500L
-
-        /** A charge worth filming: past the halfway mark, so the cell is visibly full. */
-        private const val DEMO_CHARGE = 68
-
 
         /** The notification page's clock: big, because the page is otherwise empty. */
         private const val CLOCK_SIZE = 92f

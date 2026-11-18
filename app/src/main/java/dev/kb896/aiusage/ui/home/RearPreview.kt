@@ -1,5 +1,9 @@
 package dev.kb896.aiusage.ui.home
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.view.Surface
@@ -39,6 +43,7 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -46,12 +51,14 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import dev.kb896.aiusage.data.ChargeAnimStyle
 import dev.kb896.aiusage.rear.RearGeometry
 import dev.kb896.aiusage.rear.SceneEngine
 import dev.kb896.aiusage.rear.SceneFace
 import dev.kb896.aiusage.rear.ShellCharge
+import dev.kb896.aiusage.service.ChargeBattery
 import java.io.File
 
 /** What the preview is showing: the back as it sits, as it wakes, as the charger goes in, as a notification arrives. */
@@ -469,7 +476,21 @@ private fun ChargeShow(state: PreviewState, onEnded: () -> Unit) {
         while (!over) withFrameMillis { t -> if (startedAt == 0L) startedAt = t; now = t }
         onEnded()
     }
-    val level = (state.look.level.takeIf { it >= 0 } ?: 64) / 100f
+    val context = LocalContext.current
+    var level by remember(context, state.chargeStyle, state.chargePercent) {
+        mutableStateOf(ChargeBattery.read(context).level)
+    }
+    DisposableEffect(context, state.chargeStyle, state.chargePercent) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (context != null) level = ChargeBattery.read(context).level
+            }
+        }
+        ContextCompat.registerReceiver(
+            context, receiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        onDispose { context.unregisterReceiver(receiver) }
+    }
     Canvas(Modifier.fillMaxSize()) {
         val elapsed = (now - startedAt).toFloat()
         scale(size.width / REAR_W, size.height / REAR_H, pivot = Offset.Zero) {

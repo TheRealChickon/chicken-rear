@@ -16,11 +16,10 @@ Selected libraries from `:app:releaseRuntimeClasspath`. All are Apache-2.0 excep
 | AndroidX CameraX (Camera2, lifecycle, view, video, extensions) | 1.4.2 | Apache-2.0 |
 | MapLibre Native for Android, OpenGL | 13.7.1 | BSD-2-Clause, see below |
 | Google Play services location | 21.3.0 | [Android SDK terms](https://developer.android.com/studio/terms) |
-| Google ML Kit Text Recognition (bundled Latin, Chinese, Devanagari, Japanese and Korean models) | 16.0.1 | [ML Kit Terms of Service](https://developers.google.com/ml-kit/terms) |
+| ONNX Runtime for Android (reduced arm64 build) | 1.22.0 | MIT, see below |
 | Google ML Kit Language Identification and Translation | 17.0.6 and 17.0.3 | [ML Kit Terms of Service](https://developers.google.com/ml-kit/terms) |
 | Android Data Transport (API, runtime and CCT backend) | 2.2.1, 2.2.6 and 2.3.3 | Apache-2.0 |
 | Firebase Components and Encoders (including JSON) | 16.1.0, 16.1.0 and 17.1.0 | Apache-2.0 |
-| Android ODML Image | 1.0.0-beta1 | [Android SDK terms](https://developer.android.com/studio/terms) |
 | AndroidX Media3 (transformer, effect, common and their dependencies) | 1.11.1 | Apache-2.0 |
 | Kotlin standard library, kotlinx.coroutines, kotlinx.serialization | 2.3.10, 1.9.0, 1.7.3 | Apache-2.0 |
 | OkHttp, Okio (Square) | 4.12.0, 3.6.0 | Apache-2.0 |
@@ -35,11 +34,24 @@ the one in [LICENSE](LICENSE). The Apache License 2.0 is in `assets/licenses/Apa
 
 ### Google ML Kit
 
-The ML Kit libraries, their Google SDK dependencies and the bundled recognition models carry
-their upstream terms. The ML Kit terms incorporate the
+ML Kit Language Identification and Translation and their Google SDK dependencies carry their
+upstream terms. The app can download Google’s translation models. The ML Kit terms incorporate the
 [Google APIs Terms of Service](https://developers.google.com/terms). On-device translations
 are powered by Google Translate. See the
 [ML Kit Translation usage and attribution guidelines](https://developers.google.com/ml-kit/language/translation/translation-terms).
+
+### ONNX Runtime and PaddleOCR
+
+- [ONNX Runtime 1.22.0](https://github.com/microsoft/onnxruntime/tree/v1.22.0) is copyright
+  Microsoft Corporation and licensed under MIT. The APK includes a reduced arm64 runtime for OCR.
+  Its [MIT licence](app/src/main/assets/licenses/ONNXRuntime.txt) and
+  [third-party notices](app/src/main/assets/licenses/ONNXRuntime-ThirdParty.txt) are included.
+- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR), from the PaddlePaddle authors, is
+  licensed under Apache-2.0. The app includes character dictionaries and a weight-free ONNX graph
+  for Kannada. The PP-OCRv5 and Kannada PP-OCRv3 weights are optional downloads from
+  [PaddlePaddle’s official model repositories](https://huggingface.co/PaddlePaddle) or PaddlePaddle’s
+  Baidu Object Storage distribution. The [PaddleOCR licence](app/src/main/assets/licenses/PaddleOCR.txt)
+  covers the models and dictionaries.
 
 ### MapLibre Native licence
 
@@ -109,7 +121,8 @@ If you own it and want it removed, open an issue.
 ## In the APK
 
 These notices travel with the app: `assets/licenses/` in the APK holds this file, `LICENSE`, the
-Apache License 2.0 and the two fonts' SIL Open Font License texts.
+Apache License 2.0, the ONNX Runtime and PaddleOCR licence files, the ONNX Runtime third-party
+notices, and the two fonts' SIL Open Font License texts.
 
 ## Data
 

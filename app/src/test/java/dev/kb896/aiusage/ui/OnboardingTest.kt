@@ -2,6 +2,8 @@ package dev.kb896.aiusage.ui
 
 import android.Manifest
 import android.app.ActivityManager
+import android.app.AlertDialog
+import android.os.Looper
 import android.app.Application
 import android.app.NotificationManager
 import android.content.ComponentName
@@ -31,6 +33,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowSettings
+import org.robolectric.shadows.ShadowAlertDialog
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
@@ -62,6 +65,14 @@ class OnboardingTest {
         assertTrue("Chicken Rear · Allowed" in words(step, true, true))
     }
 
+    @Test fun getShizukuOpensTheRecommendedFork() {
+        assertTrue(words(Onboarding.Step.SHIZUKU).any { "start on boot and automatic restarts" in it })
+        val screen = screen()
+        screen.tap("Get Shizuku")
+        assertEquals("https://github.com/thedjchi/Shizuku/releases",
+            shadowOf(screen.activity).nextStartedActivity.data.toString())
+    }
+
     @Test fun accessReflectsTheListenerAndEachOptionalPermission() {
         val step = Onboarding.Step.NOTIFICATIONS
         assertTrue("Not allowed" in words(step))
@@ -81,6 +92,28 @@ class OnboardingTest {
         ShadowSettings.setCanDrawOverlays(true)
         assertTrue("Precise, all the time" in optional())
         assertEquals(2, optional().count { it == "Allowed" })
+    }
+
+    @Test fun optionalStepOffersBothLanguageChoicesAndPricesEverythingBeforeDownload() {
+        val screen = screen()
+        screen.tap("Continue")
+        screen.tap("Continue")
+        screen.tap("Circle to Search language packs")
+        val choices = ShadowAlertDialog.getLatestAlertDialog()
+        assertEquals(0, choices.listView.checkedItemPosition)
+        assertEquals(listOf("Only my languages", "Everything"),
+            (0 until choices.listView.count).map { choices.listView.adapter.getItem(it).toString() })
+        choices.listView.performItemClick(null, 1, choices.listView.adapter.getItemId(1))
+        shadowOf(Looper.getMainLooper()).idle()
+        val price = ShadowAlertDialog.getLatestAlertDialog()
+        assertTrue(price.findViewById<TextView>(android.R.id.message).text.contains("1.87 GB total"))
+        assertTrue(price.findViewById<TextView>(android.R.id.message).text.contains("free"))
+        val wifi = price.window!!.decorView.labels().filterIsInstance<android.widget.CheckBox>().single()
+        assertEquals("Wi-Fi only", wifi.text)
+        assertTrue(wifi.isChecked)
+        price.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(dev.kb896.aiusage.circle.LanguageDownloads.pending(screen.activity))
     }
 
     @Test fun batteryShowsOnlyReadableAndroidState() {
@@ -111,13 +144,13 @@ class OnboardingTest {
         assertTrue(next.root.labels().any { it.text == "Setup guide" })
     }
 
-    @Test fun guideOpensTheReadmeLinkAndRecreationKeepsTheStep() {
+    @Test fun guideOpensTheForkWikiAndRecreationKeepsTheStep() {
         val controller = Robolectric.buildActivity(ComponentActivity::class.java).create()
         val first = controller.get()
         val before = CompanionScreen(first, Graph.of(first)) {}
         first.setContentView(before.root)
         before.tap("Shizuku guide")
-        assertEquals("https://rear.896.ro/en/guides/shizuku/",
+        assertEquals("https://github.com/thedjchi/Shizuku/wiki/Setup",
             shadowOf(before.activity).nextStartedActivity.dataString)
         before.tap("Continue")
         before.tap("Continue")

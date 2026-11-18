@@ -6,9 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-/**
- * The pin's glass takes ONE picture of the screen per pin through an accessibility service that can do nothing else.
- */
+/** The pin's glass uses one screenshot. Interactive window retrieval belongs to Circle translation. */
 class PinGlassTest {
     @Test fun `a picture is asked for only with the service on, and not twice within a second`() {
         assertFalse("off", PinGlassService.mayShoot(on = false, now = 10_000L, last = 0L))
@@ -18,12 +16,16 @@ class PinGlassTest {
         assertTrue("a second later", PinGlassService.mayShoot(on = true, now = 11_000L, last = 10_000L))
     }
 
-    @Test fun `the service asks the phone for the picture and for nothing else - no events, no window content, no gestures, no keys`() {
+    @Test fun `the shared service starts with no events or window flags and grants no gesture or key capability`() {
         val xml = listOf("src/main/res/xml/pin_glass.xml", "app/src/main/res/xml/pin_glass.xml").map(::File).first { it.isFile }.readText()
         fun attr(name: String) = Regex("""android:$name="([^"]*)"""").find(xml)?.groupValues?.get(1)
         assertEquals("true", attr("canTakeScreenshot"))
         assertEquals("no events at all", "", attr("accessibilityEventTypes"))
-        assertEquals("false", attr("canRetrieveWindowContent"))
+        assertEquals("Circle translation can request the foreground application window", "true", attr("canRetrieveWindowContent"))
+        val src = listOf("src/main/java", "app/src/main/java").map(::File).first { it.isDirectory }
+        val glass = File(src, "dev/kb896/aiusage/service/PinGlassService.kt").readText()
+        for (windowAccess in listOf("FLAG_RETRIEVE_INTERACTIVE_WINDOWS", "windowsOnAllDisplays", "takeScreenshotOfWindow", "rootInActiveWindow"))
+            assertFalse("the pin's service code does not use $windowAccess", glass.contains(windowAccess))
         for (never in listOf("canPerformGestures", "canRequestFilterKeyEvents", "canRequestTouchExplorationMode", "canControlMagnification", "canRequestFingerprintGestures", "accessibilityFlags", "packageNames"))
             assertEquals("$never is not asked for", null, attr(never))
     }

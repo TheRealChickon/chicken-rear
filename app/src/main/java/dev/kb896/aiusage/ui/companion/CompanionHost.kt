@@ -1,9 +1,6 @@
 package dev.kb896.aiusage.ui.companion
 
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.os.BatteryManager
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
@@ -11,7 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
 import dev.kb896.aiusage.data.PanelConfig
 import dev.kb896.aiusage.rear.WakeStyle
-import dev.kb896.aiusage.service.ChargeLevel
+import dev.kb896.aiusage.service.ChargeBattery
 import dev.kb896.aiusage.service.Graph
 import dev.kb896.aiusage.ui.CompanionRows
 import dev.kb896.aiusage.ui.Readiness
@@ -81,12 +78,6 @@ object CompanionUi {
         }
     }
 
-    /** The battery's percent now, from the sticky ACTION_BATTERY_CHANGED; 50 when it does not say. */
-    fun batteryPercent(context: Context): Int {
-        val i = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        return ChargeLevel.percent(
-            i?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1,
-            i?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1,
-        ) ?: 50
-    }
+    /** The battery's percent now, or -1 while Android has no reading. */
+    fun batteryPercent(context: Context): Int = ChargeBattery.read(context).level
 }

@@ -193,7 +193,6 @@ class RearActivity : Activity() {
 
         /** Show the charging cell, optionally at a stated level rather than the real one. */
         const val ACTION_CHARGE = "dev.kb896.aiusage.CHARGE"
-        const val EXTRA_CHARGE_PERCENT = "percent"
 
         /**
          * The panel lit itself, so refuse input until somebody proves they meant it.
@@ -413,13 +412,8 @@ class RearActivity : Activity() {
             // dispatching on action.
             when (intent?.action) {
                 ACTION_FINISH -> finish()
-                // Firing the charging cell by hand. The real trigger is the charger
-                // going in, which is awkward to arrange on demand and impossible to
-                // arrange at a chosen battery level — see tools/charge.sh.
-                ACTION_CHARGE -> dial.showCharging(
-                    intent.getIntExtra(EXTRA_CHARGE_PERCENT, -1)
-                        .let { if (it in 0..100) it else -1 },
-                )
+                // A manual preview, at the same current level as a charger-triggered show.
+                ACTION_CHARGE -> dial.showCharging()
                 // Also the guard said again: the app process asking may be a new one, which
                 // starts unguarded (ShizukuBridge) and would otherwise never hear it — a
                 // pocket-locked panel would then open the shell's sheet. Said at once from the
@@ -722,10 +716,6 @@ class RearActivity : Activity() {
             dial.weather = decoded.weather
             // The switch may have just been thrown either way: on has to take the hold
             // back immediately, off has to start a countdown that was never running.
-            // The table lights' switch, thrown either way: stop watching, or start again if the
-            // panel is up (tableWatch checks the switch itself).
-            if (!wantsTable(decoded.config)) tableWatch(false)
-            else if (!tableWatching && panelResumed) tableWatch(true)
             if (!decoded.config.showTableLights && dial.tableGlow) dial.tableGlow = false
             // Camera mode switched off while the camera is open: back to what it was now.
             if (!decoded.config.cameraLight && cameraMode.state != CameraMode.State.OFF) leaveCamera()
@@ -1243,50 +1233,7 @@ class RearActivity : Activity() {
         Log.i(TAG, "always-on: unlocked — the full panel is back")
     }
 
-    // ---- the table: gravity says the phone lies flat on its face, rear display up ----
-    private val sensors by lazy { getSystemService(Context.SENSOR_SERVICE) as android.hardware.SensorManager }
-    private val gravitySensor: android.hardware.Sensor? by lazy {
-        sensors.getDefaultSensor(android.hardware.Sensor.TYPE_GRAVITY)
-            ?: sensors.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER)
-    }
-    private var tableWatching = false
-    /** The settle rule, shared with the poll service's watch (TableWatch). */
-    private val faceDown = FaceDown()
-    private val tableListener = object : android.hardware.SensorEventListener {
-        override fun onSensorChanged(e: android.hardware.SensorEvent) {
-            when (faceDown.reading(e.values[0], e.values[1], e.values[2], SystemClock.uptimeMillis())) {
-                true -> table(true)
-                false -> table(false)
-                null -> Unit
-            }
-        }
-        override fun onAccuracyChanged(sensor: android.hardware.Sensor?, accuracy: Int) = Unit
-    }
-    /** Anything that cares whether the phone is on its face: the lights, the dim, a clip that plays there. */
-    private fun wantsTable(c: dev.kb896.aiusage.data.PanelConfig): Boolean =
-        c.showTableLights || c.tableMode || c.video.playOnTable
-
-    private fun tableWatch(asked: Boolean) {
-        // Only while something wants to know — with every such switch off, nothing watches.
-        val on = asked && wantsTable(dial.config)
-        if (on == tableWatching) return
-        val sensor = gravitySensor ?: return
-        tableWatching = on
-        if (on) {
-            // Already told it lies there (by the service's watch, or this one before the dark):
-            // no second settling, and the first reading off the table is the lift.
-            if (onTable) faceDown.assumeDown()
-            sensors.registerListener(tableListener, sensor, android.hardware.SensorManager.SENSOR_DELAY_UI)
-        } else {
-            sensors.unregisterListener(tableListener)
-            faceDown.reset()
-            // The watch stopping is not a lift: still on its face as far as anybody knows. The
-            // service's watch (which goes on in the dark) says when it is lifted, and this one,
-            // started again, hears the lift on its first reading off the table.
-        }
-    }
-
-    /** Lying on its face, settled; or picked up again. From this panel's watch, or the service's (ACTION_TABLE). */
+    /** Resting on its face, or lifted. Supplied by TableWatch (ACTION_TABLE). */
     private var onTable = false
     private fun table(on: Boolean) {
         val was = onTable
@@ -1825,8 +1772,6 @@ class RearActivity : Activity() {
             }
         }
         if (!on) {
-            // Dark: the panel's own table watch stops (the service's goes on and says what changes).
-            tableWatch(false)
             if (sleepStage.dimming) endDim(off = true)
             if (!awaitingDoze) return
             awaitingDoze = false
@@ -1842,7 +1787,6 @@ class RearActivity : Activity() {
         // Lit again after the dim's sleep: no longer paused. The display coming on is what
         // starts the video over (RearDialView.displayAwake), with its frame faded from.
         dial.videoPaused = false
-        tableWatch(true)
         // Every wake after the double tap's sleep, not only the first: a lock that ran out
         // unswiped hands back behind the dark screen, and the tap-to-wake in a pocket after
         // it lit the full panel (DoubleTapSleep.guardsWake). Only a swipe ends it.
@@ -2076,13 +2020,8 @@ class RearActivity : Activity() {
         }
     }
 
-    /** Between onResume and onPause — when the table lights may be watched for. */
-    private var panelResumed = false
-
     override fun onResume() {
         super.onResume()
-        panelResumed = true
-        tableWatch(true)
         armEvictionTimer()
         seedLitEdge()
         announceHoldOnPanel()
@@ -2107,7 +2046,6 @@ class RearActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
-        panelResumed = false
         window.decorView.removeCallbacks(evictIfStranded)
     }
 
@@ -2137,7 +2075,6 @@ class RearActivity : Activity() {
         window.decorView.removeCallbacks(endPeek)
         window.decorView.removeCallbacks(postureTick)
         window.decorView.removeCallbacks(endNoticeHold)
-        tableWatch(false)
         runCatching { audio.removeOnModeChangedListener(callListener) }
         runCatching {
             (getSystemService(Context.DISPLAY_SERVICE)

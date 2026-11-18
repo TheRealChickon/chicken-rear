@@ -62,6 +62,9 @@ object CircleOption {
     fun setEnabled(context: Context, enabled: Boolean) {
         if (!enabled || state(context).available) prefs(context).edit().putBoolean("enabled", enabled).apply()
         refresh(context)
+        if (enabled && current.value.requested) {
+            LanguageDownloadPrompt.choose(context, onLocal = { OcrPrompt.show(context) })
+        }
     }
 
     fun refresh(context: Context, reconnect: Boolean = false) {
@@ -74,6 +77,7 @@ object CircleOption {
         val launcher = uid(context, "com.miui.home")
         bridge.syncCircle(next.available && next.requested, launcher ?: -1, reconnect)
         val applied = next.copy(listening = bridge.circleListening)
+        if (applied.requested && applied.available) OcrModels.check(context)
         PinGlassService.enableCircle(applied.active)
         current.value = applied
     }

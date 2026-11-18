@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.LinearLayout
+import dev.kb896.aiusage.circle.LanguageDownloadPrompt
 import dev.kb896.aiusage.place.PlacePermission
 import dev.kb896.aiusage.ui.companion.CompanionUi
 
@@ -28,7 +29,7 @@ internal object Onboarding {
         when (step) {
             Step.SHIZUKU -> {
                 SettingsRows.note(column, "Put faces, messages and place notes on your rear display.")
-                val panel = card("Shizuku", "Start Shizuku again after every reboot.")
+                val panel = card("Shizuku", "Recommended: thedjchi’s fork adds start on boot and automatic restarts.")
                 val installed = try {
                     c.packageManager.getApplicationInfo(Setup.SHIZUKU_PACKAGE, 0)
                     true
@@ -60,6 +61,7 @@ internal object Onboarding {
                 val overlay = card("Display over other apps", "Show the animation when earbuds connect.")
                 SettingsRows.note(overlay, allowed(Settings.canDrawOverlays(c)))
                 button(overlay, "Overlay permission", Action.OVERLAY)
+                SettingsRows.navigation(column, "Circle to Search language packs") { LanguageDownloadPrompt.choose(c) }
             }
             Step.BATTERY -> {
                 val panel = card("Battery", "HyperOS can freeze Chicken Rear. Choose “No restrictions”.")

@@ -33,6 +33,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import dev.kb896.aiusage.circle.LanguageDownloads
+import dev.kb896.aiusage.circle.LanguageDownloadPrompt
+import dev.kb896.aiusage.circle.OcrPrompt
+import dev.kb896.aiusage.circle.OcrCatalog
+import dev.kb896.aiusage.circle.OcrModel
+import dev.kb896.aiusage.circle.OcrModels
 import dev.kb896.aiusage.circle.CircleOption
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
@@ -506,7 +512,7 @@ class HomeModel(private val host: CompanionHost, private val pickVideo: ((androi
     }
 
     fun playChargeOnBack() =
-        CompanionUi.playOnBack(host, Readiness.Feature.CHARGE, WakeStyle.Preview.Charge(config.chargeStyle, battery))
+        CompanionUi.playOnBack(host, Readiness.Feature.CHARGE, WakeStyle.Preview.Charge(config.chargeStyle))
 
     fun testNotification() {
         if (!config.showNotifications) { toast("Turn Notifications on first"); return }
@@ -1215,7 +1221,77 @@ private fun ThreeFingersHeld(model: HomeModel) {
         Line("Circle to Search") {
             Toggle(circle.available && circle.requested, "Circle to Search", enabled = circle.available) { CircleOption.setEnabled(model.context, it) }
         }
-        Label(circle.hint, size = 13, weight = 450, color = LocalTone.current.ink3)
+        val ocrStatus by OcrModels.status.collectAsState()
+        val downloads by LanguageDownloads.status.collectAsState()
+        var languageChoice by remember { mutableStateOf(LanguageDownloads.choice(model.context)) }
+        LaunchedEffect(downloads.phase) { languageChoice = LanguageDownloads.choice(model.context) }
+        Line("Language packs") {
+            Chip(languageChoice.label) {
+                LanguageDownloadPrompt.choose(model.context, onLocal = { OcrPrompt.show(model.context) }, onChanged = {
+                    languageChoice = LanguageDownloads.choice(model.context)
+                })
+            }
+        }
+        LanguageDownloadPrompt.statusLine(downloads, ocrStatus)?.let {
+            Label(it, size = 13, weight = 450, color = LocalTone.current.ink3)
+        }
+        if (downloads.active || LanguageDownloads.pending(model.context)) {
+            Chip("Everything downloads") { LanguageDownloadPrompt.everything(model.context) }
+        }
+        var ocrModel by remember { mutableStateOf(OcrModels.model(model.context)) }
+        LaunchedEffect(downloads.phase, downloads.detail) { ocrModel = OcrModels.model(model.context) }
+        LaunchedEffect(Unit) { LanguageDownloads.refresh(model.context) }
+        val needsModels = circle.available && circle.requested && !ocrStatus.readyFor(ocrModel)
+        val accurateTask = ocrStatus.task.any { it in OcrCatalog.accuratePacks }
+        if (!downloads.active && !LanguageDownloads.pending(model.context) &&
+            (needsModels || (ocrStatus.busy || ocrStatus.error != null) && !accurateTask)) {
+            Chip(if (ocrStatus.busy && !accurateTask) "Download progress" else "Fast text recognition download") {
+                OcrPrompt.show(model.context)
+            }
+        }
+        Label(if (needsModels) "Text recognition needs a download" else circle.hint, size = 13, weight = 450, color = LocalTone.current.ink3)
+        Label("Model", size = 16, weight = 500)
+        if (downloads.active) {
+            Label(ocrModel.label, size = 13, weight = 450, color = LocalTone.current.ink3)
+        } else {
+            Segmented(OcrModel.entries.map { it.label }, ocrModel.ordinal, modifier = Modifier.padding(top = 8.dp)) { i ->
+                ocrModel = OcrModel.entries[i]
+                OcrModels.selectModel(model.context, ocrModel)
+            }
+        }
+        if (!downloads.active && ocrModel == OcrModel.ACCURATE && ocrStatus.checked) {
+            val missing = OcrCatalog.accurateMissing(ocrStatus.installed)
+            val fastCjk = ocrStatus.installed.any { it.name == "cjk" } && OcrCatalog.detector in ocrStatus.installed
+            val coverage = when {
+                missing.isEmpty() -> "Accurate for Chinese and Japanese."
+                fastCjk -> "Chinese and Japanese use Fast until the Accurate packs are installed."
+                else -> "Install Accurate or the Fast Chinese and Japanese pack to read these scripts."
+            }
+            Label("$coverage Other scripts use Fast.", size = 13, weight = 450, color = LocalTone.current.ink3)
+            if (missing.isNotEmpty() && (!ocrStatus.busy || accurateTask)) {
+                val size = OcrPrompt.mb(missing.sumOf { it.bytes })
+                val label = when {
+                    ocrStatus.busy -> "Accurate download progress"
+                    accurateTask && ocrStatus.error != null -> "Retry Accurate · $size"
+                    else -> "Download Accurate · $size"
+                }
+                Chip(label) { OcrPrompt.accurate(model.context) }
+            }
+        }
+        for (pack in ocrStatus.installed.sortedBy { it.label }) {
+            Line("${pack.label} · ${OcrPrompt.mb(pack.modelBytes)}") {
+                if (!downloads.active && !ocrStatus.busy) Chip("Remove") { OcrModels.remove(model.context, pack) }
+            }
+        }
+        if (!downloads.active && !ocrStatus.busy) {
+            for (pack in ocrStatus.partial.sortedBy { it.label }) {
+                Line(pack.label) {
+                    Chip("Discard partial") { OcrModels.remove(model.context, pack) }
+                }
+            }
+            if (ocrStatus.checked) Chip("Add Fast language pack") { OcrPrompt.picker(model.context) }
+            Chip("Manage translation packs") { LanguageDownloadPrompt.translations(model.context) }
+        }
         if (!circle.serviceEnabled && !circle.standaloneInstalled) Chip("Accessibility") { model.openPinGlass() }
     }
 }

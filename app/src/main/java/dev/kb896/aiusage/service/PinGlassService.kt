@@ -2,6 +2,9 @@ package dev.kb896.aiusage.service
 
 import dev.kb896.aiusage.circle.CircleOption
 import dev.kb896.aiusage.circle.CircleOverlay
+import dev.kb896.aiusage.circle.OcrModel
+import dev.kb896.aiusage.circle.OcrPrompt
+import dev.kb896.aiusage.circle.OcrModels
 import dev.kb896.aiusage.circle.NavHold
 import android.accessibilityservice.AccessibilityService
 import android.content.ComponentName
@@ -16,12 +19,17 @@ import android.view.accessibility.AccessibilityEvent
 class PinGlassService : AccessibilityService() {
     private var circle: CircleOverlay? = null
 
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val askForModels = Runnable { if (CircleOption.changes.value.active) OcrPrompt.show(this) }
+
     override fun onServiceConnected() {
         live = this
         CircleOption.refresh(this)
     }
 
     private fun disconnect() {
+        handler.removeCallbacks(askForModels)
+        OcrPrompt.dismiss(this)
         if (live === this) live = null
         circle?.close()
         circle = null
@@ -35,26 +43,45 @@ class PinGlassService : AccessibilityService() {
 
     override fun onDestroy() { disconnect(); super.onDestroy() }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) { if (event != null) circle?.onAccessibilityEvent(event) }
-    override fun onInterrupt() { circle?.cancelArm(); circle?.dismiss() }
+    override fun onInterrupt() {
+        handler.removeCallbacks(askForModels)
+        circle?.cancelArm()
+        circle?.dismiss()
+    }
 
     companion object {
         internal fun enableCircle(on: Boolean) {
             val service = live ?: return
-            if (on && service.circle == null) service.circle = CircleOverlay(service).also { it.start() }
-            if (!on) {
+            // Keep an open search alive across preference changes. Readiness for the new
+            // selection matters when the next gesture is armed.
+            if (!on || !OcrModels.status.value.readyFor(OcrModel.ACCURATE)) {
+                service.handler.removeCallbacks(service.askForModels)
+                if (!on) OcrPrompt.dismiss(service)
                 service.circle?.close()
                 service.circle = null
+            } else if (service.circle == null) {
+                service.circle = CircleOverlay(service).also { it.start() }
             }
         }
 
         internal fun circleWantsAnchor() = live?.circle?.wantsAnchor == true
 
         internal fun circleGesture(action: String, at: Long, onHome: Boolean) {
-            val overlay = live?.circle ?: return
+            val service = live ?: return
+            if (action == NavHold.CANCEL || action == NavHold.PREPARE) service.handler.removeCallbacks(service.askForModels)
+            val overlay = service.circle
             when (action) {
-                NavHold.PREPARE -> overlay.prepare()
-                NavHold.ARM -> overlay.arm(at, onHome)
-                NavHold.CANCEL -> overlay.cancelArm()
+                NavHold.PREPARE -> overlay?.prepare()
+                NavHold.ARM -> {
+                    val model = OcrModels.model(service)
+                    if (overlay != null && OcrModels.status.value.readyFor(model)) {
+                        overlay.arm(at, onHome, model)
+                    } else if (CircleOption.changes.value.active) {
+                        service.handler.removeCallbacks(service.askForModels)
+                        service.handler.postAtTime(service.askForModels, at)
+                    }
+                }
+                NavHold.CANCEL -> overlay?.cancelArm()
             }
         }
 

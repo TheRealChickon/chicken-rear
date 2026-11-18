@@ -314,6 +314,10 @@
         </service>
 
         <service
+            android:name=".circle.LanguageDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <service
             android:name=".service.UsagePollService"
             android:exported="false"
             android:foregroundServiceType="specialUse">

@@ -168,25 +168,24 @@ object WakeStyle {
     /** How late the first frame may be after the wake is seen; later, it is skipped, not started late. */
     const val FIRST_FRAME_MS = 120L
 
-    /** A "Play on the back" (IRearService.playWake): a wake style, or a charge style at a level. */
+    /** A "Play on the back" (IRearService.playWake): a wake style, or a charge style with a fresh battery reading. */
     sealed class Preview {
         data class Wake(val style: WakeAnimStyle) : Preview()
-        data class Charge(val style: ChargeAnimStyle, val level: Int) : Preview()
+        data class Charge(val style: ChargeAnimStyle) : Preview()
     }
 
-    /** "EDGE_GLOW" or "charge:LIQUID:73" (style, battery percent), as [encode] writes them; null for anything else. */
+    /** "EDGE_GLOW" or "charge:LIQUID", as [encode] writes them; null for anything else. */
     fun parsePreview(s: String?): Preview? {
         if (s == null) return null
         val parts = s.split(':')
         if (parts.size == 1) return WakeAnimStyle.entries.firstOrNull { it.name == parts[0] }?.let { Preview.Wake(it) }
-        if (parts.size != 3 || parts[0] != "charge") return null
+        if (parts.size != 2 || parts[0] != "charge") return null
         val style = ChargeAnimStyle.entries.firstOrNull { it.name == parts[1] } ?: return null
-        val level = parts[2].toIntOrNull()?.takeIf { it in 0..100 } ?: return null
-        return Preview.Charge(style, level)
+        return Preview.Charge(style)
     }
 
     fun encode(p: Preview): String = when (p) {
         is Preview.Wake -> p.style.name
-        is Preview.Charge -> "charge:${p.style.name}:${p.level.coerceIn(0, 100)}"
+        is Preview.Charge -> "charge:${p.style.name}"
     }
 }

@@ -12,6 +12,8 @@ import dev.kb896.aiusage.circle.CircleWatch
 import dev.kb896.aiusage.IRearEvents
 import dev.kb896.aiusage.IRearService
 import dev.kb896.aiusage.Panel
+import dev.kb896.aiusage.service.ChargeBattery
+import dev.kb896.aiusage.service.ChargeState
 import rikka.shizuku.Shizuku
 
 class ShizukuBridge(private val context: Context) {
@@ -84,7 +86,7 @@ class ShizukuBridge(private val context: Context) {
 
     private val args by lazy {
         Shizuku.UserServiceArgs(ComponentName(context.packageName, RearUserService::class.java.name))
-            .daemon(false).processNameSuffix("rear").debuggable(false).version(2)
+            .daemon(false).processNameSuffix("rear").debuggable(false).version(3)
     }
 
     private val connection = object : ServiceConnection {
@@ -122,6 +124,11 @@ class ShizukuBridge(private val context: Context) {
             if (cameraInUse) runCatching { service?.setCameraInUse(true) }
             // And knows no battery: the scene's percent.
             battery?.let { (level, charging) -> runCatching { service?.setBattery(level, charging) } }
+            val current = ChargeBattery.read(context)
+            current.plugged?.let { plugged ->
+                val active = plugged && current.state != ChargeState.Is.FULL
+                runCatching { service?.restoreCharge(plugged, active, current.fast) }
+            }
             ambient?.let { (lux, source) -> runCatching { service?.setAmbient(lux, source) } }
             dots?.let { d -> runCatching { service?.setDots(d) } }
             stay?.let { (level, why) -> runCatching { service?.setStay(level, why) } }
@@ -855,18 +862,16 @@ class ShizukuBridge(private val context: Context) {
             .onFailure { Log.w(TAG, "cameraOnRear failed: ${it.message}") }.getOrNull()
     }
 
-    /**
-     * The charging animation over Xiaomi's rear (IRearService.showCharge, ShellCharge): the charger
-     * went in at [level] percent, [fast] or not. Binds and waits for the shell if it has to (a new
-     * app process, a charger as the phone starts): blocking, off the main thread. False if it
-     * could not be asked.
-     */
-    fun showCharge(level: Int, fast: Boolean): Boolean {
-        val svc = awaitService(CHARGE_BIND_MS) ?: return false
-        return runCatching { svc.showCharge(level, fast); true }
+    /** The charger went in. Oneway; the caller has already waited for the shell. */
+    fun showCharge(full: Boolean, fast: Boolean): Boolean {
+        val svc = service ?: return false
+        return runCatching { svc.showCharge(full, fast); true }
             .onFailure { Log.w(TAG, "showCharge failed: ${it.message}"); if (it is android.os.DeadObjectException) service = null }
             .getOrDefault(false)
     }
+
+    /** Main-thread enrichment from the battery watcher while it is running. */
+    internal var chargeDetailFor: ((ChargeBattery.Snapshot) -> android.os.Bundle)? = null
 
     /** The battery as it is, for the charging page while it is up. Oneway; never binds. */
     fun chargeDetail(b: android.os.Bundle) {
@@ -1002,6 +1007,11 @@ class ShizukuBridge(private val context: Context) {
      * the call lands. Blocking, like [pocketSleep].
      */
     /** Since the last touch on the back, or null: unbound, an older shell, or no touch read yet. */
+    fun restingFaceDown(client: Int, watch: Boolean): Boolean =
+        runCatching { service?.restingFaceDown(client, watch) }.getOrNull() == true
+
+    var onRestingFaceDownChanged: () -> Unit = {}
+
     fun msSinceRearTouch(): Long? =
         runCatching { service?.msSinceRearTouch() }.getOrNull()?.takeIf { it >= 0 }
 
@@ -1167,6 +1177,15 @@ class ShizukuBridge(private val context: Context) {
     }
 
     private val events = object : IRearEvents.Stub() {
+        override fun onChargeReading() {
+            val uid = android.os.Binder.getCallingUid()
+            if (uid != android.os.Process.SHELL_UID && uid != android.os.Process.ROOT_UID) return
+            mainHandler.post {
+                val battery = ChargeBattery.read(context)
+                chargeDetail(chargeDetailFor?.invoke(battery) ?: battery.message())
+            }
+        }
+
         override fun onCircleGesture(session: Long, action: String?, uptime: Long, onHome: Boolean) {
             if (android.os.Binder.getCallingUid() != android.os.Process.SHELL_UID || action == null) return
             mainHandler.post {
@@ -1305,6 +1324,7 @@ class ShizukuBridge(private val context: Context) {
 
         override fun onRearWoke() { mainHandler.post { this@ShizukuBridge.onRearWoke() } }
 
+        override fun onRestingFaceDownChanged() { mainHandler.post { this@ShizukuBridge.onRestingFaceDownChanged() } }
         override fun onRearTouch() { mainHandler.post { this@ShizukuBridge.onRearTouch() } }
 
         override fun onWokenByHand() {

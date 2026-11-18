@@ -26,11 +26,13 @@ import dev.kb896.aiusage.rear.RearActivity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The engine: polls both accounts on a display-aware cadence (Cadence.kt) and pushes
@@ -158,6 +160,7 @@ class UsagePollService : Service() {
             // Pocket mode hears every change, and keeps only the power (PocketMode.lit).
             pocket?.sync()
             val change = panelPower.see(panelOn())
+            if (change == PanelPower.Change.WOKE || change == PanelPower.Change.WENT_DARK) table?.sync()
             if (change == PanelPower.Change.WENT_DARK) rearWentOffAt = android.os.SystemClock.elapsedRealtime()
             if (change != PanelPower.Change.WOKE) return
             // The back lit while the double tap's latch is set: every automatic wake is declined
@@ -252,7 +255,16 @@ class UsagePollService : Service() {
         }, "pin-pictures-sweep").apply { isDaemon = true; start() }
         // The pinned apps' icons and names go to the shell: now, and on every config write.
         val loader = PortalAppsLoader(this) { app.bridge.setPortalApps(it) }.also { portalApps = it }
-        stopConfigWatch = ConfigStore(this).listen { loader.refresh(); pocket?.setSwitch(config().pocketMode); config().let { table?.setConfig(it.tableMode, it.tableChargingOnly, it.offOnBack, liftWakes(it)); camera?.setSwitch(it.cameraLight) }; stayOn?.sync(); syncDots() }
+        stopConfigWatch = ConfigStore(this).listen {
+            val c = config()
+            loader.refresh()
+            pocket?.setSwitch(c.pocketMode)
+            table?.setConfig(c.tableMode, c.tableChargingOnly, c.offOnBack, liftWakes(c),
+                panelWantsTable = !c.companion && (c.showTableLights || c.video.playOnTable))
+            camera?.setSwitch(c.cameraLight)
+            stayOn?.sync()
+            syncDots()
+        }
         ContextCompat.registerReceiver(this, portalAppsReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
             addAction(Intent.ACTION_PACKAGE_REMOVED)
@@ -297,8 +309,10 @@ class UsagePollService : Service() {
         panelPower = PanelPower(on = panelOn())
         pocket = PocketWatch(this, app.bridge, onPocketChanged = { table?.sync() }).also { it.setSwitch(config().pocketMode); it.sync() }
         table = TableWatch(this, app.bridge).also { w ->
-            config().let { w.setConfig(it.tableMode, it.tableChargingOnly, it.offOnBack, liftWakes(it)) }
-            // A panel that outlived the last process may hold its "on its back": put right.
+            val c = config()
+            w.setConfig(c.tableMode, c.tableChargingOnly, c.offOnBack, liftWakes(c),
+                panelWantsTable = !c.companion && (c.showTableLights || c.video.playOnTable))
+            // A panel that outlived the last process may still show its old posture.
             w.restateAfterStart()
         }
         camera = CameraWatch(this, app.bridge).also { it.setSwitch(config().cameraLight); it.start() }
@@ -322,6 +336,7 @@ class UsagePollService : Service() {
             }
         }
         // The battery for the scene's percent on the back: sticky, so the first reading comes at once.
+        app.bridge.chargeDetailFor = { battery -> battery.message(preciseReading(battery), chargeKind) }
         ContextCompat.registerReceiver(this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
         // The system's own (Xiaomi's battery service sends them to whoever listens): exported, as a system broadcast needs.
         runCatching {
@@ -414,6 +429,10 @@ class UsagePollService : Service() {
         }
         // A finger on a back that is not held lit: the stay-on rule looks again (it has stopped looking by then).
         app.bridge.onRearTouch = { stayOn?.sync() }
+        app.bridge.onRestingFaceDownChanged = {
+            stayOn?.sync()
+            table?.restingPostureChanged()
+        }
         app.bridge.onRearWoke = { dev.kb896.aiusage.place.PlaceWatch.look(this, "rear woke") }
         // The fences for notes with a place, set again in every new process; Location switched on and off heard (place/PlaceWatch).
         runCatching { dev.kb896.aiusage.place.PlaceWatch.start(this) }
@@ -533,27 +552,28 @@ class UsagePollService : Service() {
      */
     private val batteryReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
-            intent ?: return
-            val level = intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
-            val scale = intent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
-            if (level < 0) return
-            val status = intent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
-            val charging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING || status == android.os.BatteryManager.BATTERY_STATUS_FULL
-            Graph.of(this@UsagePollService).bridge.setBattery(level * 100 / scale, charging)
-            // What the charger is doing, decided in one place (ChargeState): filling, holding (a limit), full, or out.
-            val percent = level * 100 / scale
+            if (intent?.action != Intent.ACTION_BATTERY_CHANGED) return
+            val battery = ChargeBattery.read(this@UsagePollService)
+            val percent = battery.level
+            val status = battery.status
+            val state = battery.state
             val now = android.os.SystemClock.uptimeMillis()
-            val state = ChargeState.of(intent.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) != 0, status, percent)
-            // And for the charging page, while the charger is in: the level as it is, and what is known past it.
-            if (charging) {
-                // Really filling only while the phone says "charging": full, or held by a charge limit, it stands.
-                chargePrecise.filling(state == ChargeState.Is.FILLING, now)
-                sendChargeDetail(chargePrecise.level(percent, now))
-            } else chargePrecise.reset()
-            // FULL: the page leaves the back; under 100% again with the charger in: it is back.
-            if (config().companion && config().chargeAnim) when (chargePage.next(state, percent, now)) {
+            Graph.of(this@UsagePollService).bridge.setBattery(percent,
+                state == ChargeState.Is.FILLING || state == ChargeState.Is.FULL)
+            sendChargeDetail(battery, preciseReading(battery, now))
+            val plugged = battery.plugged ?: return
+            val wasPlugged = chargeWasPlugged
+            chargeWasPlugged = plugged
+            if (!config().companion || !config().chargeAnim) return
+            if (!plugged && wasPlugged == true) {
+                chargeOut()
+            } else if (plugged && wasPlugged != true && (wasPlugged == false || state != ChargeState.Is.FULL)) {
+                // A sticky plug edge supplies the status. An existing charge found at startup can stay
+                // on the back, but only a new plug-in can wake it or start the short moment at full.
+                chargeIn(battery, mayWake = wasPlugged == false)
+            } else when (chargePage.next(state, percent, now)) {
                 ChargeState.Page.Does.REST -> { Log.i("AiUsageCharge", "charge: full ($percent%, status $status) — the page leaves the back"); chargeRest() }
-                ChargeState.Page.Does.SHOW -> { Log.i("AiUsageCharge", "charge: under 100% again on the charger ($percent%) — the page is back"); chargeIn() }
+                ChargeState.Page.Does.SHOW -> chargeIn(battery)
                 ChargeState.Page.Does.NOTHING -> Unit
             }
         }
@@ -564,13 +584,21 @@ class UsagePollService : Service() {
     private val chargePrecise = ChargePrecise()
     /** Whether the charging page has its place on the back: not at full (ChargeState). */
     private val chargePage = ChargeState.Page()
+    private var chargeWasPlugged: Boolean? = null
     @Volatile private var chargeKind = ""
 
-    private fun sendChargeDetail(d: ChargePrecise.Detail) {
-        val b = android.os.Bundle()
-        b.putInt("level", d.level); b.putFloat("fraction", d.fraction); b.putLong("at", d.at); b.putFloat("rate", d.ratePerSec); b.putString("kind", chargeKind)
-        b.putBoolean("holding", d.holding)
-        Graph.of(this).bridge.chargeDetail(b)
+    private fun preciseReading(battery: ChargeBattery.Snapshot, now: Long = android.os.SystemClock.uptimeMillis()): ChargePrecise.Detail {
+        if (battery.plugged != true) {
+            chargePrecise.reset()
+            return battery.detail()
+        }
+        chargePrecise.filling(battery.state == ChargeState.Is.FILLING, now)
+        return chargePrecise.level(battery.level, now)
+    }
+
+    private fun sendChargeDetail(battery: ChargeBattery.Snapshot, d: ChargePrecise.Detail) {
+        Graph.of(this).bridge.chargeDetail(battery.message(d, chargeKind))
+        if (battery.plugged != true) return
         // Said at each whole percent and at most every half minute between: what the page's hundredths are made of.
         val now = android.os.SystemClock.uptimeMillis()
         if (d.level >= 0 && (d.level != chargeSaidLevel || d.holding != chargeSaidHolding || now - chargeSaidAt >= 30_000L)) {
@@ -584,18 +612,24 @@ class UsagePollService : Service() {
     private var chargeSaidLevel = -1
     private var chargeSaidAt = 0L
 
-    /** Xiaomi's own word on the charger and, on a super fast one, on the hundredths: taken as the system sends it. */
+    /** Xiaomi provides a charger label and hundredths. Neither can supply the whole percent. */
     private val chargeNews = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            val battery = ChargeBattery.read(this@UsagePollService)
             val now = android.os.SystemClock.uptimeMillis()
+            val detail = preciseReading(battery, now)
             when (intent?.action) {
                 ChargePrecise.ACTION_QUICK_CHARGE_TYPE -> {
                     chargeKind = ChargePrecise.kind(intent.getIntExtra(ChargePrecise.EXTRA_QUICK_CHARGE_TYPE, 0), intent.getIntExtra(ChargePrecise.EXTRA_POWER_MAX, 0))
-                    sendChargeDetail(chargePrecise.detail(now))
+                    sendChargeDetail(battery, detail)
                 }
-                ChargePrecise.ACTION_SOC_DECIMAL -> sendChargeDetail(
-                    chargePrecise.xiaomi(intent.getIntExtra(ChargePrecise.EXTRA_SOC_DECIMAL, -1), intent.getIntExtra(ChargePrecise.EXTRA_SOC_DECIMAL_RATE, 0), now),
-                )
+                ChargePrecise.ACTION_SOC_DECIMAL -> {
+                    if (battery.state != ChargeState.Is.FILLING) return
+                    sendChargeDetail(battery, chargePrecise.xiaomi(
+                        intent.getIntExtra(ChargePrecise.EXTRA_SOC_DECIMAL, -1),
+                        intent.getIntExtra(ChargePrecise.EXTRA_SOC_DECIMAL_RATE, 0), now,
+                    ))
+                }
             }
         }
     }
@@ -764,10 +798,8 @@ class UsagePollService : Service() {
                 Intent.ACTION_POWER_CONNECTED, Intent.ACTION_POWER_DISCONNECTED -> table?.sync()
             }
             // Companion mode: the charging animation over Xiaomi's rear (ShellCharge).
-            if (config().companion && intent?.action == Intent.ACTION_POWER_CONNECTED) {
-                chargeIn()
-                return
-            }
+            // The sticky battery broadcast confirms a plug-in and supplies its status, including full.
+            if (config().companion && intent?.action == Intent.ACTION_POWER_CONNECTED) return
             if (config().companion && intent?.action == Intent.ACTION_POWER_DISCONNECTED) {
                 chargeOut()
                 return
@@ -874,41 +906,36 @@ class UsagePollService : Service() {
 
     // -- the charging animation, companion mode ---------------------------------------------
 
+    private var chargeStart: Job? = null
+
     /**
      * The charger went in: the back woken if it is dark and "Also when the back is dark" is on
      * (the bridge's declines still hold: switched off by hand, on its back, in a pocket), then the
-     * animation asked for at the battery's level, and the gravity sensor streamed to its liquid for
-     * its five seconds. The shell waits for the back to light, and drops it if it does not.
+     * animation requested, and the gravity sensor streamed to its liquid for five seconds. The shell
+     * asks for the level when it shows the page.
      */
-    private fun chargeIn() {
+    private fun chargeIn(battery: ChargeBattery.Snapshot, mayWake: Boolean = true) {
         val c = config()
         if (!c.chargeAnim) return
-        val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val level = ChargeLevel.percent(
-            battery?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1,
-            battery?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1) ?: -1,
-        ) ?: return
-        val fast = ChargeLevel.fast(
-            battery?.getIntExtra(ChargeLevel.EXTRA_MAX_CURRENT, 0) ?: 0,
-            battery?.getIntExtra(ChargeLevel.EXTRA_MAX_VOLTAGE, 0) ?: 0,
-        )
-        // AT FULL THERE IS NO CHARGING PAGE (ChargeState): the charger going in at 100% shows nothing.
-        val state = ChargeState.of(true, battery?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1) ?: -1, level)
-        val plug = chargePage.pluggedIn(state)
+        val plug = chargePage.pluggedIn(battery.state)
         if (plug == ChargeState.Page.Plug.NOTHING) return
-        // FULL: its one short moment, and only on a back that is lit already (nothing of ours lights a dark back for it).
-        val moment = plug == ChargeState.Page.Plug.MOMENT
-        if (moment) Log.i("AiUsageCharge", "charge: the charger is in at $level%, full — the page's short moment, if the back is lit")
         val bridge = Graph.of(this).bridge
-        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            // Bound first (a new app process, a charger as the phone starts): a wake with no
-            // shell to do it lights nothing.
-            bridge.awaitService(CHARGE_BIND_MS)
-            if (c.chargeWhenDark && !moment) bridge.wake("the charger")
-            if (bridge.showCharge(if (moment) 100 else level, fast)) {
+        chargeStart?.cancel()
+        chargeStart = scope.launch(Dispatchers.Main.immediate) {
+            val bound = withContext(Dispatchers.IO) { bridge.awaitService(CHARGE_BIND_MS) != null }
+            if (!bound) return@launch
+            val beforeWake = ChargeBattery.read(this@UsagePollService)
+            if (beforeWake.plugged != true) return@launch
+            if (mayWake && c.chargeWhenDark && beforeWake.state != ChargeState.Is.FULL) {
+                withContext(Dispatchers.IO) { bridge.wake("the charger") }
+            }
+            // The bind or wake may have taken a moment. Pass only current charger state, never a figure.
+            val current = ChargeBattery.read(this@UsagePollService)
+            if (current.plugged != true) return@launch
+            val full = current.state == ChargeState.Is.FULL
+            if (full && !mayWake) return@launch
+            if (bridge.showCharge(full, current.fast)) {
                 tiltFor(ChargeStyle.FULL.totalMs.toLong())
-                // What is known past the whole percent, and the charger's kind, once the page is up.
-                sendChargeDetail(chargePrecise.level(level, android.os.SystemClock.uptimeMillis()))
             }
         }
     }
@@ -916,14 +943,18 @@ class UsagePollService : Service() {
     /** Full with the charger in: the page leaves the back (it is not drained: nothing came out). */
     private fun chargeRest() {
         stopTilt()
-        scope.launch(kotlinx.coroutines.Dispatchers.IO) { Graph.of(this@UsagePollService).bridge.chargeFull() }
+        Graph.of(this).bridge.chargeFull()
     }
 
     /** The charger came out: the animation, if it is up, drains away. */
     private fun chargeOut() {
+        chargeWasPlugged = false
+        chargeStart?.cancel()
         chargePage.out()
+        chargePrecise.reset()
+        chargeKind = ""
         stopTilt()
-        scope.launch(kotlinx.coroutines.Dispatchers.IO) { Graph.of(this@UsagePollService).bridge.endCharge() }
+        Graph.of(this).bridge.endCharge()
     }
 
     private var tiltListener: android.hardware.SensorEventListener? = null
@@ -1222,6 +1253,7 @@ class UsagePollService : Service() {
 
     override fun onDestroy() {
         Graph.of(this).bridge.onConnected = {}
+        Graph.of(this).bridge.onRestingFaceDownChanged = {}
         HealthCheck.stop(this)
         stopTilt()
         stopConfigWatch?.invoke()
@@ -1242,6 +1274,7 @@ class UsagePollService : Service() {
         earbuds = null
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
         Graph.of(this).bridge.onRearWoke = { }
+        Graph.of(this).bridge.chargeDetailFor = null
         runCatching { dev.kb896.aiusage.place.PlaceWatch.stop(this) }
         try { unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(chargeNews) } catch (_: Exception) {}

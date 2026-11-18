@@ -14,10 +14,11 @@ from its release 1.2.1. Not affiliated with Xiaomi.
 
 ## Contents
 
-- [Before you start: Shizuku](#before-you-start-shizuku)
+- [Set up Shizuku](#set-up-shizuku)
 - [Features](#features)
 - [What it needs](#what-it-needs)
 - [Install](#install)
+- [Updating Chicken Rear](#updating-chicken-rear)
 - [Circle to Search](#circle-to-search)
 - [After a reboot](#after-a-reboot)
 - [Gestures on the back](#gestures-on-the-back)
@@ -27,23 +28,15 @@ from its release 1.2.1. Not affiliated with Xiaomi.
 - [Building from source](#building-from-source)
 - [Fork, licence and credits](#fork-licence-and-credits)
 
-## Before you start: Shizuku
+## Set up Shizuku
 
 Shizuku lets Chicken Rear start the Android shell process that draws on the rear display.
-You can set it up over Wi-Fi with no computer.
+Chicken Rear recommends the **thedjchi fork of Shizuku**. It can start at boot once Wi-Fi connects, and its Watchdog can restart Shizuku if it stops unexpectedly.
 
-1. Install [Shizuku](https://github.com/RikkaApps/Shizuku/releases) and open it.
-2. On HyperOS, go to **Settings → About phone** and tap **OS version** seven times.
-   Under **Settings → Additional settings → Developer options**, enable **USB debugging**,
-   **USB debugging (Security settings)** if listed, and **Wireless debugging**. Connect to Wi-Fi.
-3. In Shizuku, under **Start via Wireless debugging**, tap **Pairing**. In Android's
-   **Wireless debugging** settings, tap **Pair device with pairing code** and enter the six-digit
-   code in Shizuku's notification. Return to Shizuku and tap **Start**.
-4. Once Chicken Rear is installed, open it. In the strip under the preview, tap **Fix ›**,
-   then **Continue**. Choose **Allow all the time** in the Shizuku permission dialog.
-
-**Start Shizuku again after every reboot.** Pairing is normally remembered. See the
-[Shizuku setup guide](https://shizuku.rikka.app/guide/setup/) for troubleshooting.
+1. Download and install the latest **stable APK** from the [Shizuku fork’s latest stable release](https://github.com/thedjchi/Shizuku/releases/latest). If you already use the original Shizuku, remove its wireless debugging pairing and uninstall it before installing the fork. [Fork installation guide](https://github.com/thedjchi/Shizuku/wiki/Setup#installing)
+2. Connect to Wi-Fi. On HyperOS, open **Settings → About phone** and tap **OS version** seven times. Under **Settings → Additional settings → Developer options**, enable **USB debugging**, **Wireless debugging**, and **USB debugging (Security settings)** if listed. Open Shizuku and tap **Pair**. In **Wireless debugging**, choose **Pair device with pairing code** and enter the code in Shizuku’s pairing notification. [Pairing guide](https://github.com/thedjchi/Shizuku/wiki/Setup#pairing)
+3. Return to Shizuku and tap **Start** under **Wireless debugging**. Leave **USB debugging** on while Shizuku is running. Open Chicken Rear and approve its Shizuku request. [Wireless debugging and app authorization](https://github.com/thedjchi/Shizuku/wiki/Setup#wireless-debugging)
+4. In **Shizuku → Settings → Behavior**, turn on **Start on boot**. If Shizuku asks, tap **Fix** and allow it to run without battery optimization. On an unrooted phone it waits for Wi-Fi after each reboot and may take a few minutes. Enable **Watchdog** there if you also want recovery after an unexpected stop. Enable **TCP mode** if you need to restart Shizuku after leaving Wi-Fi. The first start after each reboot still needs Wi-Fi. [Fork feature guide](https://github.com/thedjchi/Shizuku/wiki/Features)
 
 ## Features
 
@@ -56,12 +49,12 @@ text is centred in the part you can see.
 | **Music** | While anything plays: the cover, title, artist and previous / play-pause / next, on a ground in the cover's colours with slow glows. A wide layout for video thumbnails. Optionally the glows rise with the sound ("Follows the music"). |
 | **Calls** | Ringing: decline and answer. In the call: speaker and end. Works with the phone's own dialer; other apps' calls use their notification buttons. |
 | **Timers** | The Xiaomi Clock's timer with the time left, water that sinks as it runs, pause / continue, and an X that cancels it. |
-| **Charging** | The battery level as a fluid that fills the panel, coloured by level, with the percent. Stays while the charger is in; at 100% it shows one short moment and leaves. |
+| **Charging** | The battery level as a fluid that fills the panel, coloured by level, with the percent. Each show reads the current battery level. Swipe it away to slide it right, and swipe right to left from the face to bring it back while plugged in. At 100% it shows briefly. |
 | **Notifications** | Choose a full-page message or a message island. **Island · Tint** colours the live face behind the message; **Island · Sweep** dims the face and sweeps a band of light behind the text. Messages can show the app’s icon, sender and text. Pull down from the right half of the top edge for the waiting ones as a pile of pages; swipe a page sideways to dismiss or snooze it on the phone. |
 | **Pinned notes** | "Pin to back" from any text selection or share sheet. Swipe up on the face for the notes, sideways between them, the bin removes one. Pin text or an image, reorder notes, or tie a note to a place so it appears when you arrive and leaves the rear display when you leave. The pin animation is Xiaomi's own or the app's. |
 | **AI usage** | Claude and ChatGPT Codex usage limits have been tested with the real services. Weekly limits show by default, with optional five-hour limits. Claude has its animated mascot, and ChatGPT uses the installed app’s icon or its optional Dots animation. |
 | **Always-on rules** | The back is lit while the phone is in use or lies face down, and off in a pocket, lying on its back, or after you switch it off by hand. At night (22:00 to 07:00 or Do Not Disturb) with the front off it goes dark after two minutes so the phone can sleep. Optional home detection by Wi-Fi. |
-| **Brightness** | Follows the room's light through the rear light sensor, dimmer than Xiaomi's own floor in the dark, with one slider for the overall level. A double tap dims, a tap brightens. Lying face down, the back is bright and the front is dimmed. |
+| **Brightness** | Follows the room's light through the rear light sensor, dimmer than Xiaomi's own floor in the dark, with one slider for the overall level. A double tap dims, a tap brightens. The back brightens and the front dims only once the phone rests face down. Lifting it ends that mode. |
 | **Apps and camera** | Chosen apps can be opened on the back. A swipe opens the rear camera. In **Settings → Camera**, enable **Our camera on the back** and grant camera access for a rear viewfinder, photo and video, and Portrait where supported. |
 | **Navigation** | While a Google Maps route is active, Chicken Rear reads its navigation notification to show the next turn, distance and route progress. Other apps with compatible navigation notifications can use the same page. |
 | **Circle to Search** | Hold the front navigation bar, then select text or circle part of the screen to search. The overlay can also translate text in place. Off by default. |
@@ -71,7 +64,7 @@ text is centred in the part you can see.
 
 - **A Xiaomi phone with a rear display.** The layout is designed around the 976×596 rear panel
   of the Xiaomi 17 Pro Max.
-- **Shizuku running**, with Chicken Rear allowed. See [Before you start](#before-you-start-shizuku).
+- **Shizuku running**, with Chicken Rear allowed. See [Set up Shizuku](#set-up-shizuku).
 - **Xiaomi's rear-screen app** (`com.xiaomi.subscreencenter`, part of the ROM) installed and
   running, as it is out of the box. Chicken Rear covers it. The call, timer and music pages, the
   timer's water and Xiaomi's pin animation use pictures that are read from that app on your phone.
@@ -81,7 +74,7 @@ text is centred in the part you can see.
 
 ## Install
 
-1. **Set up Shizuku** using the [steps above](#before-you-start-shizuku).
+1. **Set up Shizuku** using the [steps above](#set-up-shizuku).
 2. **Install Chicken Rear.** Download `chicken-rear-<version>.apk` from [Releases](../../releases)
    and open it. Allow your browser or file manager to install apps when prompted.
 3. **Open Chicken Rear** and review the privacy notice. The four-step setup guide covers Shizuku,
@@ -140,6 +133,14 @@ under Animations, and a press and hold on the back goes to the next one. A file 
 from the phone to the panel's shape, but saves it without `.loop` in its name, so it is not offered
 as a face; use the `adb push` above.
 
+## Updating Chicken Rear
+
+Release builds check this project's public [GitHub releases](../../releases) at most once a day
+automatically. You can also use **Advanced → Check for updates**. Choose **Update** to download the
+APK and its published `SHA256SUMS`. Chicken Rear checks the SHA-256, package, version and signing
+certificate against the expected release and the installed app before opening Android’s installer.
+Android asks you to approve the installation. It may first ask you to allow installs from Chicken Rear.
+
 ## Circle to Search
 
 Go to **Settings → Idle → Circle to Search**. Enable **Pin to back: glass** in Android's
@@ -147,19 +148,35 @@ Accessibility settings. The same service handles the glass pin animation and scr
 search. The navigation-bar trigger runs in the Shizuku shell and requires the HyperOS launcher.
 The option stays off while the standalone Circle Search app is installed.
 
-Hold the front navigation bar to open the overlay. Select text to search Google or circle an image
-to search Google Lens. You can also copy or pin text, or translate it on the screen, including while
-you scroll. The APK bundles the text recognition models. On-device translation is powered by Google
-Translate through ML Kit and can download language models on first use.
-[Google Translation documentation](https://cloud.google.com/translate)
+Hold the front navigation bar to select text for Google Search or circle an image for Google Lens.
+You can also copy or pin text. In-place translation works by paragraph and follows the text as you
+scroll, using the original layout, text size, colour and emphasis where possible. Translation uses
+[Google Translate through ML Kit](https://developers.google.com/ml-kit/language/translation).
+
+PaddleOCR can read English and other Latin-script languages, Chinese, Japanese, Korean, Cyrillic
+(including East Slavic), Arabic script, Devanagari, Greek, Thai, Tamil, Telugu and Kannada. Translation
+is available for the languages supported by ML Kit.
+
+- **Only my languages** downloads the packs you use. The shared Fast text detector is about **4.8 MB**.
+  Each script pack is about **7.8–18.2 MB**, and each needed offline translation model is about
+  **30 MB**. The app shows the size before you approve an OCR download.
+- **Everything** downloads all 14 Fast OCR files and 58 translation models over Wi-Fi, about
+  **1.87 GB** in total, including **133 MB** for OCR. The app checks storage before starting.
+- **Model → Fast** is the default. **Accurate** uses a larger text detector and a larger Chinese
+  and Japanese recognizer. It requires a separate download of about **173 MB**.
+
+OCR packs come from PaddlePaddle’s official [Hugging Face repositories](https://huggingface.co/PaddlePaddle)
+and [PaddleOCR model distribution](https://github.com/PaddlePaddle/PaddleOCR). The app verifies pinned
+SHA-256 hashes and can resume interrupted transfers. Translation packs come from Google. You can
+remove downloaded packs in Settings. Both recognition and translation run on the phone after
+download. Google receives text you choose to search or the image crop you send to Lens. See
+[Privacy](#privacy) for details.
 
 ## After a reboot
 
-After every reboot:
-
-1. Connect to Wi-Fi and make sure **Wireless debugging** is enabled in Developer options.
-2. Open Shizuku and press **Start**. Use the pairing steps above if it asks for a new pairing.
-3. Open Chicken Rear once.
+With **Start on boot** enabled, the recommended Shizuku fork starts after Wi-Fi connects. If it
+doesn't start, check Wireless debugging and tap **Start** in Shizuku. Pair again if prompted and
+open Chicken Rear.
 
 ## Gestures on the back
 
@@ -191,7 +208,7 @@ until something new happens; it is one swipe right of the face meanwhile.
 
 ## Known limitations
 
-- After a reboot nothing shows until Shizuku is started again.
+- After a reboot the rear display needs Shizuku to be running. On an unrooted phone, start on boot waits for Wi-Fi.
 - HyperOS freezes background apps when a heavy app such as the Camera runs. With battery
   restrictions off and Autostart on the app is thawed again; while frozen, the back keeps its cover
   but does not update.
@@ -203,7 +220,7 @@ until something new happens; it is one swipe right of the face meanwhile.
 - The usage pages sign in with the public OAuth clients of Claude Code and of OpenAI's Codex CLI.
   Using a token outside the official client may be against the provider's terms; that risk is
   yours. Billing figures are not shown because the usage response has none.
-- English only.
+- The app interface is in English. Circle to Search reads and translates supported languages.
 
 ## Privacy
 
@@ -219,8 +236,11 @@ Chicken Rear has no account, server or analytics of its own. What leaves the pho
   the map centre rounded to a tenth of a degree. OpenFreeMap serves the map tiles.
 - **Circle to Search (optional)**: text queries go to Google Search and selected image crops go to
   Google Lens. Voice and song search open the Google app. Text recognition and translation process
-  screen content on the phone. ML Kit can download translation models and Google may collect SDK
+  screen content on the phone. OCR model downloads contact PaddlePaddle’s official Hugging Face or
+  Baidu Object Storage hosts. Translation model downloads contact Google, which may collect ML Kit
   diagnostics. [ML Kit terms and privacy](https://developers.google.com/ml-kit/terms)
+- **Updates**: release builds request public release metadata from GitHub. If you ask to update,
+  the app downloads the published checksum file and APK from GitHub’s release hosts.
 - **Weather (optional)**: with "Lightning when it storms" on, the phone's approximate position,
   rounded to two decimals (about a kilometre), to [Open-Meteo](https://open-meteo.com/) every five
   minutes while the back is lit.
@@ -241,8 +261,7 @@ next image search clears previous crops. "Follows the music" measures the level 
 played; nothing is recorded.
 
 The app shows the same in its privacy note on first start, and its "Privacy policy" row (under
-Advanced) links to this section. While this repository is private, that link opens only for people
-who have access to it.
+Advanced) links to this section.
 
 ## Building from source
 

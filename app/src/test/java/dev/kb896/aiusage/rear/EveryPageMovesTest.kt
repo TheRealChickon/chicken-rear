@@ -129,7 +129,7 @@ class EveryPageMovesTest {
         assertTrue("the fade is kept for the small picture over an app only", away.indexOf("cutAt =") in away.indexOf("if (compact)")..away.indexOf("} else {"))
         assertTrue(charge.contains("slide.x(") && charge.contains("RearShape.place(tx, sc, rear, x, y)"))
         // It follows a finger out, as the others do.
-        assertTrue(service.contains("charge.peek(it, edge)") && service.contains("charge.unpeek()"))
+        assertTrue(service.contains("charge.peek(it)") && service.contains("charge.unpeek()"))
         // The usage page and the notes: ShellPage places by position, never by alpha.
         val page = src("ShellPage.kt")
         assertTrue(page.contains("RearShape.place(it, sc") && !page.contains("setAlpha("))
