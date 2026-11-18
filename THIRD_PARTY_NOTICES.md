@@ -120,6 +120,7 @@ Apache License 2.0 and the two fonts' SIL Open Font License texts.
 
 ## README preview
 
+- The README preview uses an excerpt of “Silent Dance Floor” by Umplix, from the [Dance Music Pack on OpenGameArt](https://opengameart.org/content/dance-music-pack). The author released the track under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/).
 - The music cover shown in the README preview is [The Blue Marble](https://commons.wikimedia.org/wiki/File:The_Blue_Marble.jpg), photographed by the NASA Apollo 17 crew and cropped square for the demo. Wikimedia Commons identifies it as public domain in the United States under PD-USGov-NASA. The cover appears in the preview only.
 
 ## Not in this repository
